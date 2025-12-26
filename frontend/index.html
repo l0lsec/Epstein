@@ -1,0 +1,430 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Epstein Library Files Archive | Public Document Search</title>
+    <meta name="description" content="Search and analyze the Epstein Files Library document archive including court records, flight logs, DOJ disclosures, and more.">
+    
+    <!-- Canonical URL -->
+    <link rel="canonical" href="https://epsteinfta.com/">
+    
+    <!-- Open Graph / Facebook -->
+    <meta property="og:title" content="Epstein Files Library Archive | Public Document Search">
+    <meta property="og:description" content="Search and analyze the Epstein Files Library document archive including court records, flight logs, DOJ disclosures, and more.">
+    <meta property="og:type" content="website">
+    <meta property="og:url" content="https://epsteinfta.com/">
+    <meta property="og:site_name" content="Epstein Library Files Archive">
+    
+    <!-- Twitter Card -->
+    <meta name="twitter:card" content="summary">
+    <meta name="twitter:title" content="Epstein Files Library Archive | Public Document Search">
+    <meta name="twitter:description" content="Search and analyze the Epstein Files Library document archive including court records, flight logs, DOJ disclosures, and more.">
+    
+    <!-- Additional SEO -->
+    <meta name="robots" content="index, follow">
+    <meta name="theme-color" content="#1a1a2e">
+    <meta name="author" content="Epstein Files Library Archive">
+    
+    <!-- Favicon -->
+    <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+    
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Crimson+Pro:wght@400;500;600&family=JetBrains+Mono:wght@400;500&family=Source+Sans+3:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/styles.css?v=5">
+    
+    <!-- Structured Data (JSON-LD) -->
+    <script type="application/ld+json">
+    {
+        "@context": "https://schema.org",
+        "@type": "WebSite",
+        "name": "Epstein Library Files Archive",
+        "url": "https://epsteinfta.com",
+        "description": "Public archive of Epstein documents including court records, DOJ disclosures, flight logs, and FOIA files",
+        "potentialAction": {
+            "@type": "SearchAction",
+            "target": {
+                "@type": "EntryPoint",
+                "urlTemplate": "https://epsteinfta.com/?q={search_term_string}"
+            },
+            "query-input": "required name=search_term_string"
+        }
+    }
+    </script>
+</head>
+<body>
+    <div class="noise-overlay"></div>
+    
+    <header class="header">
+        <div class="header-content">
+            <div class="logo">
+                <div class="logo-icon">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                        <path d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/>
+                    </svg>
+                </div>
+                <div class="logo-text">
+                    <span class="logo-title">EPSTEIN FILES</span>
+                    <span class="logo-subtitle">PUBLIC ARCHIVE</span>
+                </div>
+            </div>
+            <nav class="nav">
+                <button class="nav-btn active" data-view="search">Search</button>
+                <button class="nav-btn" data-view="browse">Browse</button>
+                <button class="nav-btn" data-view="ask">Ask AI</button>
+                <button class="nav-btn" data-view="about">About</button>
+            </nav>
+        </div>
+    </header>
+
+    <div class="donation-banner">
+        <span class="banner-icon">💛</span>
+        <span class="banner-text">Support this project! Your donation helps keep this archive accessible to everyone.</span>
+        <a href="https://www.paypal.com/donate/?business=KRYTAPVDR46SY&no_recurring=0&item_name=Your+support+helps+cover+server+costs+and+keeps+this+information+freely+accessible+to+researchers%2C+journalists%2C+and+the+public.&currency_code=USD" class="banner-btn" target="_blank" rel="noopener noreferrer">Donate Now</a>
+    </div>
+
+    <main class="main">
+        <!-- Search View -->
+        <section id="search-view" class="view active">
+            <div class="hero">
+                <h1 class="hero-title">Search Epstein Library Files</h1>
+                <p class="hero-subtitle">The DOJ released the Epstein Library files buried under links within links, with a search bar that had "selective amnesia" for certain keywords. Most documents are redacted far beyond what's needed to protect victim identities...some are just black rectangles with a file name. Search documents, view the PDFs, listen to the audio files (conveniently cut off at key moments or reduced to tiny snippets), watch the videos all in one place. If the DOJ wanted to make this accessible, they could've. This was built in less than a week with a bunch of Reeses.</p>
+                
+                <div id="stats-display" class="stats-container">
+                    <h3 class="stats-title">Archive Statistics</h3>
+                    <div id="stats-grid" class="stats-grid"></div>
+                </div>
+                
+                <div class="search-container">
+                    <div class="search-box">
+                        <svg class="search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <circle cx="11" cy="11" r="8"/>
+                            <path d="M21 21l-4.35-4.35"/>
+                        </svg>
+                        <input type="text" id="search-input" placeholder="Search names, dates, locations, or any keyword..." autocomplete="off">
+                        <button id="search-btn" class="search-btn">
+                            <span>Search</span>
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M5 12h14m-7-7l7 7-7 7"/>
+                            </svg>
+                        </button>
+                    </div>
+                    
+                    <div class="search-options">
+                        <div class="option-group">
+                            <label>Search Type:</label>
+                            <select id="search-type">
+                                <option value="hybrid">Hybrid (Recommended)</option>
+                                <option value="fulltext">Full Text</option>
+                                <option value="semantic">Semantic AI</option>
+                            </select>
+                        </div>
+                        <div class="option-group">
+                            <label>Category:</label>
+                            <select id="search-category">
+                                <option value="">All Categories</option>
+                            </select>
+                        </div>
+                        <div class="option-group" id="search-subcategory-group" style="display: none;">
+                            <label>Dataset/Section:</label>
+                            <select id="search-subcategory">
+                                <option value="">All Sections</option>
+                            </select>
+                        </div>
+                        <div class="option-group">
+                            <label>File Type:</label>
+                            <select id="search-file-type">
+                                <option value="">All Files</option>
+                                <option value="pdf">📄 Documents (PDF)</option>
+                                <option value="audio">🎵 Audio</option>
+                                <option value="video">🎬 Video</option>
+                            </select>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+            <div id="search-results" class="results-container hidden">
+                <div class="results-header">
+                    <h2 class="results-title">Results</h2>
+                    <span id="results-count" class="results-count"></span>
+                </div>
+                <div id="results-list" class="results-list"></div>
+            </div>
+        </section>
+
+        <!-- Browse View -->
+        <section id="browse-view" class="view">
+            <div class="browse-header">
+                <h1>Browse Documents</h1>
+                <p>Explore the complete archive by category</p>
+            </div>
+            
+            <div class="browse-filters">
+                <div class="filename-search">
+                    <input type="text" id="browse-filename" placeholder="🔍 Search by filename..." />
+                </div>
+                <select id="browse-category">
+                    <option value="">All Categories</option>
+                </select>
+                <select id="browse-subcategory" style="display: none;">
+                    <option value="">All Sections</option>
+                </select>
+                <select id="browse-file-type">
+                    <option value="">All File Types</option>
+                    <option value="pdf">📄 Documents (PDF)</option>
+                    <option value="audio">🎵 Audio</option>
+                    <option value="video">🎬 Video</option>
+                </select>
+                <div class="pagination-info">
+                    <span id="browse-count"></span>
+                </div>
+            </div>
+            
+            <div id="documents-grid" class="documents-grid"></div>
+            
+            <div class="pagination">
+                <button id="prev-page" class="page-btn" disabled>← Previous</button>
+                <span id="page-info"></span>
+                <button id="next-page" class="page-btn">Next →</button>
+            </div>
+        </section>
+
+        <!-- Ask AI View -->
+        <section id="ask-view" class="view">
+            <div class="ask-header">
+                <h1>Ask the AI Assistant</h1>
+                <p>Get intelligent answers powered by document analysis</p>
+                <div id="llm-status" class="llm-status"></div>
+            </div>
+            
+            <div class="ai-disclaimer">
+                <span class="disclaimer-icon">⚠️</span>
+                <span class="disclaimer-text"><strong>Disclaimer:</strong> AI responses may be inaccurate or incomplete. Always verify information by checking the original source documents.</span>
+            </div>
+            
+            <div class="ask-container">
+                <div class="ask-input-container">
+                    <textarea id="ask-input" placeholder="Ask a question about the documents... e.g., 'Who are the individuals mentioned in the flight logs?' or 'What did the DOJ report conclude?'"></textarea>
+                    <button id="ask-btn" class="ask-btn">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z"/>
+                        </svg>
+                        Ask Question
+                    </button>
+                </div>
+                
+                <div id="ask-response" class="ask-response hidden">
+                    <div class="response-content">
+                        <h3>Answer</h3>
+                        <div id="answer-text"></div>
+                    </div>
+                    <div class="response-sources">
+                        <h4>Sources</h4>
+                        <ul id="sources-list"></ul>
+                    </div>
+                </div>
+                
+                <div class="example-questions">
+                    <h4>Example Questions</h4>
+                    <div class="example-grid">
+                        <button class="example-btn">Who appears most frequently in the flight logs?</button>
+                        <button class="example-btn">What were the findings of the OIG report?</button>
+                        <button class="example-btn">What properties are mentioned in the documents?</button>
+                        <button class="example-btn">What dates are significant in the court records?</button>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- About View -->
+        <section id="about-view" class="view">
+            <div class="about-content">
+                <h1>About This Archive</h1>
+                
+                <div class="about-section">
+                    <h2>Purpose</h2>
+                    <p>This platform provides public access to Epstein Library documents related to the Jeffrey Epstein case, including court records, DOJ disclosures, flight logs, and other official documents. Our goal is to make this information searchable and accessible for researchers, journalists, and the public for easier analysis and research that will lead to more revelations and justice.</p>
+                </div>
+                
+                <div class="about-section">
+                    <h2>Document Sources</h2>
+                    <p>All documents in this archive were downloaded directly from the <strong>U.S. Department of Justice website</strong>. These materials were publicly released as part of official disclosures related to the Jeffrey Epstein case.</p>
+                    
+                    <div class="redaction-notice">
+                        <span class="notice-icon">⚠️</span>
+                        <div class="notice-content">
+                            <strong>Important Note on Redactions:</strong>
+                            <p>The vast majority of documents in this archive are heavily redacted, with large portions of text blacked out. This makes many documents difficult or impossible to comprehend in their entirety. The redactions were applied by government agencies prior to public release. We present the documents exactly as they were released by the DOJ.</p>
+                        </div>
+                    </div>
+                    
+                    <p class="source-note">The archive includes court records, evidence files, correspondence, flight logs, contact books, OIG reports, and other official documents from the Epstein Library.</p>
+                </div>
+                
+                <div class="about-section">
+                    <h2>Technology</h2>
+                    <p>This platform uses advanced search technology including:</p>
+                    <ul>
+                        <li>Full-text search across all extracted document content</li>
+                        <li>Semantic AI search for finding conceptually related documents</li>
+                        <li>LLM-powered Q&A for intelligent document analysis</li>
+                    </ul>
+                </div>
+                
+                <div class="about-section disclaimer">
+                    <h2>Disclaimer</h2>
+                    <p>This archive contains documents from public sources. Some documents may contain redactions. The information is provided for research and transparency purposes. We make no claims about the completeness or accuracy of OCR-extracted text.</p>
+                </div>
+            </div>
+        </section>
+
+        <!-- Document Modal -->
+        <div id="document-modal" class="modal hidden">
+            <div class="modal-backdrop"></div>
+            <div class="modal-content">
+                <button class="modal-close">&times;</button>
+                <div class="modal-header">
+                    <h2 id="modal-title"></h2>
+                    <div id="modal-meta" class="modal-meta"></div>
+                </div>
+                <div class="modal-body">
+                    <div class="modal-tabs">
+                        <button class="modal-tab active" data-tab="document">Document</button>
+                        <button class="modal-tab" data-tab="content">Text Content</button>
+                        <button class="modal-tab" data-tab="summary">AI Summary</button>
+                        
+                        <div class="share-dropdown">
+                            <button class="share-btn" id="share-btn" aria-label="Share document">
+                                <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2">
+                                    <circle cx="18" cy="5" r="3"/>
+                                    <circle cx="6" cy="12" r="3"/>
+                                    <circle cx="18" cy="19" r="3"/>
+                                    <path d="M8.59 13.51l6.83 3.98M15.41 6.51l-6.82 3.98"/>
+                                </svg>
+                                Share
+                            </button>
+                            <div class="share-menu hidden" id="share-menu">
+                                <button class="share-option" data-platform="facebook">
+                                    <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor">
+                                        <path d="M24 12.073c0-6.627-5.373-12-12-12s-12 5.373-12 12c0 5.99 4.388 10.954 10.125 11.854v-8.385H7.078v-3.47h3.047V9.43c0-3.007 1.792-4.669 4.533-4.669 1.312 0 2.686.235 2.686.235v2.953H15.83c-1.491 0-1.956.925-1.956 1.874v2.25h3.328l-.532 3.47h-2.796v8.385C19.612 23.027 24 18.062 24 12.073z"/>
+                                    </svg>
+                                    Facebook
+                                </button>
+                                <button class="share-option" data-platform="twitter">
+                                    <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor">
+                                        <path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z"/>
+                                    </svg>
+                                    X (Twitter)
+                                </button>
+                                <button class="share-option" data-platform="linkedin">
+                                    <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor">
+                                        <path d="M20.447 20.452h-3.554v-5.569c0-1.328-.027-3.037-1.852-3.037-1.853 0-2.136 1.445-2.136 2.939v5.667H9.351V9h3.414v1.561h.046c.477-.9 1.637-1.85 3.37-1.85 3.601 0 4.267 2.37 4.267 5.455v6.286zM5.337 7.433c-1.144 0-2.063-.926-2.063-2.065 0-1.138.92-2.063 2.063-2.063 1.14 0 2.064.925 2.064 2.063 0 1.139-.925 2.065-2.064 2.065zm1.782 13.019H3.555V9h3.564v11.452zM22.225 0H1.771C.792 0 0 .774 0 1.729v20.542C0 23.227.792 24 1.771 24h20.451C23.2 24 24 23.227 24 22.271V1.729C24 .774 23.2 0 22.222 0h.003z"/>
+                                    </svg>
+                                    LinkedIn
+                                </button>
+                                <button class="share-option" data-platform="copy">
+                                    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2">
+                                        <rect x="9" y="9" width="13" height="13" rx="2" ry="2"/>
+                                        <path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/>
+                                    </svg>
+                                    Copy Link
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                    <div id="modal-document-tab" class="tab-content active">
+                        <div id="modal-pdf-viewer" class="pdf-viewer">
+                            <iframe id="pdf-iframe" src="" frameborder="0"></iframe>
+                            <div id="media-viewer" class="media-viewer hidden"></div>
+                            <div id="pdf-fallback" class="pdf-fallback hidden">
+                                <p>📄 Preview not available</p>
+                                <p class="pdf-fallback-hint">View the text content tab to see the extracted content</p>
+                            </div>
+                        </div>
+                    </div>
+                    <div id="modal-content-tab" class="tab-content">
+                        <div id="modal-text" class="modal-text"></div>
+                    </div>
+                    <div id="modal-summary-tab" class="tab-content">
+                        <div id="modal-summary" class="modal-summary">
+                            <p class="loading">Generating summary...</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </main>
+
+    <footer class="footer">
+        <div class="footer-sections">
+            <div id="donate-section" class="donate-section">
+                <div class="donate-content">
+                    <h3>Support This Project</h3>
+                    <p>This archive is maintained through public donations. Your support helps cover server costs and keeps this information freely accessible.</p>
+                    <div class="donate-buttons">
+                        <form action="https://www.paypal.com/donate" method="post" target="_blank">
+                            <input type="hidden" name="business" value="KRYTAPVDR46SY" />
+                            <input type="hidden" name="no_recurring" value="0" />
+                            <input type="hidden" name="item_name" value="Your support helps cover server costs and keeps this information freely accessible to researchers, journalists, and the public." />
+                            <input type="hidden" name="currency_code" value="USD" />
+                            <button type="submit" class="donate-btn paypal-btn">
+                                <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor">
+                                    <path d="M7.076 21.337H2.47a.641.641 0 0 1-.633-.74L4.944 3.384a.769.769 0 0 1 .759-.645h6.393c2.117 0 3.59.478 4.375 1.42.737.885.987 2.168.74 3.803-.302 2.008-.987 3.57-2.041 4.65-1.106 1.133-2.686 1.708-4.7 1.708h-2.32a.769.769 0 0 0-.76.646l-.74 4.742a.641.641 0 0 1-.633.629h-.94z"/>
+                                </svg>
+                                Donate with PayPal
+                            </button>
+                        </form>
+                    </div>
+                    <p class="donate-note">Thank you for supporting transparency.</p>
+                </div>
+            </div>
+            
+            <div id="feedback-section" class="feedback-section">
+                <div class="feedback-content">
+                    <h3>Send Feedback</h3>
+                    <p>Found an issue? Have a suggestion? We'd love to hear from you.</p>
+                    <form id="feedback-form" class="feedback-form">
+                        <!-- Honeypot field - hidden from humans, bots will fill it -->
+                        <div class="form-group" style="position:absolute;left:-9999px;opacity:0;height:0;overflow:hidden;" aria-hidden="true">
+                            <input type="text" id="feedback-website" name="website" tabindex="-1" autocomplete="off">
+                        </div>
+                        <input type="hidden" id="feedback-timestamp" value="">
+                        
+                        <div class="form-group">
+                            <select id="feedback-type" required>
+                                <option value="">Select feedback type...</option>
+                                <option value="bug">🐛 Bug Report</option>
+                                <option value="feature">💡 Feature Request</option>
+                                <option value="content">📄 Content Issue</option>
+                                <option value="other">💬 Other Feedback</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <input type="email" id="feedback-email" placeholder="Your email (optional)">
+                        </div>
+                        <div class="form-group">
+                            <textarea id="feedback-message" placeholder="Your message..." rows="3" required></textarea>
+                        </div>
+                        <button type="button" class="feedback-btn" onclick="submitFeedback()">
+                            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z"/>
+                            </svg>
+                            Submit Feedback
+                        </button>
+                    </form>
+                    <div id="feedback-status" class="feedback-status hidden"></div>
+                </div>
+            </div>
+        </div>
+        <div class="footer-bottom">
+            <p>Epstein Files Public Archive</p>
+        </div>
+    </footer>
+
+    <script src="https://www.google.com/recaptcha/api.js?render=6Lf9EDYsAAAAANDlA_xYFIM7Ylccgmc24LhZgDIr"></script>
+    <script src="/static/app.js?v=13"></script>
+</body>
+</html>
+

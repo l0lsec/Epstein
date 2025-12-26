@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" fill="none">
+  <!-- Background -->
+  <rect width="32" height="32" rx="6" fill="#1a1a2e"/>
+  
+  <!-- Document icon -->
+  <path d="M10 6h7.172a1 1 0 01.707.293l5.828 5.828a1 1 0 01.293.707V24a2 2 0 01-2 2H10a2 2 0 01-2-2V8a2 2 0 012-2z" 
+        fill="#2a2a4a" stroke="#c9a227" stroke-width="1.5"/>
+  
+  <!-- Folded corner -->
+  <path d="M17 6v5a1 1 0 001 1h5" stroke="#c9a227" stroke-width="1.5" stroke-linecap="round"/>
+  
+  <!-- Text lines -->
+  <path d="M11 16h10M11 20h10" stroke="#c9a227" stroke-width="1.5" stroke-linecap="round"/>
+</svg>
+
