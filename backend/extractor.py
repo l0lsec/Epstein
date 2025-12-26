@@ -4,15 +4,51 @@ Extracts text from PDFs and transcribes audio/video files for indexing
 """
 
 import os
+import sys
 import json
 import hashlib
 import platform
 import subprocess
+import threading
+import signal
+import time
 from pathlib import Path
 from typing import Generator, Dict, Any, Optional, List
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FuturesTimeoutError
 from tqdm import tqdm
 import pdfplumber
+
+# Global flag for skipping current file
+_skip_current_file = False
+_skip_lock = threading.Lock()
+
+
+def _setup_skip_signal():
+    """Setup signal handler for Ctrl+\\ (SIGQUIT) to skip current file"""
+    def skip_handler(signum, frame):
+        global _skip_current_file
+        with _skip_lock:
+            _skip_current_file = True
+        print("\n  ⏭ Skip requested (Ctrl+\\)...")
+    
+    try:
+        signal.signal(signal.SIGQUIT, skip_handler)
+    except (AttributeError, ValueError):
+        pass  # SIGQUIT not available on Windows
+
+
+def _reset_skip_flag():
+    """Reset the skip flag for the next file"""
+    global _skip_current_file
+    with _skip_lock:
+        _skip_current_file = False
+
+
+def _should_skip():
+    """Check if current file should be skipped"""
+    with _skip_lock:
+        return _skip_current_file
+
 
 # Supported file types
 PDF_EXTENSIONS = {'.pdf'}
@@ -583,20 +619,103 @@ class AudioVideoExtractor:
         self.extracted_dir = self.base_path / "extracted_text"
         self.extracted_dir.mkdir(exist_ok=True)
         self.index_file = self.extracted_dir / "media_index.json"
+        self.failed_files_log = self.extracted_dir / "failed_media_files.json"
         self.index = self._load_index()
+        self.failed_files = self._load_failed_files()
         self.api_key = api_key or os.getenv("OPENAI_API_KEY")
         self._client = None
         self._local_model = None
-        self._use_local_whisper = False  # Track if we should use local
+        self._mlx_model = None
+        self._index_lock = threading.Lock()  # Thread-safe index saves
+        self._model_lock = threading.Lock()  # Thread-safe model loading
+    
+    def _load_failed_files(self) -> Dict[str, Any]:
+        """Load log of previously failed files"""
+        if self.failed_files_log.exists():
+            with open(self.failed_files_log, 'r') as f:
+                return json.load(f)
+        return {"files": [], "count": 0}
+    
+    def _save_failed_file(self, filepath: Path, error: str):
+        """Log a failed file for later review"""
+        from datetime import datetime
+        with self._index_lock:
+            # Check if already logged
+            existing_paths = [f["path"] for f in self.failed_files["files"]]
+            rel_path = str(filepath.relative_to(self.base_path))
+            if rel_path not in existing_paths:
+                self.failed_files["files"].append({
+                    "path": rel_path,
+                    "filename": filepath.name,
+                    "error": error,
+                    "size_mb": round(filepath.stat().st_size / 1024 / 1024, 2),
+                    "timestamp": datetime.now().isoformat()
+                })
+                self.failed_files["count"] = len(self.failed_files["files"])
+                with open(self.failed_files_log, 'w') as f:
+                    json.dump(self.failed_files, f, indent=2)
+    
+    def _validate_media_file(self, filepath: Path) -> tuple[bool, str]:
+        """Quick validation using ffprobe to check if file is valid media (< 2 seconds)"""
+        try:
+            result = subprocess.run(
+                ['ffprobe', '-v', 'error', '-show_entries', 'format=duration,format_name',
+                 '-of', 'json', str(filepath)],
+                capture_output=True, text=True, timeout=5
+            )
+            if result.returncode != 0:
+                return False, f"ffprobe error: {result.stderr.strip()[:100]}"
+            
+            import json as json_module
+            data = json_module.loads(result.stdout)
+            if not data.get("format"):
+                return False, "No media format detected"
+            
+            duration = data["format"].get("duration")
+            if duration and float(duration) < 0.1:
+                return False, "File too short (< 0.1s)"
+            
+            return True, "OK"
+        except subprocess.TimeoutExpired:
+            return False, "ffprobe timeout (file may be corrupted)"
+        except Exception as e:
+            return False, f"Validation error: {str(e)[:100]}"
     
     def _get_client(self):
-        """Lazy load OpenAI client"""
+        """Lazy load OpenAI client with timeout for Whisper API"""
         if self._client is None:
             if not self.api_key:
                 return None  # Return None instead of raising, so we can fallback
             from openai import OpenAI
-            self._client = OpenAI(api_key=self.api_key)
+            import httpx
+            # 5 minute timeout for large audio transcriptions, 30s connect timeout
+            self._client = OpenAI(
+                api_key=self.api_key,
+                timeout=httpx.Timeout(300.0, connect=30.0)
+            )
         return self._client
+    
+    def _get_mlx_whisper(self):
+        """Lazy load Lightning Whisper MLX for Apple Silicon GPU acceleration"""
+        if self._mlx_model is None:
+            # Only available on Apple Silicon
+            if platform.system() != "Darwin" or platform.processor() != "arm":
+                return None
+            
+            with self._model_lock:
+                if self._mlx_model is None:  # Double-check after acquiring lock
+                    try:
+                        from lightning_whisper_mlx import LightningWhisperMLX
+                        print("  📥 Loading Lightning Whisper MLX (Apple Silicon GPU)...")
+                        # Use distil-medium.en for good speed/quality balance
+                        self._mlx_model = LightningWhisperMLX(model="distil-medium.en", batch_size=12, quant=None)
+                        print("  ✓ Lightning Whisper MLX loaded")
+                    except ImportError:
+                        return None
+                    except Exception as e:
+                        print(f"  ⚠ Failed to load Lightning Whisper MLX: {e}")
+                        return None
+        return self._mlx_model
     
     def _get_local_whisper(self):
         """Lazy load faster-whisper model with GPU acceleration if available"""
@@ -621,8 +740,10 @@ class AudioVideoExtractor:
                     except ImportError:
                         pass
                 
+                # Use "tiny" model for faster processing (3-4x faster than "base")
+                # Quality is still good for most transcription tasks
                 print(f"  📥 Loading faster-whisper model (device={device}, compute={compute_type})...")
-                self._local_model = WhisperModel("base", device=device, compute_type=compute_type)
+                self._local_model = WhisperModel("tiny", device=device, compute_type=compute_type)
                 print("  ✓ faster-whisper model loaded")
                 
             except ImportError:
@@ -795,6 +916,20 @@ class AudioVideoExtractor:
             print(f"    OpenAI transcription failed: {e}")
             return None
     
+    def _transcribe_with_mlx(self, filepath: Path) -> Optional[str]:
+        """Transcribe using Lightning Whisper MLX (Apple Silicon GPU accelerated)"""
+        model = self._get_mlx_whisper()
+        if not model:
+            return None
+        
+        try:
+            result = model.transcribe(audio_path=str(filepath))
+            text = result.get('text', '').strip() if isinstance(result, dict) else str(result).strip()
+            return text if text else "[No speech detected]"
+        except Exception as e:
+            print(f"    MLX transcription failed: {e}")
+            return None
+    
     def _transcribe_with_local(self, filepath: Path) -> Optional[str]:
         """Transcribe using faster-whisper model"""
         model = self._get_local_whisper()
@@ -803,10 +938,16 @@ class AudioVideoExtractor:
         
         try:
             # faster-whisper API: returns segments iterator and info
-            segments, info = model.transcribe(str(filepath), beam_size=5, vad_filter=True)
+            # beam_size=1 is faster, vad_filter=True skips silence
+            segments, info = model.transcribe(str(filepath), beam_size=1, vad_filter=True)
             # Collect all segment texts
             text_parts = [segment.text for segment in segments]
-            return " ".join(text_parts).strip()
+            result = " ".join(text_parts).strip()
+            # Return empty string for silent/empty audio (not None, so we don't retry)
+            return result if result else "[No speech detected]"
+        except IndexError:
+            # "tuple index out of range" = empty/silent audio
+            return "[No speech detected]"
         except Exception as e:
             print(f"    Local transcription failed: {e}")
             return None
@@ -891,51 +1032,70 @@ class AudioVideoExtractor:
         """Transcribe audio/video file with optimized processing"""
         try:
             file_size = filepath.stat().st_size
-            print(f"  🎤 Transcribing: {filepath.name} ({file_size / 1024 / 1024:.1f}MB)")
+            
+            # Quick validation first (< 2 seconds) to skip corrupted files fast
+            is_valid, validation_error = self._validate_media_file(filepath)
+            if not is_valid:
+                self._save_failed_file(filepath, validation_error)
+                return {
+                    "id": self._file_hash(filepath),
+                    "filename": self._clean_filename(filepath.name),
+                    "path": str(filepath.relative_to(self.base_path)),
+                    "error": f"Invalid media: {validation_error}",
+                    "has_content": False
+                }
             
             # For video files, extract audio first (much faster to process)
             audio_path = filepath
             extracted_audio = None
             if filepath.suffix.lower() in VIDEO_EXTENSIONS:
-                print(f"    Extracting audio from video...")
                 extracted_audio = self._extract_audio_from_video(filepath)
                 if extracted_audio:
                     audio_path = extracted_audio
-                    print(f"    ✓ Audio extracted ({audio_path.stat().st_size / 1024 / 1024:.1f}MB)")
+                else:
+                    # Audio extraction failed - log and skip
+                    self._save_failed_file(filepath, "Audio extraction failed")
+                    return {
+                        "id": self._file_hash(filepath),
+                        "filename": self._clean_filename(filepath.name),
+                        "path": str(filepath.relative_to(self.base_path)),
+                        "error": "Audio extraction failed",
+                        "has_content": False
+                    }
             
             full_text = None
             transcription_method = "unknown"
             
-            # Try OpenAI API first for small files (faster, better quality, but has 25MB limit)
-            if not self._use_local_whisper and self.api_key and audio_path.stat().st_size < 25 * 1024 * 1024:
-                print(f"    Trying OpenAI Whisper API...")
+            # On Apple Silicon, try Lightning Whisper MLX first (GPU accelerated, fastest)
+            if platform.system() == "Darwin" and platform.processor() == "arm":
+                full_text = self._transcribe_with_mlx(audio_path)
+                if full_text:
+                    transcription_method = "mlx"
+            
+            # Fallback to faster-whisper (CPU)
+            if not full_text:
+                full_text = self._transcribe_with_local(audio_path)
+                if full_text:
+                    transcription_method = "faster-whisper"
+            
+            # If direct transcription fails, try converting to WAV first
+            if not full_text:
+                wav_path = self._convert_to_wav(audio_path)
+                if wav_path:
+                    full_text = self._transcribe_with_local(wav_path)
+                    if full_text:
+                        transcription_method = "faster-whisper"
+                    # Clean up temp file
+                    try:
+                        wav_path.unlink()
+                    except:
+                        pass
+            
+            # Fallback to OpenAI Whisper API if local fails (25MB limit)
+            if not full_text and self.api_key and audio_path.stat().st_size < 25 * 1024 * 1024:
                 full_text = self._transcribe_with_openai(audio_path)
                 if full_text:
                     transcription_method = "openai"
-                    print(f"    ✓ OpenAI transcription successful ({len(full_text)} chars)")
-            
-            # Fallback to local faster-whisper
-            if not full_text:
-                print(f"    Using faster-whisper (local)...")
-                
-                # Try direct transcription first
-                full_text = self._transcribe_with_local(audio_path)
-                
-                # If that fails, try converting to WAV first
-                if not full_text:
-                    print(f"    Converting to WAV and retrying...")
-                    wav_path = self._convert_to_wav(audio_path)
-                    if wav_path:
-                        full_text = self._transcribe_with_local(wav_path)
-                        # Clean up temp file
-                        try:
-                            wav_path.unlink()
-                        except:
-                            pass
-                
-                if full_text:
-                    transcription_method = "faster-whisper"
-                    print(f"    ✓ faster-whisper transcription successful ({len(full_text)} chars)")
             
             # Cleanup extracted audio
             if extracted_audio and extracted_audio.exists():
@@ -944,8 +1104,9 @@ class AudioVideoExtractor:
                 except:
                     pass
             
-            # If still no transcription, return error
+            # If still no transcription, log and return error
             if not full_text:
+                self._save_failed_file(filepath, "All transcription methods failed")
                 return {
                     "id": self._file_hash(filepath),
                     "filename": self._clean_filename(filepath.name),
@@ -1008,22 +1169,25 @@ class AudioVideoExtractor:
             with open(output_file, 'w') as f:
                 json.dump(result, f)
             
-            self.index["files"][result["id"]] = {
-                "filename": result["filename"],
-                "path": result["path"],
-                "category": result.get("category", "Unknown"),
-                "subcategory": result.get("subcategory", ""),
-                "media_type": result.get("media_type", "audio"),
-                "duration_seconds": result.get("duration_seconds"),
-                "char_count": result.get("char_count", 0)
-            }
+            # Thread-safe index update and save for resume support
+            with self._index_lock:
+                self.index["files"][result["id"]] = {
+                    "filename": result["filename"],
+                    "path": result["path"],
+                    "category": result.get("category", "Unknown"),
+                    "subcategory": result.get("subcategory", ""),
+                    "media_type": result.get("media_type", "audio"),
+                    "duration_seconds": result.get("duration_seconds"),
+                    "char_count": result.get("char_count", 0)
+                }
+                self._save_index()
             results["success"] += 1
         else:
             error = result.get("error", "Unknown error") if result else "No result"
             print(f"  ✗ Failed: {error}")
             results["failed"] += 1
     
-    def extract_all(self, force: bool = False, max_workers: int = 2) -> Dict[str, Any]:
+    def extract_all(self, force: bool = False, max_workers: int = 8) -> Dict[str, Any]:
         """Transcribe all audio/video files with parallel processing support"""
         media_files = list(self.find_all_media())
         
@@ -1049,38 +1213,101 @@ class AudioVideoExtractor:
                 results["skipped"] += 1
         
         print(f"Processing {len(to_process)} new files ({results['skipped']} already processed)")
+        print(f"  💡 Press Ctrl+\\ to skip current file, Ctrl+C to stop")
+        
+        # Setup signal handler for skip
+        _setup_skip_signal()
         
         if not to_process:
             return results
         
-        # Use parallel processing for local whisper (no API rate limits)
-        if not self.api_key or self._use_local_whisper:
+        # On Apple Silicon, use sequential processing (MLX uses GPU, can't parallelize)
+        # On other platforms, use parallel processing with faster-whisper
+        use_mlx = platform.system() == "Darwin" and platform.processor() == "arm"
+        
+        # Timeout per file (5 minutes max)
+        file_timeout = 300
+        
+        if use_mlx:
+            # Pre-load MLX model to catch errors early
+            mlx_model = self._get_mlx_whisper()
+            if mlx_model:
+                print(f"  ⚡ Using Lightning Whisper MLX (Apple Silicon GPU)")
+            else:
+                print(f"  ℹ MLX not available, using faster-whisper (CPU)")
+            
+            # Sequential for MLX (GPU already provides parallelism)
+            for media in tqdm(to_process, desc="Transcribing"):
+                _reset_skip_flag()
+                
+                try:
+                    # Run transcription with timeout using a thread
+                    result_container = [None]
+                    error_container = [None]
+                    
+                    def transcribe_with_timeout():
+                        try:
+                            result_container[0] = self.transcribe_file(media)
+                        except Exception as e:
+                            error_container[0] = e
+                    
+                    thread = threading.Thread(target=transcribe_with_timeout)
+                    thread.start()
+                    
+                    # Wait with periodic skip checks
+                    start_time = time.time()
+                    while thread.is_alive():
+                        thread.join(timeout=0.5)  # Check every 0.5s
+                        if _should_skip():
+                            print(f"\n  ⏭ Skipping: {media.name}")
+                            self._save_failed_file(media, "Skipped by user")
+                            results["failed"] += 1
+                            break
+                        if time.time() - start_time > file_timeout:
+                            print(f"\n  ⏱ Timeout ({file_timeout}s): {media.name}")
+                            self._save_failed_file(media, f"Timeout after {file_timeout}s")
+                            results["failed"] += 1
+                            break
+                    else:
+                        # Thread completed normally
+                        if error_container[0]:
+                            raise error_container[0]
+                        self._process_result(result_container[0], results)
+                        
+                except KeyboardInterrupt:
+                    print(f"\n  ⚠ Interrupted - saving progress...")
+                    break
+                except Exception as e:
+                    print(f"  ✗ Error: {media.name}: {e}")
+                    self._save_failed_file(media, str(e))
+                    results["failed"] += 1
+        else:
+            # Parallel processing for CPU-based transcription
             print(f"  🚀 Using parallel processing with {max_workers} workers")
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
                 futures = {executor.submit(self.transcribe_file, m): m for m in to_process}
                 for future in tqdm(as_completed(futures), total=len(to_process), desc="Transcribing"):
                     media = futures[future]
                     try:
-                        result = future.result()
+                        result = future.result(timeout=file_timeout)
                         self._process_result(result, results)
+                    except FuturesTimeoutError:
+                        print(f"  ⏱ Timeout ({file_timeout}s): {media.name}")
+                        self._save_failed_file(media, f"Timeout after {file_timeout}s")
+                        results["failed"] += 1
                     except Exception as e:
                         print(f"  ✗ Error: {media.name}: {e}")
                         results["failed"] += 1
-        else:
-            # Sequential for API (rate limits)
-            for media in tqdm(to_process, desc="Transcribing"):
-                try:
-                    result = self.transcribe_file(media)
-                    self._process_result(result, results)
-                except Exception as e:
-                    print(f"  ✗ Error processing {media.name}: {e}")
-                    results["failed"] += 1
         
         # Update stats
         self.index["stats"]["total"] = len(media_files)
         self.index["stats"]["processed"] = results["success"] + results["skipped"]
         self.index["stats"]["failed"] = results["failed"]
         self._save_index()
+        
+        # Print summary of failed files
+        if self.failed_files["count"] > 0:
+            print(f"\n  ⚠ {self.failed_files['count']} files failed - see: {self.failed_files_log}")
         
         return results
 

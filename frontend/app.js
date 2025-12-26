@@ -524,6 +524,7 @@ function renderStats() {
     const pdfCount = fileTypes.find(f => f.file_type === 'pdf')?.count || stats.total_documents;
     const audioCount = fileTypes.find(f => f.file_type === 'audio')?.count || 0;
     const videoCount = fileTypes.find(f => f.file_type === 'video')?.count || 0;
+    const imageCount = fileTypes.find(f => f.file_type === 'image')?.count || 0;
     
     elements.statsGrid.innerHTML = `
         <div class="stat-card clickable" data-browse="all" title="Browse all files">
@@ -543,6 +544,11 @@ function renderStats() {
         <div class="stat-card file-type-card clickable" data-browse="audio" title="Browse audio files">
             <div class="stat-value">🎵 ${formatNumber(audioCount)}</div>
             <div class="stat-label">Audio Files</div>
+            <div class="stat-action">Browse →</div>
+        </div>
+        <div class="stat-card file-type-card clickable" data-browse="image" title="Browse image files">
+            <div class="stat-value">🖼️ ${formatNumber(imageCount)}</div>
+            <div class="stat-label">Image Files</div>
             <div class="stat-action">Browse →</div>
         </div>
         <div class="stat-card file-type-card clickable" data-browse="video" title="Browse video files">
@@ -583,6 +589,7 @@ function renderStats() {
             <option value="">All Files (${formatNumber(stats.total_documents)})</option>
             <option value="pdf">📄 Documents (${formatNumber(pdfCount)})</option>
             <option value="audio">🎵 Audio (${formatNumber(audioCount)})</option>
+            <option value="image">🖼️ Images (${formatNumber(imageCount)})</option>
             <option value="video">🎬 Video (${formatNumber(videoCount)})</option>
         `;
     }

@@ -37,4 +37,6 @@ feedback.json
 *.wav
 *.json
 *.part
+*.zip
 backend/__init__.py
+mlx_models/

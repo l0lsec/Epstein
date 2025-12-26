@@ -268,16 +268,20 @@ def extract_pdfs(force=False):
     return results['success'] > 0 or results['skipped'] > 0
 
 
-def build_index():
-    """Build search database and vector store"""
+def build_index(force: bool = False):
+    """Build search database and vector store
+    
+    Args:
+        force: If True, re-index all documents. If False, only index new documents.
+    """
     print("\n" + "="*60)
     print("STEP 3: BUILDING SEARCH INDEX")
     print("="*60)
     
     sys.path.insert(0, str(BACKEND_PATH))
-    from database import build_index
+    from database import build_index as db_build_index
     
-    build_index(str(BASE_PATH))
+    db_build_index(str(BASE_PATH), force=force)
     print("✓ Index built successfully")
 
 
@@ -585,7 +589,7 @@ Data Sources:
     
     # Step 3: Build search index
     if args.command in ["index", "setup", "all"] or args.full_setup or args.reindex:
-        build_index()
+        build_index(force=force)
     
     # Step 4: Start server
     if args.command in ["server", "all"]:

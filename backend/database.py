@@ -483,6 +483,37 @@ class Database:
         with self.get_connection() as conn:
             cursor = conn.execute("SELECT COUNT(*) FROM summaries")
             return cursor.fetchone()[0]
+    
+    def insert_documents_batch(self, documents: List[Dict[str, Any]]):
+        """Insert multiple documents efficiently in a single transaction"""
+        if not documents:
+            return
+        with self.get_connection() as conn:
+            conn.executemany("""
+                INSERT OR REPLACE INTO documents 
+                (id, filename, original_filename, path, category, subcategory, 
+                 file_type, page_count, char_count, duration_seconds, full_text)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, [(
+                doc["id"],
+                doc["filename"],
+                doc.get("original_filename", doc["filename"]),
+                doc["path"],
+                doc.get("category", "Unknown"),
+                doc.get("subcategory", ""),
+                doc.get("file_type", "pdf"),
+                doc.get("page_count", 0),
+                doc.get("char_count", 0),
+                doc.get("duration_seconds"),
+                doc.get("full_text", "")
+            ) for doc in documents])
+            conn.commit()
+    
+    def get_indexed_doc_ids(self) -> set:
+        """Get set of all document IDs currently in the database"""
+        with self.get_connection() as conn:
+            cursor = conn.execute("SELECT id FROM documents")
+            return {row[0] for row in cursor.fetchall()}
 
 
 class VectorStore:
@@ -523,15 +554,30 @@ class VectorStore:
             pickle.dump(self.metadata, f)
     
     def _get_model(self):
-        """Lazy load the embedding model"""
+        """Lazy load the embedding model with GPU support"""
         if self.model is None:
             try:
                 from sentence_transformers import SentenceTransformer
-                self.model = SentenceTransformer('all-MiniLM-L6-v2')
+                import torch
+                
+                # Detect best available device
+                if torch.backends.mps.is_available():
+                    device = "mps"  # Apple Silicon GPU
+                elif torch.cuda.is_available():
+                    device = "cuda"  # NVIDIA GPU
+                else:
+                    device = "cpu"
+                
+                print(f"  Loading embedding model (device={device})...")
+                self.model = SentenceTransformer('all-MiniLM-L6-v2', device=device)
             except ImportError:
                 print("sentence-transformers not installed, semantic search disabled")
                 return None
         return self.model
+    
+    def get_indexed_doc_ids(self) -> set:
+        """Get set of already indexed document IDs"""
+        return {m.get("doc_id") for m in self.metadata if m.get("doc_id")}
     
     def add_document(self, doc_id: str, text: str, metadata: Dict[str, Any]):
         """Add a document to the vector store"""
@@ -622,8 +668,13 @@ class VectorStore:
         return len(self.embeddings)
 
 
-def build_index(base_path: str):
-    """Build database and vector store from extracted documents"""
+def build_index(base_path: str, force: bool = False):
+    """Build database and vector store from extracted documents
+    
+    Args:
+        base_path: Path to the project root
+        force: If True, re-index all documents. If False, only index new documents.
+    """
     from tqdm import tqdm
     
     base_path = Path(base_path)
@@ -647,6 +698,14 @@ def build_index(base_path: str):
             all_files.update(pdf_index.get("files", {}))
             print(f"Found {len(pdf_index.get('files', {}))} PDF documents")
     
+    # Load image index (OCR results)
+    image_index_file = extracted_dir / "image_index.json"
+    if image_index_file.exists():
+        with open(image_index_file) as f:
+            image_index = json.load(f)
+            all_files.update(image_index.get("files", {}))
+            print(f"Found {len(image_index.get('files', {}))} image files")
+    
     # Load media index (audio/video transcriptions)
     media_index_file = extracted_dir / "media_index.json"
     if media_index_file.exists():
@@ -659,13 +718,33 @@ def build_index(base_path: str):
         print("No index files found.")
         return
     
-    print(f"Building index for {len(all_files)} total documents...")
+    # Get already indexed document IDs (skip unless force)
+    existing_vector_ids = set()
+    existing_db_ids = set()
+    if not force:
+        existing_vector_ids = vector_store.get_indexed_doc_ids()
+        existing_db_ids = db.get_indexed_doc_ids()
+        print(f"  {len(existing_vector_ids)} documents already in vector store")
+        print(f"  {len(existing_db_ids)} documents already in database")
     
-    # Batch for vector store
+    # Filter to only new documents
+    to_index = {k: v for k, v in all_files.items() 
+                if force or k not in existing_vector_ids or k not in existing_db_ids}
+    
+    if not to_index:
+        print("✓ Index is up to date! No new documents to process.")
+        print(f"  SQLite documents: {db.get_stats()['total_documents']}")
+        print(f"  Vector embeddings: {vector_store.get_count()}")
+        return
+    
+    print(f"Indexing {len(to_index)} new documents (skipping {len(all_files) - len(to_index)} already indexed)...")
+    
+    # Batches for efficient processing
     vector_batch = []
-    batch_size = 100
+    db_batch = []
+    batch_size = 256  # Increased from 100 for better GPU utilization
     
-    for file_id, file_info in tqdm(all_files.items(), desc="Indexing"):
+    for file_id, file_info in tqdm(to_index.items(), desc="Indexing"):
         # Load full document data
         doc_file = extracted_dir / f"{file_id}.json"
         if not doc_file.exists():
@@ -674,8 +753,8 @@ def build_index(base_path: str):
         with open(doc_file) as f:
             doc = json.load(f)
         
-        # Insert into SQLite
-        db.insert_document(doc)
+        # Add to SQLite batch
+        db_batch.append(doc)
         
         # Prepare for vector store
         full_text = doc.get("full_text", "")
@@ -687,12 +766,18 @@ def build_index(base_path: str):
                 "category": doc.get("category", "Unknown")
             })
         
-        # Process batch
+        # Process batches
+        if len(db_batch) >= batch_size:
+            db.insert_documents_batch(db_batch)
+            db_batch = []
+        
         if len(vector_batch) >= batch_size:
             vector_store.add_batch(vector_batch)
             vector_batch = []
     
-    # Process remaining
+    # Process remaining batches
+    if db_batch:
+        db.insert_documents_batch(db_batch)
     if vector_batch:
         vector_store.add_batch(vector_batch)
     
