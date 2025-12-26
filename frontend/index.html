@@ -89,7 +89,7 @@
         <section id="search-view" class="view active">
             <div class="hero">
                 <h1 class="hero-title">Search Epstein Library Files</h1>
-                <p class="hero-subtitle">The DOJ released the Epstein Library files buried under links within links, with a search bar that had "selective amnesia" for certain keywords. Most documents are redacted far beyond what's needed to protect victim identities...some are just black rectangles with a file name. Search documents, view the PDFs, listen to the audio files (conveniently cut off at key moments or reduced to tiny snippets), watch the videos all in one place. If the DOJ wanted to make this accessible, they could've. This was built in less than a week with a bunch of Reeses.</p>
+                <p class="hero-subtitle">A unified platform for researchers, journalists, and the public to search, view, and explore the DOJ's Epstein Library. Browse documents, PDFs, audio recordings, and video files all in one place as they are released.</p>
                 
                 <div id="stats-display" class="stats-container">
                     <h3 class="stats-title">Archive Statistics</h3>
@@ -103,12 +103,20 @@
                             <path d="M21 21l-4.35-4.35"/>
                         </svg>
                         <input type="text" id="search-input" placeholder="Search names, dates, locations, or any keyword..." autocomplete="off">
-                        <button id="search-btn" class="search-btn">
-                            <span>Search</span>
-                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                                <path d="M5 12h14m-7-7l7 7-7 7"/>
-                            </svg>
-                        </button>
+                        <div class="search-buttons">
+                            <button id="search-btn" class="search-btn">
+                                <span>Search</span>
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <path d="M5 12h14m-7-7l7 7-7 7"/>
+                                </svg>
+                            </button>
+                            <button id="clear-search-btn" class="clear-search-btn hidden" title="Clear search and reset filters">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <path d="M18 6L6 18M6 6l12 12"/>
+                                </svg>
+                                <span>Clear</span>
+                            </button>
+                        </div>
                     </div>
                     
                     <div class="search-options">
@@ -151,6 +159,11 @@
                     <span id="results-count" class="results-count"></span>
                 </div>
                 <div id="results-list" class="results-list"></div>
+                <div id="search-pagination" class="pagination hidden">
+                    <button id="search-prev-page" class="page-btn" disabled>← Previous</button>
+                    <div id="search-page-numbers" class="page-numbers"></div>
+                    <button id="search-next-page" class="page-btn">Next →</button>
+                </div>
             </div>
         </section>
 
@@ -273,6 +286,38 @@
                     </ul>
                 </div>
                 
+                <div class="about-section creator">
+                    <h2>Created By</h2>
+                    <p><strong>Sedric Louissaint,</strong> a cybersecurity geek, penetration tester, and professional mixed martial artist.</p>
+                    <div class="creator-links">
+                        <a href="https://sedriclouissaint.com/" target="_blank" rel="noopener noreferrer">
+                            <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2">
+                                <circle cx="12" cy="12" r="10"/>
+                                <path d="M2 12h20M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/>
+                            </svg>
+                            Website
+                        </a>
+                        <a href="https://www.instagram.com/showupshowout/" target="_blank" rel="noopener noreferrer">
+                            <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor">
+                                <path d="M12 2.163c3.204 0 3.584.012 4.85.07 3.252.148 4.771 1.691 4.919 4.919.058 1.265.069 1.645.069 4.849 0 3.205-.012 3.584-.069 4.849-.149 3.225-1.664 4.771-4.919 4.919-1.266.058-1.644.07-4.85.07-3.204 0-3.584-.012-4.849-.07-3.26-.149-4.771-1.699-4.919-4.92-.058-1.265-.07-1.644-.07-4.849 0-3.204.013-3.583.07-4.849.149-3.227 1.664-4.771 4.919-4.919 1.266-.057 1.645-.069 4.849-.069zM12 0C8.741 0 8.333.014 7.053.072 2.695.272.273 2.69.073 7.052.014 8.333 0 8.741 0 12c0 3.259.014 3.668.072 4.948.2 4.358 2.618 6.78 6.98 6.98C8.333 23.986 8.741 24 12 24c3.259 0 3.668-.014 4.948-.072 4.354-.2 6.782-2.618 6.979-6.98.059-1.28.073-1.689.073-4.948 0-3.259-.014-3.667-.072-4.947-.196-4.354-2.617-6.78-6.979-6.98C15.668.014 15.259 0 12 0zm0 5.838a6.162 6.162 0 100 12.324 6.162 6.162 0 000-12.324zM12 16a4 4 0 110-8 4 4 0 010 8zm6.406-11.845a1.44 1.44 0 100 2.881 1.44 1.44 0 000-2.881z"/>
+                            </svg>
+                            Instagram
+                        </a>
+                        <a href="https://www.linkedin.com/in/sedric-louissaint/" target="_blank" rel="noopener noreferrer">
+                            <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor">
+                                <path d="M20.447 20.452h-3.554v-5.569c0-1.328-.027-3.037-1.852-3.037-1.853 0-2.136 1.445-2.136 2.939v5.667H9.351V9h3.414v1.561h.046c.477-.9 1.637-1.85 3.37-1.85 3.601 0 4.267 2.37 4.267 5.455v6.286zM5.337 7.433c-1.144 0-2.063-.926-2.063-2.065 0-1.138.92-2.063 2.063-2.063 1.14 0 2.064.925 2.064 2.063 0 1.139-.925 2.065-2.064 2.065zm1.782 13.019H3.555V9h3.564v11.452zM22.225 0H1.771C.792 0 0 .774 0 1.729v20.542C0 23.227.792 24 1.771 24h20.451C23.2 24 24 23.227 24 22.271V1.729C24 .774 23.2 0 22.222 0h.003z"/>
+                            </svg>
+                            LinkedIn
+                        </a>
+                        <a href="https://github.com/l0lsec" target="_blank" rel="noopener noreferrer">
+                            <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor">
+                                <path d="M12 0C5.374 0 0 5.373 0 12c0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23A11.509 11.509 0 0112 5.803c1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576C20.566 21.797 24 17.3 24 12c0-6.627-5.373-12-12-12z"/>
+                            </svg>
+                            GitHub
+                        </a>
+                    </div>
+                </div>
+                
                 <div class="about-section disclaimer">
                     <h2>Disclaimer</h2>
                     <p>This archive contains documents from public sources. Some documents may contain redactions. The information is provided for research and transparency purposes. We make no claims about the completeness or accuracy of OCR-extracted text.</p>
@@ -336,7 +381,15 @@
                     </div>
                     <div id="modal-document-tab" class="tab-content active">
                         <div id="modal-pdf-viewer" class="pdf-viewer">
-                            <iframe id="pdf-iframe" src="" frameborder="0"></iframe>
+                            <button id="pdf-fullscreen-btn" class="pdf-fullscreen-btn" title="Toggle Fullscreen">
+                                <svg class="fullscreen-enter" xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                    <path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3"></path>
+                                </svg>
+                                <svg class="fullscreen-exit hidden" xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                    <path d="M8 3v3a2 2 0 0 1-2 2H3m18 0h-3a2 2 0 0 1-2-2V3m0 18v-3a2 2 0 0 1 2-2h3M3 16h3a2 2 0 0 1 2 2v3"></path>
+                                </svg>
+                            </button>
+                            <iframe id="pdf-iframe" src="" frameborder="0" scrolling="yes" allow="fullscreen"></iframe>
                             <div id="media-viewer" class="media-viewer hidden"></div>
                             <div id="pdf-fallback" class="pdf-fallback hidden">
                                 <p>📄 Preview not available</p>

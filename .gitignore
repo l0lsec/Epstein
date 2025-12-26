@@ -31,7 +31,10 @@ feedback.json
 *.db
 *.pdf
 *.txt
+*.jpg
+*.tif
 *.mp4
 *.wav
 *.json
+*.part
 backend/__init__.py

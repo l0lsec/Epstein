@@ -17,7 +17,12 @@ let state = {
     browseFileType: '',
     browseFilename: '',
     searchSubcategory: '',
-    currentDocument: null
+    currentDocument: null,
+    // Search pagination state
+    searchPage: 0,
+    searchLimit: 50,  // Results per page
+    searchTotal: 0,
+    lastSearchParams: null  // Store last search to enable pagination
 };
 
 // DOM Elements
@@ -47,6 +52,7 @@ function cacheElements() {
     // Search
     elements.searchInput = document.getElementById('search-input');
     elements.searchBtn = document.getElementById('search-btn');
+    elements.clearSearchBtn = document.getElementById('clear-search-btn');
     elements.searchType = document.getElementById('search-type');
     elements.searchCategory = document.getElementById('search-category');
     elements.searchSubcategory = document.getElementById('search-subcategory');
@@ -55,6 +61,10 @@ function cacheElements() {
     elements.searchResults = document.getElementById('search-results');
     elements.resultsList = document.getElementById('results-list');
     elements.resultsCount = document.getElementById('results-count');
+    elements.searchPagination = document.getElementById('search-pagination');
+    elements.searchPrevPage = document.getElementById('search-prev-page');
+    elements.searchNextPage = document.getElementById('search-next-page');
+    elements.searchPageNumbers = document.getElementById('search-page-numbers');
     elements.statsGrid = document.getElementById('stats-grid');
     elements.statsDisplay = document.getElementById('stats-display');
     
@@ -103,7 +113,12 @@ function setupEventListeners() {
         if (e.key === 'Enter') performSearch();
     });
     
-    // Search category change - load subcategories
+    // Clear search button
+    if (elements.clearSearchBtn) {
+        elements.clearSearchBtn.addEventListener('click', clearSearch);
+    }
+    
+    // Search category change - load subcategories and re-run search
     if (elements.searchCategory) {
         elements.searchCategory.addEventListener('change', async () => {
             const category = elements.searchCategory.value;
@@ -112,13 +127,40 @@ function setupEventListeners() {
                 elements.searchSubcategory.value = '';
             }
             await loadSubcategories(category, 'search');
+            
+            // Re-run search if there's an active search
+            if (state.lastSearchParams) {
+                state.searchPage = 0;
+                state.lastSearchParams.category = category || null;
+                state.lastSearchParams.subcategory = null;
+                performSearchWithPagination();
+            }
         });
     }
     
-    // Search subcategory change
+    // Search subcategory change - re-run search
     if (elements.searchSubcategory) {
         elements.searchSubcategory.addEventListener('change', () => {
             state.searchSubcategory = elements.searchSubcategory.value;
+            
+            // Re-run search if there's an active search
+            if (state.lastSearchParams) {
+                state.searchPage = 0;
+                state.lastSearchParams.subcategory = state.searchSubcategory || null;
+                performSearchWithPagination();
+            }
+        });
+    }
+    
+    // Search file type change - re-run search
+    if (elements.searchFileType) {
+        elements.searchFileType.addEventListener('change', () => {
+            // Re-run search if there's an active search
+            if (state.lastSearchParams) {
+                state.searchPage = 0;
+                state.lastSearchParams.file_type = elements.searchFileType.value || null;
+                performSearchWithPagination();
+            }
         });
     }
     
@@ -172,6 +214,22 @@ function setupEventListeners() {
         loadDocuments();
     });
     
+    // Search pagination
+    if (elements.searchPrevPage) {
+        elements.searchPrevPage.addEventListener('click', () => {
+            if (state.searchPage > 0) {
+                state.searchPage--;
+                performSearchWithPagination();
+            }
+        });
+    }
+    if (elements.searchNextPage) {
+        elements.searchNextPage.addEventListener('click', () => {
+            state.searchPage++;
+            performSearchWithPagination();
+        });
+    }
+    
     // Ask AI
     elements.askBtn.addEventListener('click', askQuestion);
     elements.askInput.addEventListener('keypress', e => {
@@ -193,6 +251,23 @@ function setupEventListeners() {
     elements.modalTabs.forEach(tab => {
         tab.addEventListener('click', () => switchModalTab(tab.dataset.tab));
     });
+    
+    // PDF Fullscreen toggle
+    const pdfFullscreenBtn = document.getElementById('pdf-fullscreen-btn');
+    const pdfViewer = document.getElementById('modal-pdf-viewer');
+    
+    if (pdfFullscreenBtn && pdfViewer) {
+        pdfFullscreenBtn.addEventListener('click', () => {
+            togglePdfFullscreen(pdfViewer);
+        });
+        
+        // Exit fullscreen on Escape key
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape' && pdfViewer.classList.contains('fullscreen')) {
+                togglePdfFullscreen(pdfViewer);
+            }
+        });
+    }
     
     // Share button
     const shareBtn = document.getElementById('share-btn');
@@ -531,31 +606,52 @@ async function performSearch() {
     const query = elements.searchInput.value.trim();
     if (!query) return;
     
+    // Reset to first page on new search
+    state.searchPage = 0;
+    
+    // Store search params for pagination
+    state.lastSearchParams = {
+        query: query,
+        search_type: elements.searchType.value,
+        category: elements.searchCategory.value || null,
+        subcategory: elements.searchSubcategory?.value || null,
+        file_type: elements.searchFileType?.value || null
+    };
+    
+    await performSearchWithPagination();
+}
+
+async function performSearchWithPagination() {
+    if (!state.lastSearchParams) return;
+    
     elements.searchBtn.disabled = true;
     elements.searchBtn.innerHTML = '<span class="loading-spinner"></span> Searching...';
+    
+    const offset = state.searchPage * state.searchLimit;
     
     try {
         const response = await fetch(`${API_BASE}/search`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
-                query: query,
-                search_type: elements.searchType.value,
-                category: elements.searchCategory.value || null,
-                subcategory: elements.searchSubcategory?.value || null,
-                file_type: elements.searchFileType?.value || null,
-                limit: 30
+                ...state.lastSearchParams,
+                limit: state.searchLimit,
+                offset: offset
             })
         });
         
         if (!response.ok) throw new Error('Search failed');
         
         const data = await response.json();
+        state.searchTotal = data.total;
         renderSearchResults(data);
         
         // Hide stats, show results
         elements.statsDisplay.classList.add('hidden');
         elements.searchResults.classList.remove('hidden');
+        
+        // Scroll to top of results
+        elements.searchResults.scrollIntoView({ behavior: 'smooth', block: 'start' });
         
     } catch (error) {
         console.error('Search error:', error);
@@ -564,11 +660,107 @@ async function performSearch() {
     } finally {
         elements.searchBtn.disabled = false;
         elements.searchBtn.innerHTML = '<span>Search</span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12h14m-7-7l7 7-7 7"/></svg>';
+        
+        // Show clear button after search
+        if (elements.clearSearchBtn) {
+            elements.clearSearchBtn.classList.remove('hidden');
+        }
     }
 }
 
+async function clearSearch() {
+    // Clear the search input
+    elements.searchInput.value = '';
+    
+    // Reset search state
+    state.lastSearchParams = null;
+    state.searchPage = 0;
+    state.searchTotal = 0;
+    
+    // Reset filter dropdowns to "All" 
+    if (elements.searchCategory) {
+        elements.searchCategory.value = '';
+    }
+    if (elements.searchSubcategory) {
+        elements.searchSubcategory.value = '';
+    }
+    if (elements.searchFileType) {
+        elements.searchFileType.value = '';
+    }
+    
+    // Hide subcategory group
+    if (elements.searchSubcategoryGroup) {
+        elements.searchSubcategoryGroup.style.display = 'none';
+    }
+    
+    // Hide search results and show stats
+    elements.searchResults.classList.add('hidden');
+    elements.statsDisplay.classList.remove('hidden');
+    
+    // Hide pagination
+    if (elements.searchPagination) {
+        elements.searchPagination.classList.add('hidden');
+    }
+    
+    // Hide clear button
+    if (elements.clearSearchBtn) {
+        elements.clearSearchBtn.classList.add('hidden');
+    }
+    
+    // Reload original categories with full counts
+    await loadCategories();
+    
+    // Reset file type dropdown to original counts
+    await loadStats();
+    
+    // Scroll to top
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+}
+
 function renderSearchResults(data) {
-    elements.resultsCount.textContent = `${data.total} results for "${data.query}"`;
+    const totalPages = Math.ceil(data.total / state.searchLimit);
+    const startResult = state.searchPage * state.searchLimit + 1;
+    const endResult = Math.min((state.searchPage + 1) * state.searchLimit, data.total);
+    
+    // Build filter context string
+    let filterContext = '';
+    if (state.lastSearchParams) {
+        const filters = [];
+        if (state.lastSearchParams.category) {
+            filters.push(state.lastSearchParams.category);
+        }
+        if (state.lastSearchParams.subcategory) {
+            filters.push(state.lastSearchParams.subcategory);
+        }
+        if (state.lastSearchParams.file_type) {
+            const typeLabels = { pdf: 'Documents', audio: 'Audio', video: 'Video' };
+            filters.push(typeLabels[state.lastSearchParams.file_type] || state.lastSearchParams.file_type);
+        }
+        if (filters.length > 0) {
+            filterContext = ` in ${filters.join(' › ')}`;
+        }
+    }
+    
+    // Update results count with range and filter context
+    if (data.total > state.searchLimit) {
+        elements.resultsCount.textContent = `Showing ${startResult}-${endResult} of ${formatNumber(data.total)} results for "${data.query}"${filterContext}`;
+    } else {
+        elements.resultsCount.textContent = `${formatNumber(data.total)} results for "${data.query}"${filterContext}`;
+    }
+    
+    // Update pagination controls
+    if (elements.searchPagination) {
+        if (data.total > state.searchLimit) {
+            elements.searchPagination.classList.remove('hidden');
+            elements.searchPrevPage.disabled = state.searchPage === 0;
+            elements.searchNextPage.disabled = (state.searchPage + 1) >= totalPages;
+            
+            // Generate page number buttons
+            renderSearchPageNumbers(totalPages);
+        } else {
+            elements.searchPagination.classList.add('hidden');
+        }
+    }
     
     if (!data.results || data.results.length === 0) {
         elements.resultsList.innerHTML = '<p class="no-results">No documents found matching your query.</p>';
@@ -593,6 +785,134 @@ function renderSearchResults(data) {
     // Add click handlers
     elements.resultsList.querySelectorAll('.result-item').forEach(item => {
         item.addEventListener('click', () => openDocument(item.dataset.id));
+    });
+    
+    // Update filter dropdowns with faceted counts
+    if (data.facets) {
+        updateSearchFilterCounts(data.facets);
+    }
+}
+
+function updateSearchFilterCounts(facets) {
+    // Update category dropdown with search-specific counts
+    if (facets.categories && elements.searchCategory) {
+        const currentCategory = elements.searchCategory.value;
+        const totalResults = facets.categories.reduce((sum, c) => sum + c.count, 0);
+        
+        let categoryOptions = `<option value="">All Categories (${formatNumber(totalResults)})</option>`;
+        categoryOptions += facets.categories.map(c => 
+            `<option value="${c.category}"${c.category === currentCategory ? ' selected' : ''}>${c.category} (${formatNumber(c.count)})</option>`
+        ).join('');
+        
+        elements.searchCategory.innerHTML = categoryOptions;
+    }
+    
+    // Update subcategory dropdown with search-specific counts
+    if (facets.subcategories && elements.searchSubcategory) {
+        const currentSubcategory = elements.searchSubcategory.value;
+        const totalSubResults = facets.subcategories.reduce((sum, s) => sum + s.count, 0);
+        
+        let subcategoryOptions = `<option value="">All Sections (${formatNumber(totalSubResults)})</option>`;
+        subcategoryOptions += facets.subcategories.map(s => 
+            `<option value="${s.subcategory}"${s.subcategory === currentSubcategory ? ' selected' : ''}>${s.subcategory} (${formatNumber(s.count)})</option>`
+        ).join('');
+        
+        elements.searchSubcategory.innerHTML = subcategoryOptions;
+        
+        // Show/hide subcategory group based on whether there are subcategories
+        if (elements.searchSubcategoryGroup) {
+            elements.searchSubcategoryGroup.style.display = facets.subcategories.length > 0 ? '' : 'none';
+        }
+    }
+    
+    // Update file type dropdown with search-specific counts
+    if (facets.file_types && elements.searchFileType) {
+        const currentFileType = elements.searchFileType.value;
+        const totalFileResults = facets.file_types.reduce((sum, f) => sum + f.count, 0);
+        
+        const typeLabels = {
+            'pdf': '📄 Documents',
+            'audio': '🎵 Audio',
+            'video': '🎬 Video'
+        };
+        
+        let fileTypeOptions = `<option value="">All Files (${formatNumber(totalFileResults)})</option>`;
+        fileTypeOptions += facets.file_types.map(f => {
+            const label = typeLabels[f.file_type] || f.file_type;
+            return `<option value="${f.file_type}"${f.file_type === currentFileType ? ' selected' : ''}>${label} (${formatNumber(f.count)})</option>`;
+        }).join('');
+        
+        elements.searchFileType.innerHTML = fileTypeOptions;
+    }
+}
+
+function renderSearchPageNumbers(totalPages) {
+    if (!elements.searchPageNumbers) return;
+    
+    const currentPage = state.searchPage;
+    const maxVisible = 7; // Maximum number of page buttons to show
+    let pages = [];
+    
+    if (totalPages <= maxVisible) {
+        // Show all pages if total is small
+        for (let i = 0; i < totalPages; i++) {
+            pages.push(i);
+        }
+    } else {
+        // Always show first page
+        pages.push(0);
+        
+        // Calculate range around current page
+        let start = Math.max(1, currentPage - 2);
+        let end = Math.min(totalPages - 2, currentPage + 2);
+        
+        // Adjust if near the beginning
+        if (currentPage < 3) {
+            end = Math.min(totalPages - 2, 4);
+        }
+        
+        // Adjust if near the end
+        if (currentPage > totalPages - 4) {
+            start = Math.max(1, totalPages - 5);
+        }
+        
+        // Add ellipsis before middle section if needed
+        if (start > 1) {
+            pages.push('...');
+        }
+        
+        // Add middle pages
+        for (let i = start; i <= end; i++) {
+            pages.push(i);
+        }
+        
+        // Add ellipsis after middle section if needed
+        if (end < totalPages - 2) {
+            pages.push('...');
+        }
+        
+        // Always show last page
+        pages.push(totalPages - 1);
+    }
+    
+    // Generate HTML
+    elements.searchPageNumbers.innerHTML = pages.map(page => {
+        if (page === '...') {
+            return '<span class="page-ellipsis">…</span>';
+        }
+        const isActive = page === currentPage;
+        return `<button class="page-num ${isActive ? 'active' : ''}" data-page="${page}">${page + 1}</button>`;
+    }).join('');
+    
+    // Add click handlers
+    elements.searchPageNumbers.querySelectorAll('.page-num').forEach(btn => {
+        btn.addEventListener('click', () => {
+            const page = parseInt(btn.dataset.page);
+            if (page !== state.searchPage) {
+                state.searchPage = page;
+                performSearchWithPagination();
+            }
+        });
     });
 }
 
@@ -688,7 +1008,7 @@ async function openDocument(docId) {
         `;
         
         elements.modalText.textContent = doc.full_text || 'No text content available.';
-        elements.modalSummary.innerHTML = '<p class="loading">Click to generate AI summary...</p>';
+        elements.modalSummary.innerHTML = '<p class="loading">Click to load AI summary...</p>';
         
         // Get file URL for viewer
         const fileUrl = `${API_BASE}/documents/${docId}/file`;
@@ -697,11 +1017,41 @@ async function openDocument(docId) {
         const mediaViewer = document.getElementById('media-viewer');
         
         if (fileType === 'pdf') {
-            // Load PDF in iframe with clean view (no toolbar/sidebar)
-            elements.pdfIframe.src = `${fileUrl}#toolbar=0&navpanes=0&view=FitH`;
-            elements.pdfIframe.style.display = 'block';
-            elements.pdfFallback.classList.add('hidden');
-            if (mediaViewer) mediaViewer.classList.add('hidden');
+            const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent);
+            
+            if (isIOS) {
+                // iOS Safari has issues with PDF scrolling in iframes
+                // Show a preview with button to open PDF directly
+                elements.pdfIframe.src = '';
+                elements.pdfIframe.style.display = 'none';
+                elements.pdfFallback.classList.add('hidden');
+                if (mediaViewer) {
+                    mediaViewer.classList.remove('hidden');
+                    mediaViewer.innerHTML = `
+                        <div class="ios-pdf-fallback">
+                            <div class="pdf-icon">📄</div>
+                            <h3>${doc.filename}</h3>
+                            <p class="pdf-info">${doc.page_count || ''} ${doc.page_count ? 'pages' : ''}</p>
+                            <p class="ios-pdf-message">iOS Safari has limited PDF viewing in-app. For the best experience, open the PDF directly.</p>
+                            <a href="${fileUrl}" target="_blank" class="ios-pdf-open-btn">
+                                <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2">
+                                    <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path>
+                                    <polyline points="15 3 21 3 21 9"></polyline>
+                                    <line x1="10" y1="14" x2="21" y2="3"></line>
+                                </svg>
+                                Open PDF in Safari
+                            </a>
+                            <p class="ios-pdf-hint">You can also view the extracted text in the "Text Content" tab</p>
+                        </div>
+                    `;
+                }
+            } else {
+                // Non-iOS: Load PDF in iframe normally
+                elements.pdfIframe.src = `${fileUrl}#toolbar=0&navpanes=0&view=FitH`;
+                elements.pdfIframe.style.display = 'block';
+                elements.pdfFallback.classList.add('hidden');
+                if (mediaViewer) mediaViewer.classList.add('hidden');
+            }
         } else if (fileType === 'audio') {
             // Show audio player
             elements.pdfIframe.src = '';
@@ -774,6 +1124,26 @@ function closeModal() {
     if (elements.pdfIframe) {
         elements.pdfIframe.src = '';
     }
+    // Exit PDF fullscreen if active
+    const pdfViewer = document.getElementById('modal-pdf-viewer');
+    if (pdfViewer && pdfViewer.classList.contains('fullscreen')) {
+        pdfViewer.classList.remove('fullscreen');
+        document.body.style.overflow = '';
+    }
+}
+
+function togglePdfFullscreen(pdfViewer) {
+    const isFullscreen = pdfViewer.classList.contains('fullscreen');
+    
+    if (isFullscreen) {
+        // Exit fullscreen
+        pdfViewer.classList.remove('fullscreen');
+        document.body.style.overflow = '';
+    } else {
+        // Enter fullscreen
+        pdfViewer.classList.add('fullscreen');
+        document.body.style.overflow = 'hidden';
+    }
 }
 
 async function switchModalTab(tabName) {
@@ -796,6 +1166,8 @@ async function switchModalTab(tabName) {
 
 async function loadDocumentSummary(docId) {
     try {
+        elements.modalSummary.innerHTML = '<p class="loading">Generating AI summary...</p>';
+        
         const response = await fetch(`${API_BASE}/documents/${docId}/summary`);
         
         if (!response.ok) {
@@ -808,7 +1180,21 @@ async function loadDocumentSummary(docId) {
         }
         
         const data = await response.json();
-        elements.modalSummary.innerHTML = `<div class="summary-text">${escapeHtml(data.summary).replace(/\n/g, '<br>')}</div>`;
+        
+        // Show cached indicator if summary was retrieved from cache
+        const cacheIndicator = data.cached 
+            ? `<div class="summary-meta">
+                <span class="cache-badge cached">📦 Cached Summary</span>
+                ${data.generated_at ? `<span class="generated-date">Generated: ${new Date(data.generated_at).toLocaleDateString()}</span>` : ''}
+               </div>`
+            : `<div class="summary-meta">
+                <span class="cache-badge fresh">✨ Freshly Generated</span>
+               </div>`;
+        
+        elements.modalSummary.innerHTML = `
+            ${cacheIndicator}
+            <div class="summary-text">${renderMarkdown(data.summary)}</div>
+        `;
         
     } catch (error) {
         console.error('Error loading summary:', error);
@@ -846,7 +1232,7 @@ async function askQuestion() {
         
         const data = await response.json();
         
-        elements.answerText.textContent = data.answer;
+        elements.answerText.innerHTML = renderMarkdown(data.answer);
         
         if (data.sources && data.sources.length > 0) {
             elements.sourcesList.innerHTML = data.sources.map(source => 
@@ -977,6 +1363,59 @@ function formatDuration(seconds) {
 }
 
 /**
+ * Detect if user is on a mobile device
+ */
+function isMobileDevice() {
+    return /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
+}
+
+/**
+ * Detect if user is on Android
+ */
+function isAndroid() {
+    return /Android/i.test(navigator.userAgent);
+}
+
+/**
+ * Detect if user is on iOS
+ */
+function isIOS() {
+    return /iPhone|iPad|iPod/i.test(navigator.userAgent);
+}
+
+/**
+ * Try to open native app share dialog, fall back to web URL if app not installed
+ */
+function openNativeAppOrFallback(appUrl, webUrl, intentUrl) {
+    // For Android, try intent URL first (more reliable for share dialogs)
+    const urlToTry = isAndroid() && intentUrl ? intentUrl : appUrl;
+    
+    let didNavigate = false;
+    
+    // Listen for visibility change (app opened successfully)
+    const handleVisibility = () => {
+        if (document.hidden) {
+            didNavigate = true;
+        }
+    };
+    document.addEventListener('visibilitychange', handleVisibility);
+    
+    // Try to open the native app
+    window.location.href = urlToTry;
+    
+    // After a short delay, check if we're still here and fall back to web
+    setTimeout(() => {
+        document.removeEventListener('visibilitychange', handleVisibility);
+        
+        // If the page is still visible and we haven't navigated away,
+        // the app probably isn't installed, so open the web version
+        if (!didNavigate && !document.hidden) {
+            window.open(webUrl, '_blank', 'width=600,height=400,menubar=no,toolbar=no');
+        }
+    }, 2000);
+}
+
+/**
  * Handle sharing document to social platforms
  */
 function handleShare(platform) {
@@ -994,46 +1433,65 @@ function handleShare(platform) {
     
     const shareText = `Check out this document from the Epstein Library Files Archive: "${doc.filename}"${context}`;
     
-    let url = '';
+    const isMobile = isMobileDevice();
+    let webUrl = '';
+    let appUrl = '';
+    let intentUrl = '';
     
     switch (platform) {
         case 'facebook':
-            // Facebook Feed Dialog with prefilled text
-            url = `https://www.facebook.com/sharer/sharer.php?u=${encodeURIComponent(shareUrl)}&quote=${encodeURIComponent(shareText)}`;
+            // Web URL for desktop/fallback
+            webUrl = `https://www.facebook.com/sharer/sharer.php?u=${encodeURIComponent(shareUrl)}&quote=${encodeURIComponent(shareText)}`;
+            // iOS deep link - opens share dialog
+            appUrl = `fb://share/?link=${encodeURIComponent(shareUrl)}`;
+            // Android Intent - more reliable for triggering share dialog
+            intentUrl = `intent://share/?link=${encodeURIComponent(shareUrl)}#Intent;package=com.facebook.katana;scheme=fb;end`;
             break;
         case 'twitter':
-            url = `https://twitter.com/intent/tweet?url=${encodeURIComponent(shareUrl)}&text=${encodeURIComponent(shareText)}`;
+            webUrl = `https://twitter.com/intent/tweet?url=${encodeURIComponent(shareUrl)}&text=${encodeURIComponent(shareText)}`;
+            // Twitter/X doesn't have a reliable share deep link, use web
+            appUrl = null;
+            intentUrl = null;
             break;
         case 'linkedin':
-            url = `https://www.linkedin.com/sharing/share-offsite/?url=${encodeURIComponent(shareUrl)}`;
+            // Web URL for desktop/fallback
+            webUrl = `https://www.linkedin.com/sharing/share-offsite/?url=${encodeURIComponent(shareUrl)}`;
+            // LinkedIn deep link for share
+            appUrl = `linkedin://shareArticle?url=${encodeURIComponent(shareUrl)}&title=${encodeURIComponent(shareText)}`;
+            // Android Intent for LinkedIn
+            intentUrl = `intent://shareArticle?url=${encodeURIComponent(shareUrl)}#Intent;package=com.linkedin.android;scheme=linkedin;end`;
             break;
         case 'copy':
-            navigator.clipboard.writeText(shareUrl).then(() => {
-                // Show temporary feedback
-                const copyBtn = document.querySelector('.share-option[data-platform="copy"]');
-                if (copyBtn) {
-                    const originalText = copyBtn.innerHTML;
-                    copyBtn.innerHTML = `
-                        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2">
-                            <path d="M20 6L9 17l-5-5"/>
-                        </svg>
-                        Copied!
-                    `;
-                    setTimeout(() => {
-                        copyBtn.innerHTML = originalText;
-                    }, 2000);
+            copyToClipboard(shareUrl).then(success => {
+                if (success) {
+                    // Show temporary feedback
+                    const copyBtn = document.querySelector('.share-option[data-platform="copy"]');
+                    if (copyBtn) {
+                        const originalText = copyBtn.innerHTML;
+                        copyBtn.innerHTML = `
+                            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M20 6L9 17l-5-5"/>
+                            </svg>
+                            Copied!
+                        `;
+                        setTimeout(() => {
+                            copyBtn.innerHTML = originalText;
+                        }, 2000);
+                    }
                 }
-            }).catch(err => {
-                console.error('Failed to copy:', err);
-                alert('Failed to copy link. Please copy manually: ' + shareUrl);
             });
             return;
         default:
             return;
     }
     
-    // Open share dialog in new window
-    window.open(url, '_blank', 'width=600,height=400,menubar=no,toolbar=no');
+    // On mobile with a valid app URL, try to open native app first
+    if (isMobile && appUrl) {
+        openNativeAppOrFallback(appUrl, webUrl, intentUrl);
+    } else {
+        // Desktop or no app URL - open web version
+        window.open(webUrl, '_blank', 'width=600,height=400,menubar=no,toolbar=no');
+    }
 }
 
 function escapeHtml(text) {
@@ -1041,6 +1499,135 @@ function escapeHtml(text) {
     const div = document.createElement('div');
     div.textContent = text;
     return div.innerHTML;
+}
+
+/**
+ * Copy text to clipboard with iOS fallback
+ * iOS Safari doesn't support navigator.clipboard in all contexts
+ */
+async function copyToClipboard(text) {
+    // Try the modern Clipboard API first
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+        try {
+            await navigator.clipboard.writeText(text);
+            return true;
+        } catch (err) {
+            console.log('Clipboard API failed, trying fallback:', err);
+        }
+    }
+    
+    // Fallback for iOS and older browsers
+    try {
+        // Create a temporary textarea
+        const textarea = document.createElement('textarea');
+        textarea.value = text;
+        
+        // Make it invisible but still selectable
+        textarea.style.position = 'fixed';
+        textarea.style.left = '-9999px';
+        textarea.style.top = '0';
+        textarea.style.opacity = '0';
+        textarea.setAttribute('readonly', ''); // Prevent keyboard on iOS
+        
+        document.body.appendChild(textarea);
+        
+        // Handle iOS specifically
+        const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent);
+        
+        if (isIOS) {
+            // iOS requires special handling
+            const range = document.createRange();
+            range.selectNodeContents(textarea);
+            
+            const selection = window.getSelection();
+            selection.removeAllRanges();
+            selection.addRange(range);
+            textarea.setSelectionRange(0, text.length); // For iOS
+        } else {
+            textarea.select();
+        }
+        
+        // Execute copy command
+        const success = document.execCommand('copy');
+        
+        document.body.removeChild(textarea);
+        
+        if (success) {
+            return true;
+        } else {
+            throw new Error('execCommand copy failed');
+        }
+    } catch (err) {
+        console.error('Fallback copy failed:', err);
+        // Last resort: show prompt with the URL
+        prompt('Copy this link:', text);
+        return false;
+    }
+}
+
+/**
+ * Simple markdown to HTML converter for AI summaries
+ * Handles: bold, italic, headers, lists, code, blockquotes, line breaks
+ */
+function renderMarkdown(text) {
+    if (!text) return '';
+    
+    // Escape HTML first to prevent XSS
+    let html = escapeHtml(text);
+    
+    // Headers (must come before other processing)
+    html = html.replace(/^#### (.+)$/gm, '<h4>$1</h4>');
+    html = html.replace(/^### (.+)$/gm, '<h3>$1</h3>');
+    html = html.replace(/^## (.+)$/gm, '<h2>$1</h2>');
+    html = html.replace(/^# (.+)$/gm, '<h1>$1</h1>');
+    
+    // Bold and italic (handle both ** and __ for bold, * and _ for italic)
+    html = html.replace(/\*\*\*(.+?)\*\*\*/g, '<strong><em>$1</em></strong>');
+    html = html.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+    html = html.replace(/__(.+?)__/g, '<strong>$1</strong>');
+    html = html.replace(/\*(.+?)\*/g, '<em>$1</em>');
+    html = html.replace(/_(.+?)_/g, '<em>$1</em>');
+    
+    // Inline code
+    html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
+    
+    // Horizontal rules
+    html = html.replace(/^---$/gm, '<hr>');
+    html = html.replace(/^\*\*\*$/gm, '<hr>');
+    
+    // Blockquotes
+    html = html.replace(/^&gt; (.+)$/gm, '<blockquote>$1</blockquote>');
+    
+    // Unordered lists - process multiple lines
+    html = html.replace(/^- (.+)$/gm, '<li>$1</li>');
+    html = html.replace(/^• (.+)$/gm, '<li>$1</li>');
+    
+    // Wrap consecutive <li> items in <ul>
+    html = html.replace(/(<li>[\s\S]*?<\/li>)(\n<li>[\s\S]*?<\/li>)*/g, (match) => {
+        return '<ul>' + match + '</ul>';
+    });
+    
+    // Numbered lists
+    html = html.replace(/^\d+\. (.+)$/gm, '<li>$1</li>');
+    
+    // Process paragraphs - split by double newlines
+    const paragraphs = html.split(/\n\n+/);
+    html = paragraphs.map(p => {
+        p = p.trim();
+        // Don't wrap if already has block element
+        if (p.startsWith('<h') || p.startsWith('<ul') || p.startsWith('<ol') || 
+            p.startsWith('<blockquote') || p.startsWith('<hr') || p.startsWith('<li')) {
+            return p;
+        }
+        // Replace single newlines with <br> within paragraphs
+        p = p.replace(/\n/g, '<br>');
+        return p ? `<p>${p}</p>` : '';
+    }).join('\n');
+    
+    // Clean up any orphaned list items by wrapping in ul
+    html = html.replace(/<\/ul>\s*<ul>/g, '');
+    
+    return html;
 }
 
 /**

@@ -76,6 +76,14 @@ class Database:
                     INSERT INTO documents_fts(rowid, id, filename, full_text)
                     VALUES (new.rowid, new.id, new.filename, new.full_text);
                 END;
+                
+                -- Table for caching AI-generated summaries
+                CREATE TABLE IF NOT EXISTS summaries (
+                    document_id TEXT PRIMARY KEY,
+                    summary TEXT NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (document_id) REFERENCES documents(id)
+                );
             """)
             conn.commit()
             
@@ -86,6 +94,17 @@ class Database:
                 conn.execute("ALTER TABLE documents ADD COLUMN duration_seconds REAL")
                 conn.commit()
                 print("✅ Added duration_seconds column to documents table")
+            
+            # Migration: Create summaries table if it doesn't exist (for existing databases)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS summaries (
+                    document_id TEXT PRIMARY KEY,
+                    summary TEXT NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (document_id) REFERENCES documents(id)
+                )
+            """)
+            conn.commit()
     
     def rebuild_fts(self):
         """Rebuild the FTS5 index to fix sync issues"""
@@ -192,6 +211,104 @@ class Database:
             for row in cursor:
                 results.append(dict(row))
             return results
+    
+    def count_fulltext_results(self, query: str, 
+                               category: Optional[str] = None,
+                               subcategory: Optional[str] = None,
+                               file_type: Optional[str] = None) -> int:
+        """Count total full-text search results (for pagination)"""
+        with self.get_connection() as conn:
+            sql = """
+                SELECT COUNT(*)
+                FROM documents_fts
+                JOIN documents d ON documents_fts.id = d.id
+                WHERE documents_fts MATCH ?
+            """
+            params = [query]
+            
+            if category:
+                sql += " AND d.category = ?"
+                params.append(category)
+            
+            if subcategory:
+                sql += " AND d.subcategory = ?"
+                params.append(subcategory)
+            
+            if file_type:
+                sql += " AND d.file_type = ?"
+                params.append(file_type)
+            
+            cursor = conn.execute(sql, params)
+            return cursor.fetchone()[0]
+    
+    def get_search_facets(self, query: str, 
+                          category: Optional[str] = None,
+                          subcategory: Optional[str] = None,
+                          file_type: Optional[str] = None) -> Dict[str, Any]:
+        """Get faceted counts for search results (category, subcategory, file_type breakdowns)"""
+        with self.get_connection() as conn:
+            # Base match condition
+            base_match = "documents_fts MATCH ?"
+            base_params = [query]
+            
+            # Category counts (unfiltered by category to show all options)
+            category_sql = f"""
+                SELECT d.category, COUNT(*) as count
+                FROM documents_fts
+                JOIN documents d ON documents_fts.id = d.id
+                WHERE {base_match}
+            """
+            category_params = list(base_params)
+            if file_type:
+                category_sql += " AND d.file_type = ?"
+                category_params.append(file_type)
+            category_sql += " GROUP BY d.category ORDER BY count DESC"
+            
+            cursor = conn.execute(category_sql, category_params)
+            categories = [{"category": row[0], "count": row[1]} for row in cursor.fetchall()]
+            
+            # Subcategory counts (filtered by current category if selected)
+            subcategories = []
+            if category:
+                subcategory_sql = f"""
+                    SELECT d.subcategory, COUNT(*) as count
+                    FROM documents_fts
+                    JOIN documents d ON documents_fts.id = d.id
+                    WHERE {base_match} AND d.category = ?
+                """
+                subcategory_params = list(base_params) + [category]
+                if file_type:
+                    subcategory_sql += " AND d.file_type = ?"
+                    subcategory_params.append(file_type)
+                subcategory_sql += " GROUP BY d.subcategory ORDER BY count DESC"
+                
+                cursor = conn.execute(subcategory_sql, subcategory_params)
+                subcategories = [{"subcategory": row[0], "count": row[1]} for row in cursor.fetchall() if row[0]]
+            
+            # File type counts (unfiltered by file_type to show all options)
+            file_type_sql = f"""
+                SELECT d.file_type, COUNT(*) as count
+                FROM documents_fts
+                JOIN documents d ON documents_fts.id = d.id
+                WHERE {base_match}
+            """
+            file_type_params = list(base_params)
+            if category:
+                file_type_sql += " AND d.category = ?"
+                file_type_params.append(category)
+            if subcategory:
+                file_type_sql += " AND d.subcategory = ?"
+                file_type_params.append(subcategory)
+            file_type_sql += " GROUP BY d.file_type ORDER BY count DESC"
+            
+            cursor = conn.execute(file_type_sql, file_type_params)
+            file_types = [{"file_type": row[0], "count": row[1]} for row in cursor.fetchall()]
+            
+            return {
+                "categories": categories,
+                "subcategories": subcategories,
+                "file_types": file_types
+            }
     
     def get_document(self, doc_id: str) -> Optional[Dict[str, Any]]:
         """Get a single document by ID"""
@@ -326,6 +443,46 @@ class Database:
                 f"SELECT * FROM documents WHERE id IN ({placeholders})", doc_ids
             )
             return [dict(row) for row in cursor]
+    
+    def get_summary(self, doc_id: str) -> Optional[Dict[str, Any]]:
+        """Get a cached summary for a document"""
+        with self.get_connection() as conn:
+            cursor = conn.execute(
+                "SELECT summary, created_at FROM summaries WHERE document_id = ?",
+                (doc_id,)
+            )
+            row = cursor.fetchone()
+            if row:
+                return {
+                    "summary": row["summary"],
+                    "created_at": row["created_at"]
+                }
+            return None
+    
+    def save_summary(self, doc_id: str, summary: str) -> None:
+        """Save a generated summary for a document"""
+        with self.get_connection() as conn:
+            conn.execute("""
+                INSERT OR REPLACE INTO summaries (document_id, summary, created_at)
+                VALUES (?, ?, CURRENT_TIMESTAMP)
+            """, (doc_id, summary))
+            conn.commit()
+    
+    def delete_summary(self, doc_id: str) -> bool:
+        """Delete a cached summary (useful for regeneration)"""
+        with self.get_connection() as conn:
+            cursor = conn.execute(
+                "DELETE FROM summaries WHERE document_id = ?",
+                (doc_id,)
+            )
+            conn.commit()
+            return cursor.rowcount > 0
+    
+    def get_summary_count(self) -> int:
+        """Get total number of cached summaries"""
+        with self.get_connection() as conn:
+            cursor = conn.execute("SELECT COUNT(*) FROM summaries")
+            return cursor.fetchone()[0]
 
 
 class VectorStore:

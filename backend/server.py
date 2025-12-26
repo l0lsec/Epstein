@@ -246,7 +246,7 @@ class SearchRequest(BaseModel):
     category: Optional[str] = None
     subcategory: Optional[str] = None
     file_type: Optional[str] = None  # "pdf", "audio", "video"
-    limit: int = 20
+    limit: int = 50  # Results per page (unlimited total via pagination)
     offset: int = 0
 
 
@@ -448,6 +448,57 @@ async def trigger_index(request: Request, x_api_key: str = Header(None)):
         raise HTTPException(status_code=500, detail="An internal error occurred during indexing")
 
 
+@app.post("/api/index/rebuild-fts")
+async def rebuild_fts_index(request: Request, x_api_key: str = Header(None)):
+    """Rebuild the FTS5 full-text search index to fix sync issues (requires ADMIN_API_KEY)"""
+    global db
+    
+    client_ip, request_id = get_client_info(request)
+    
+    # Check admin API key
+    if not ADMIN_API_KEY:
+        raise HTTPException(status_code=503, detail="Admin API key not configured")
+    
+    if x_api_key != ADMIN_API_KEY:
+        security_logger.log_security_event(
+            event_type="invalid_admin_key",
+            severity="high",
+            client_ip=client_ip,
+            message="Invalid API key for FTS rebuild",
+            request_id=request_id
+        )
+        raise HTTPException(status_code=403, detail="Invalid API key")
+    
+    if not db:
+        raise HTTPException(status_code=503, detail="Database not initialized")
+    
+    try:
+        security_logger.log_system_event(
+            "fts_rebuild_start",
+            f"FTS index rebuild triggered from {client_ip}"
+        )
+        
+        db.rebuild_fts()
+        
+        security_logger.log_system_event(
+            "fts_rebuild_complete",
+            "FTS index rebuilt successfully"
+        )
+        
+        return {
+            "success": True,
+            "message": "FTS index rebuilt successfully"
+        }
+    except Exception as e:
+        security_logger.log_error(
+            error=e,
+            context="fts_rebuild",
+            client_ip=client_ip,
+            request_id=request_id
+        )
+        raise HTTPException(status_code=500, detail=f"Failed to rebuild FTS index: {str(e)}")
+
+
 @app.get("/api/categories")
 async def get_categories():
     """Get all document categories"""
@@ -640,6 +691,7 @@ async def search(search_request: SearchRequest, request: Request) -> dict:
         raise HTTPException(status_code=503, detail="Database not initialized")
     
     results = []
+    total_count = 0
     
     if search_request.search_type in ["fulltext", "hybrid"]:
         # Full-text search
@@ -648,6 +700,13 @@ async def search(search_request: SearchRequest, request: Request) -> dict:
                 query=search_request.query,
                 limit=search_request.limit,
                 offset=search_request.offset,
+                category=search_request.category,
+                subcategory=search_request.subcategory,
+                file_type=search_request.file_type
+            )
+            # Get actual total count for pagination
+            total_count = db.count_fulltext_results(
+                query=search_request.query,
                 category=search_request.category,
                 subcategory=search_request.subcategory,
                 file_type=search_request.file_type
@@ -670,7 +729,7 @@ async def search(search_request: SearchRequest, request: Request) -> dict:
                 raise HTTPException(status_code=400, detail="Search query error. Please check your search syntax.")
     
     if search_request.search_type in ["semantic", "hybrid"] and vector_store:
-        # Semantic search
+        # Semantic search (doesn't support pagination as well, so we use it for discovery)
         sem_results = vector_store.search(
             query=search_request.query,
             n_results=search_request.limit,
@@ -701,17 +760,40 @@ async def search(search_request: SearchRequest, request: Request) -> dict:
                         "score": r.get("score", 0)
                     })
                     existing_ids.add(doc_id)
+        
+        # For semantic/hybrid, total is approximate since vector search doesn't have exact count
+        if search_request.search_type == "semantic":
+            total_count = len(results)
+        # For hybrid, use fulltext total as the authoritative count
     
-    # Sort by score
+    # Sort by score (results are already paginated for fulltext)
     results.sort(key=lambda x: x.get("score", 0), reverse=True)
-    final_results = results[:search_request.limit]
+    
+    # Get faceted counts for filter dropdowns
+    facets = {}
+    if search_request.search_type in ["fulltext", "hybrid"]:
+        try:
+            facets = db.get_search_facets(
+                query=search_request.query,
+                category=search_request.category,
+                subcategory=search_request.subcategory,
+                file_type=search_request.file_type
+            )
+        except Exception as e:
+            security_logger.log_error(
+                error=e,
+                context="search_facets",
+                client_ip=client_ip,
+                request_id=request_id
+            )
+            # Non-fatal: continue without facets
     
     # Log the search query for audit
     security_logger.log_search_query(
         client_ip=client_ip,
         query=search_request.query,
         search_type=search_request.search_type,
-        result_count=len(final_results),
+        result_count=len(results),
         request_id=request_id,
         category=search_request.category,
         file_type=search_request.file_type
@@ -720,8 +802,11 @@ async def search(search_request: SearchRequest, request: Request) -> dict:
     return {
         "query": search_request.query,
         "search_type": search_request.search_type,
-        "total": len(results),
-        "results": final_results
+        "total": total_count,
+        "offset": search_request.offset,
+        "limit": search_request.limit,
+        "results": results,
+        "facets": facets
     }
 
 
@@ -972,15 +1057,12 @@ async def ask_question_stream(ask_request: AskRequest, request: Request):
 
 
 @app.get("/api/documents/{doc_id}/summary")
-async def get_document_summary(doc_id: str, request: Request):
-    """Get an AI-generated summary of a document"""
+async def get_document_summary(doc_id: str, request: Request, regenerate: bool = False):
+    """Get an AI-generated summary of a document (cached if available)"""
     client_ip, request_id = get_client_info(request)
     
     if not db:
         raise HTTPException(status_code=503, detail="Database not initialized")
-    
-    if not llm or not llm.is_available():
-        raise HTTPException(status_code=503, detail="LLM not configured")
     
     doc = db.get_document(doc_id)
     if not doc:
@@ -994,18 +1076,51 @@ async def get_document_summary(doc_id: str, request: Request):
         )
         raise HTTPException(status_code=404, detail="Document not found")
     
-    # Log document summary request
+    # Check for cached summary first (unless regenerate is requested)
+    if not regenerate:
+        cached = db.get_summary(doc_id)
+        if cached:
+            security_logger.log_document_access(
+                client_ip=client_ip,
+                document_id=doc_id,
+                document_path=doc.get("path", ""),
+                action="summary_cached",
+                request_id=request_id,
+                filename=doc.get("filename", "")
+            )
+            return {
+                "document_id": doc_id,
+                "filename": doc["filename"],
+                "summary": cached["summary"],
+                "cached": True,
+                "generated_at": cached["created_at"]
+            }
+    
+    # No cached summary (or regenerate requested) - need to generate one
+    if not llm or not llm.is_available():
+        raise HTTPException(status_code=503, detail="LLM not configured")
+    
+    # Log document summary generation request
     security_logger.log_document_access(
         client_ip=client_ip,
         document_id=doc_id,
         document_path=doc.get("path", ""),
-        action="summary",
+        action="summary_generate",
         request_id=request_id,
         filename=doc.get("filename", "")
     )
     
     try:
         summary = llm.summarize_document(doc)
+        
+        # Save the generated summary to cache
+        db.save_summary(doc_id, summary)
+        
+        security_logger.log_system_event(
+            "summary_cached",
+            f"New summary cached for document: {doc_id}",
+            document_id=doc_id
+        )
     except Exception as e:
         security_logger.log_error(
             error=e,
@@ -1019,7 +1134,8 @@ async def get_document_summary(doc_id: str, request: Request):
     return {
         "document_id": doc_id,
         "filename": doc["filename"],
-        "summary": summary
+        "summary": summary,
+        "cached": False
     }
 
 

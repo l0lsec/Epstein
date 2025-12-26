@@ -227,8 +227,9 @@ def extract_all_media(force=False):
     results = extractor.extract_all(max_workers=8, force=force)
     
     print(f"\n✓ Extraction complete:")
-    print(f"  📄 PDFs - Success: {results['pdf']['success']}, Failed: {results['pdf']['failed']}, Skipped: {results['pdf']['skipped']}")
-    print(f"  🎤 Media - Success: {results['media']['success']}, Failed: {results['media']['failed']}, Skipped: {results['media']['skipped']}")
+    print(f"  📄 PDFs   - Success: {results['pdf']['success']}, Failed: {results['pdf']['failed']}, Skipped: {results['pdf']['skipped']}")
+    print(f"  🖼️  Images - Success: {results['image']['success']}, Failed: {results['image']['failed']}, Skipped: {results['image']['skipped']}")
+    print(f"  🎤 Media  - Success: {results['media']['success']}, Failed: {results['media']['failed']}, Skipped: {results['media']['skipped']}")
     
     # Show final status
     show_extraction_status()
@@ -413,6 +414,10 @@ Adding new files (PDFs, audio, video):
   python run.py add /path/to/folder/                     # Add all supported files
   python run.py add /path/to/files --category "Evidence" # Add to specific category
 
+Database maintenance:
+  python run.py fix-fts                                  # Rebuild FTS5 full-text search index
+  python run.py cleanup-db                               # Remove orphaned/duplicate entries
+
 Supported formats:
   Documents: .pdf
   Audio: .wav, .mp3, .m4a, .ogg, .flac, .aac, .wma
@@ -425,7 +430,7 @@ Data Sources:
     )
     
     parser.add_argument("command", nargs="?", default="all",
-                        choices=["setup", "extract", "index", "server", "all", "add", "download"],
+                        choices=["setup", "extract", "index", "server", "all", "add", "download", "fix-fts", "cleanup-db"],
                         help="Command to run")
     parser.add_argument("source", nargs="?", default=None,
                         help="Source path for 'add' command (file or directory)")
@@ -471,6 +476,96 @@ Data Sources:
             print("  Usage: python run.py add /path/to/pdfs [--category NAME]")
             sys.exit(1)
         add_documents(args.source, category=args.category)
+        sys.exit(0)
+    
+    # Handle fix-fts command
+    if args.command == "fix-fts":
+        print("\n" + "="*60)
+        print("REBUILDING FTS5 FULL-TEXT SEARCH INDEX")
+        print("="*60)
+        
+        from backend.database import Database
+        db_path = BASE_PATH / "epstein.db"
+        if not db_path.exists():
+            print("✗ Database not found. Run 'python run.py setup' first.")
+            sys.exit(1)
+        
+        db = Database(str(db_path))
+        db.rebuild_fts()
+        print("✅ FTS5 index rebuilt successfully!")
+        sys.exit(0)
+    
+    # Handle cleanup-db command
+    if args.command == "cleanup-db":
+        print("\n" + "="*60)
+        print("DATABASE CLEANUP - Removing orphaned entries")
+        print("="*60)
+        
+        import sqlite3
+        db_path = BASE_PATH / "epstein.db"
+        if not db_path.exists():
+            print("✗ Database not found. Run 'python run.py setup' first.")
+            sys.exit(1)
+        
+        conn = sqlite3.connect(str(db_path))
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        
+        # Find documents with non-existent files
+        print("\n🔍 Checking for orphaned database entries...")
+        cursor.execute("SELECT id, path, filename FROM documents")
+        orphaned = []
+        for row in cursor.fetchall():
+            file_path = BASE_PATH / row['path']
+            if not file_path.exists():
+                orphaned.append((row['id'], row['path'], row['filename']))
+        
+        if orphaned:
+            print(f"  Found {len(orphaned)} orphaned entries:")
+            for doc_id, path, filename in orphaned[:10]:
+                print(f"    - {filename} ({path})")
+            if len(orphaned) > 10:
+                print(f"    ... and {len(orphaned) - 10} more")
+            
+            confirm = input("\n  Delete these entries? [y/N]: ")
+            if confirm.lower() == 'y':
+                for doc_id, path, filename in orphaned:
+                    cursor.execute("DELETE FROM documents WHERE id = ?", (doc_id,))
+                conn.commit()
+                print(f"  ✓ Deleted {len(orphaned)} orphaned entries")
+                
+                # Rebuild FTS index
+                print("\n  🔄 Rebuilding FTS index...")
+                from backend.database import Database
+                db = Database(str(db_path))
+                db.rebuild_fts()
+                print("  ✓ FTS index rebuilt")
+            else:
+                print("  ⚠ Skipped deletion")
+        else:
+            print("  ✓ No orphaned entries found")
+        
+        # Find and report duplicates
+        print("\n🔍 Checking for duplicate entries (same filename)...")
+        cursor.execute("""
+            SELECT filename, COUNT(*) as cnt, GROUP_CONCAT(id, ', ') as ids
+            FROM documents 
+            GROUP BY filename 
+            HAVING cnt > 1
+            ORDER BY cnt DESC
+            LIMIT 20
+        """)
+        duplicates = cursor.fetchall()
+        
+        if duplicates:
+            print(f"  Found {len(duplicates)} filenames with multiple entries:")
+            for row in duplicates[:10]:
+                print(f"    - {row['filename']} ({row['cnt']} entries)")
+        else:
+            print("  ✓ No duplicates found")
+        
+        conn.close()
+        print("\n✅ Database cleanup complete!")
         sys.exit(0)
     
     # Step 0: Check/download FOIA files
