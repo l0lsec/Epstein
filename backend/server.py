@@ -922,6 +922,15 @@ async def get_document_file(doc_id: str, request: Request):
         '.mp4': 'video/mp4',
         '.mov': 'video/quicktime',
         '.m4a': 'audio/mp4',
+        # Image types
+        '.jpg': 'image/jpeg',
+        '.jpeg': 'image/jpeg',
+        '.png': 'image/png',
+        '.gif': 'image/gif',
+        '.tif': 'image/tiff',
+        '.tiff': 'image/tiff',
+        '.bmp': 'image/bmp',
+        '.webp': 'image/webp',
     }
     media_type = media_types.get(ext, 'application/octet-stream')
     

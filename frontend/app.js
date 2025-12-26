@@ -1002,7 +1002,7 @@ async function openDocument(docId) {
         
         // Determine file type icon
         const fileType = doc.file_type || 'pdf';
-        const fileIcon = fileType === 'audio' ? '🎵' : fileType === 'video' ? '🎬' : '📄';
+        const fileIcon = fileType === 'audio' ? '🎵' : fileType === 'video' ? '🎬' : fileType === 'image' ? '🖼️' : '📄';
         
         // Populate modal
         elements.modalTitle.textContent = doc.filename;
@@ -1094,6 +1094,20 @@ async function openDocument(docId) {
                             Your browser does not support the video element.
                         </video>
                         <p class="media-hint">See "Text Content" tab for the full transcription</p>
+                    </div>
+                `;
+            }
+        } else if (fileType === 'image') {
+            // Show image viewer
+            elements.pdfIframe.src = '';
+            elements.pdfIframe.style.display = 'none';
+            elements.pdfFallback.classList.add('hidden');
+            if (mediaViewer) {
+                mediaViewer.classList.remove('hidden');
+                mediaViewer.innerHTML = `
+                    <div class="media-player-container image-viewer">
+                        <img src="${fileUrl}" alt="${doc.filename}" class="image-preview" />
+                        <p class="media-hint">See "Text Content" tab for OCR-extracted text</p>
                     </div>
                 `;
             }
@@ -1301,6 +1315,10 @@ function getDocumentIcon(fileType) {
         return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
             <path d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z"/>
         </svg>`;
+    } else if (fileType === 'image') {
+        return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+            <path d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"/>
+        </svg>`;
     }
     // Default: PDF/document icon
     return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
@@ -1314,6 +1332,9 @@ function getDocumentMeta(doc) {
             return formatDuration(doc.duration_seconds);
         }
         return doc.file_type === 'audio' ? '🎵 Audio' : '🎬 Video';
+    }
+    if (doc.file_type === 'image') {
+        return '🖼️ Image';
     }
     return `${doc.page_count || 0} pages`;
 }
@@ -1350,6 +1371,9 @@ function getSearchResultMeta(result) {
             return formatDuration(result.duration_seconds);
         }
         return result.file_type === 'audio' ? '🎵 Audio' : '🎬 Video';
+    }
+    if (result.file_type === 'image') {
+        return '🖼️ Image';
     }
     return result.page_count ? `${result.page_count} pages` : '';
 }
