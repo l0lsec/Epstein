@@ -25,6 +25,83 @@ from security_logger import (
     get_security_logger,
     get_client_info
 )
+import httpx
+
+
+# IP Geolocation cache and helper
+_ip_geo_cache = {}
+
+async def lookup_ip_geo(ip: str) -> dict:
+    """Look up geolocation for an IP address using ip-api.com"""
+    # Check cache first
+    if ip in _ip_geo_cache:
+        return _ip_geo_cache[ip]
+    
+    # Skip private/local IPs
+    if (ip == 'unknown' or ip.startswith('127.') or ip.startswith('192.168.') or 
+        ip.startswith('10.') or ip.startswith('172.16.') or ip == 'localhost' or
+        ip.startswith('::1') or ip == ''):
+        result = {'city': 'Local', 'country': 'Local', 'isp': 'Private Network', 'region': ''}
+        _ip_geo_cache[ip] = result
+        return result
+    
+    try:
+        async with httpx.AsyncClient(timeout=3.0) as client:
+            response = await client.get(
+                f"http://ip-api.com/json/{ip}",
+                params={"fields": "status,country,regionName,city,isp,org"}
+            )
+            if response.status_code == 200:
+                data = response.json()
+                if data.get('status') == 'success':
+                    result = {
+                        'city': data.get('city', 'Unknown'),
+                        'region': data.get('regionName', ''),
+                        'country': data.get('country', 'Unknown'),
+                        'isp': data.get('isp') or data.get('org') or 'Unknown'
+                    }
+                    _ip_geo_cache[ip] = result
+                    return result
+    except Exception as e:
+        pass  # Silently fail for geo lookups
+    
+    fallback = {'city': 'Unknown', 'country': 'Unknown', 'isp': 'Unknown', 'region': ''}
+    _ip_geo_cache[ip] = fallback
+    return fallback
+
+
+async def enrich_with_geo(items: list, ip_field: str = 'client_ip', limit: int = 20) -> list:
+    """Add geolocation data to a list of items with IP addresses"""
+    # Get unique IPs
+    unique_ips = list(set(item.get(ip_field, '') for item in items[:limit] if item.get(ip_field)))[:limit]
+    
+    # Batch lookup (with small delays to avoid rate limiting)
+    geo_data = {}
+    for ip in unique_ips:
+        geo_data[ip] = await lookup_ip_geo(ip)
+        await asyncio.sleep(0.05)  # Small delay to avoid rate limits
+    
+    # Enrich items
+    for item in items:
+        ip = item.get(ip_field, '')
+        if ip in geo_data:
+            geo = geo_data[ip]
+            item['geo_city'] = geo.get('city', 'Unknown')
+            item['geo_region'] = geo.get('region', '')
+            item['geo_country'] = geo.get('country', 'Unknown')
+            item['geo_isp'] = geo.get('isp', 'Unknown')
+            # Format location string
+            if geo['city'] == 'Unknown':
+                item['geo_location'] = geo['country']
+            elif geo['region']:
+                item['geo_location'] = f"{geo['city']}, {geo['region']}, {geo['country']}"
+            else:
+                item['geo_location'] = f"{geo['city']}, {geo['country']}"
+        else:
+            item['geo_location'] = 'Unknown'
+            item['geo_isp'] = 'Unknown'
+    
+    return items
 
 
 # Configuration
@@ -1513,6 +1590,9 @@ async def get_request_telemetry(
         })
     recent_requests.reverse()  # Most recent first
     
+    # Enrich with geolocation data
+    await enrich_with_geo(recent_requests, 'client_ip', limit=30)
+    
     return {
         "timeframe": timeframe,
         "total_requests": len(filtered),
@@ -1841,7 +1921,11 @@ async def get_visitor_telemetry(request: Request, x_api_key: str = Header(None))
         if ip and ip != "unknown":
             ip_counts[ip] = ip_counts.get(ip, 0) + 1
     
-    top_ips = sorted(ip_counts.items(), key=lambda x: x[1], reverse=True)[:20]
+    top_ips_list = sorted(ip_counts.items(), key=lambda x: x[1], reverse=True)[:20]
+    top_ips = [{"ip": ip, "client_ip": ip, "count": c} for ip, c in top_ips_list]
+    
+    # Enrich top IPs with geolocation data
+    await enrich_with_geo(top_ips, 'client_ip', limit=20)
     
     return {
         "unique_visitors_today": len(set(e.get("client_ip", "") for e in last_day)),
@@ -1849,7 +1933,7 @@ async def get_visitor_telemetry(request: Request, x_api_key: str = Header(None))
         "daily_unique_visitors": daily_unique,
         "browsers": user_agents,
         "top_referrers": [{"domain": d, "count": c} for d, c in top_referrers],
-        "top_ips": [{"ip": ip, "count": c} for ip, c in top_ips]
+        "top_ips": top_ips
     }
 
 

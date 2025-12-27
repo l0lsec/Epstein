@@ -1201,49 +1201,7 @@ function formatTimeAgo(iso) {
 // IP GEOLOCATION AND RECENT REQUESTS
 // ============================================================================
 
-// Cache for IP geolocation lookups
-const ipGeoCache = new Map();
-
-async function lookupIPGeo(ip) {
-    // Check cache first
-    if (ipGeoCache.has(ip)) {
-        return ipGeoCache.get(ip);
-    }
-    
-    // Skip private/local IPs
-    if (ip === 'unknown' || ip.startsWith('127.') || ip.startsWith('192.168.') || 
-        ip.startsWith('10.') || ip.startsWith('172.16.') || ip === 'localhost') {
-        const result = { city: 'Local', country: 'Local', isp: 'Private Network' };
-        ipGeoCache.set(ip, result);
-        return result;
-    }
-    
-    try {
-        // Use ip-api.com (free, no API key needed, rate limited)
-        const response = await fetch(`http://ip-api.com/json/${ip}?fields=status,country,regionName,city,isp,org`);
-        if (!response.ok) throw new Error('Geo lookup failed');
-        const data = await response.json();
-        
-        if (data.status === 'success') {
-            const result = {
-                city: data.city || 'Unknown',
-                region: data.regionName || '',
-                country: data.country || 'Unknown',
-                isp: data.isp || data.org || 'Unknown'
-            };
-            ipGeoCache.set(ip, result);
-            return result;
-        }
-    } catch (e) {
-        console.warn(`Geo lookup failed for ${ip}:`, e);
-    }
-    
-    const fallback = { city: 'Unknown', country: 'Unknown', isp: 'Unknown' };
-    ipGeoCache.set(ip, fallback);
-    return fallback;
-}
-
-async function renderRecentRequestsTable(requests) {
+function renderRecentRequestsTable(requests) {
     const tbody = document.getElementById('recent-requests-body');
     if (!tbody) return;
     
@@ -1252,51 +1210,29 @@ async function renderRecentRequestsTable(requests) {
         return;
     }
     
-    // First render with placeholders
+    // Render with geo data from backend
     tbody.innerHTML = requests.map((req, i) => {
         const statusClass = req.status_code < 400 ? 'badge-success' : req.status_code < 500 ? 'badge-warning' : 'badge-danger';
         const timeAgo = formatTimeAgo(req.timestamp);
         const uaShort = req.user_agent ? (req.user_agent.length > 40 ? req.user_agent.substring(0, 40) + '...' : req.user_agent) : 'Unknown';
         const pathShort = req.path ? (req.path.length > 30 ? req.path.substring(0, 30) + '...' : req.path) : '/';
+        const location = req.geo_location || 'Unknown';
+        const isp = req.geo_isp || '';
         
         return `
-            <tr data-ip="${escapeHtml(req.client_ip)}" data-row="${i}">
+            <tr>
                 <td style="white-space: nowrap; font-size: 0.8rem; color: var(--text-muted);">${timeAgo}</td>
                 <td style="font-family: monospace; font-size: 0.85rem;">${escapeHtml(req.client_ip)}</td>
-                <td class="geo-cell" data-ip="${escapeHtml(req.client_ip)}" style="font-size: 0.85rem;">
-                    <span class="spinner" style="width: 12px; height: 12px;"></span>
-                </td>
+                <td style="font-size: 0.85rem;" title="${escapeHtml(isp)}">${escapeHtml(location)}</td>
                 <td title="${escapeHtml(req.path || '')}" style="font-size: 0.85rem;">${escapeHtml(pathShort)}</td>
                 <td title="${escapeHtml(req.user_agent || '')}" style="font-size: 0.8rem; color: var(--text-muted); max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${escapeHtml(uaShort)}</td>
                 <td><span class="badge ${statusClass}">${req.status_code || '?'}</span></td>
             </tr>
         `;
     }).join('');
-    
-    // Now fetch geolocation for unique IPs
-    const uniqueIPs = [...new Set(requests.map(r => r.client_ip).filter(ip => ip && ip !== 'unknown'))];
-    
-    // Batch lookup (ip-api.com has rate limits, so we do them sequentially with small delay)
-    for (const ip of uniqueIPs.slice(0, 15)) { // Limit to first 15 unique IPs
-        const geo = await lookupIPGeo(ip);
-        
-        // Update all cells with this IP
-        document.querySelectorAll(`.geo-cell[data-ip="${ip}"]`).forEach(cell => {
-            const location = geo.city === 'Unknown' ? geo.country : `${geo.city}, ${geo.country}`;
-            cell.innerHTML = `<span title="${escapeHtml(geo.isp || '')}">${escapeHtml(location)}</span>`;
-        });
-        
-        // Small delay to avoid rate limiting
-        await new Promise(r => setTimeout(r, 100));
-    }
-    
-    // Mark any remaining as unknown
-    document.querySelectorAll('.geo-cell .spinner').forEach(spinner => {
-        spinner.parentElement.innerHTML = '<span style="color: var(--text-muted);">—</span>';
-    });
 }
 
-async function renderTopIpsTable(topIps) {
+function renderTopIpsTable(topIps) {
     const tbody = document.getElementById('top-ips-body');
     if (!tbody) return;
     
@@ -1305,48 +1241,22 @@ async function renderTopIpsTable(topIps) {
         return;
     }
     
-    // First render with placeholders
-    tbody.innerHTML = topIps.map((item, i) => `
-        <tr data-ip="${escapeHtml(item.ip)}" data-row="${i}">
-            <td style="font-family: monospace; font-size: 0.9rem;">${escapeHtml(item.ip)}</td>
-            <td class="geo-location" data-ip="${escapeHtml(item.ip)}">
-                <span class="spinner" style="width: 12px; height: 12px;"></span>
-            </td>
-            <td class="geo-isp" data-ip="${escapeHtml(item.ip)}" style="font-size: 0.85rem; color: var(--text-muted);">
-                <span class="spinner" style="width: 12px; height: 12px;"></span>
-            </td>
-            <td style="text-align: right;">
-                <span class="badge badge-info">${formatNumber(item.count)}</span>
-            </td>
-        </tr>
-    `).join('');
-    
-    // Fetch geolocation for each IP
-    for (const item of topIps.slice(0, 20)) {
-        const geo = await lookupIPGeo(item.ip);
+    // Render with geo data from backend
+    tbody.innerHTML = topIps.map(item => {
+        const location = item.geo_location || 'Unknown';
+        const isp = item.geo_isp || 'Unknown';
         
-        // Update location cell
-        const locationCell = document.querySelector(`.geo-location[data-ip="${item.ip}"]`);
-        if (locationCell) {
-            const location = geo.city === 'Unknown' ? geo.country : 
-                geo.region ? `${geo.city}, ${geo.region}, ${geo.country}` : `${geo.city}, ${geo.country}`;
-            locationCell.innerHTML = `<span>${escapeHtml(location)}</span>`;
-        }
-        
-        // Update ISP cell
-        const ispCell = document.querySelector(`.geo-isp[data-ip="${item.ip}"]`);
-        if (ispCell) {
-            ispCell.innerHTML = `<span title="${escapeHtml(geo.isp || '')}">${escapeHtml(truncate(geo.isp || 'Unknown', 30))}</span>`;
-        }
-        
-        // Small delay to avoid rate limiting
-        await new Promise(r => setTimeout(r, 150));
-    }
-    
-    // Mark any remaining as unknown
-    document.querySelectorAll('.geo-location .spinner, .geo-isp .spinner').forEach(spinner => {
-        spinner.parentElement.innerHTML = '<span style="color: var(--text-muted);">—</span>';
-    });
+        return `
+            <tr>
+                <td style="font-family: monospace; font-size: 0.9rem;">${escapeHtml(item.ip)}</td>
+                <td style="font-size: 0.9rem;">${escapeHtml(location)}</td>
+                <td style="font-size: 0.85rem; color: var(--text-muted);" title="${escapeHtml(isp)}">${escapeHtml(truncate(isp, 30))}</td>
+                <td style="text-align: right;">
+                    <span class="badge badge-info">${formatNumber(item.count)}</span>
+                </td>
+            </tr>
+        `;
+    }).join('');
 }
 
 // ============================================================================

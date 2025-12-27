@@ -32,7 +32,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Crimson+Pro:wght@400;500;600&family=JetBrains+Mono:wght@400;500&family=Source+Sans+3:wght@300;400;500;600;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="/static/styles.css?v=5">
+    <link rel="stylesheet" href="/static/styles.css?v=12">
     
     <!-- Structured Data (JSON-LD) -->
     <script type="application/ld+json">
@@ -79,8 +79,8 @@
     </header>
 
     <div class="donation-banner">
-        <span class="banner-icon">💛</span>
-        <span class="banner-text">Support this project! Your donation helps keep this archive accessible to everyone.</span>
+        
+        <span class="banner-text">💛 Support this project! Your donation helps keep this archive accessible to everyone. 💛</span>
         <a href="https://www.paypal.com/donate/?business=KRYTAPVDR46SY&no_recurring=0&item_name=Your+support+helps+cover+server+costs+and+keeps+this+information+freely+accessible+to+researchers%2C+journalists%2C+and+the+public.&currency_code=USD" class="banner-btn" target="_blank" rel="noopener noreferrer">Donate Now</a>
     </div>
 
@@ -397,6 +397,21 @@
                                 <p class="pdf-fallback-hint">View the text content tab to see the extracted content</p>
                             </div>
                         </div>
+                        <div id="document-navigation" class="document-navigation hidden">
+                            <button id="doc-prev-btn" class="doc-nav-btn" disabled>
+                                <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2">
+                                    <path d="M19 12H5M12 19l-7-7 7-7"/>
+                                </svg>
+                                <span>Previous</span>
+                            </button>
+                            <span id="doc-nav-info" class="doc-nav-info">1 of 1</span>
+                            <button id="doc-next-btn" class="doc-nav-btn" disabled>
+                                <span>Next</span>
+                                <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2">
+                                    <path d="M5 12h14M12 5l7 7-7 7"/>
+                                </svg>
+                            </button>
+                        </div>
                     </div>
                     <div id="modal-content-tab" class="tab-content">
                         <div id="modal-text" class="modal-text"></div>
@@ -478,7 +493,7 @@
     </footer>
 
     <script src="https://www.google.com/recaptcha/api.js?render=6Lf9EDYsAAAAANDlA_xYFIM7Ylccgmc24LhZgDIr"></script>
-    <script src="/static/app.js?v=13"></script>
+    <script src="/static/app.js?v=14"></script>
 </body>
 </html>
 

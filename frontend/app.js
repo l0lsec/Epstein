@@ -22,7 +22,10 @@ let state = {
     searchPage: 0,
     searchLimit: 50,  // Results per page
     searchTotal: 0,
-    lastSearchParams: null  // Store last search to enable pagination
+    lastSearchParams: null,  // Store last search to enable pagination
+    // Document navigation state
+    documentList: [],  // Current list of documents (from search or browse)
+    documentIndex: -1  // Current index within documentList
 };
 
 // DOM Elements
@@ -99,6 +102,12 @@ function cacheElements() {
     elements.pdfIframe = document.getElementById('pdf-iframe');
     elements.pdfFallback = document.getElementById('pdf-fallback');
     elements.modalTabs = document.querySelectorAll('.modal-tab');
+    
+    // Document Navigation
+    elements.docNavigation = document.getElementById('document-navigation');
+    elements.docPrevBtn = document.getElementById('doc-prev-btn');
+    elements.docNextBtn = document.getElementById('doc-next-btn');
+    elements.docNavInfo = document.getElementById('doc-nav-info');
 }
 
 function setupEventListeners() {
@@ -252,6 +261,14 @@ function setupEventListeners() {
         tab.addEventListener('click', () => switchModalTab(tab.dataset.tab));
     });
     
+    // Document Navigation
+    if (elements.docPrevBtn) {
+        elements.docPrevBtn.addEventListener('click', () => navigateDocument(-1));
+    }
+    if (elements.docNextBtn) {
+        elements.docNextBtn.addEventListener('click', () => navigateDocument(1));
+    }
+    
     // PDF Fullscreen toggle
     const pdfFullscreenBtn = document.getElementById('pdf-fullscreen-btn');
     const pdfViewer = document.getElementById('modal-pdf-viewer');
@@ -305,6 +322,16 @@ function setupEventListeners() {
     // Keyboard shortcuts
     document.addEventListener('keydown', e => {
         if (e.key === 'Escape') closeModal();
+        // Arrow key navigation for documents when modal is open
+        if (!elements.modal.classList.contains('hidden') && state.documentList.length > 1) {
+            if (e.key === 'ArrowLeft') {
+                e.preventDefault();
+                navigateDocument(-1);
+            } else if (e.key === 'ArrowRight') {
+                e.preventDefault();
+                navigateDocument(1);
+            }
+        }
     });
 }
 
@@ -774,8 +801,11 @@ function renderSearchResults(data) {
         return;
     }
     
-    elements.resultsList.innerHTML = data.results.map(result => `
-        <div class="result-item" data-id="${result.id}">
+    // Store document list for navigation
+    state.documentList = data.results.map(r => ({ id: r.id, filename: r.filename }));
+    
+    elements.resultsList.innerHTML = data.results.map((result, index) => `
+        <div class="result-item" data-id="${result.id}" data-index="${index}">
             <div class="result-header">
                 <span class="result-filename">${escapeHtml(result.filename)}</span>
                 ${result.score ? `<span class="result-score">${formatRelevanceScore(result.score, result.search_type)}</span>` : ''}
@@ -791,7 +821,10 @@ function renderSearchResults(data) {
     
     // Add click handlers
     elements.resultsList.querySelectorAll('.result-item').forEach(item => {
-        item.addEventListener('click', () => openDocument(item.dataset.id));
+        item.addEventListener('click', () => {
+            const index = parseInt(item.dataset.index);
+            openDocument(item.dataset.id, index);
+        });
     });
     
     // Update filter dropdowns with faceted counts
@@ -971,11 +1004,15 @@ function renderDocuments(data) {
     
     if (!data.documents || data.documents.length === 0) {
         elements.documentsGrid.innerHTML = '<p class="no-results">No documents found.</p>';
+        state.documentList = [];
         return;
     }
     
-    elements.documentsGrid.innerHTML = data.documents.map(doc => `
-        <div class="document-card" data-id="${doc.id}">
+    // Store document list for navigation
+    state.documentList = data.documents.map(d => ({ id: d.id, filename: d.filename }));
+    
+    elements.documentsGrid.innerHTML = data.documents.map((doc, index) => `
+        <div class="document-card" data-id="${doc.id}" data-index="${index}">
             <div class="document-icon">
                 ${getDocumentIcon(doc.file_type)}
             </div>
@@ -988,17 +1025,31 @@ function renderDocuments(data) {
     
     // Add click handlers
     elements.documentsGrid.querySelectorAll('.document-card').forEach(card => {
-        card.addEventListener('click', () => openDocument(card.dataset.id));
+        card.addEventListener('click', () => {
+            const index = parseInt(card.dataset.index);
+            openDocument(card.dataset.id, index);
+        });
     });
 }
 
-async function openDocument(docId) {
+async function openDocument(docId, index = -1) {
     try {
         const response = await fetch(`${API_BASE}/documents/${docId}`);
         if (!response.ok) throw new Error('Document not found');
         
         const doc = await response.json();
         state.currentDocument = doc;
+        
+        // Track document index for navigation
+        if (index >= 0) {
+            state.documentIndex = index;
+        } else {
+            // Try to find the document in the current list
+            state.documentIndex = state.documentList.findIndex(d => d.id === docId);
+        }
+        
+        // Update navigation UI
+        updateDocumentNavigation();
         
         // Determine file type icon
         const fileType = doc.file_type || 'pdf';
@@ -1182,6 +1233,41 @@ function closeModal() {
     if (pdfViewer && pdfViewer.classList.contains('fullscreen')) {
         pdfViewer.classList.remove('fullscreen');
         document.body.style.overflow = '';
+    }
+}
+
+function updateDocumentNavigation() {
+    if (!elements.docNavigation) return;
+    
+    const hasMultipleDocs = state.documentList.length > 1;
+    const currentIndex = state.documentIndex;
+    
+    // Show/hide navigation
+    if (hasMultipleDocs && currentIndex >= 0) {
+        elements.docNavigation.classList.remove('hidden');
+        
+        // Update info text
+        elements.docNavInfo.textContent = `${currentIndex + 1} of ${state.documentList.length}`;
+        
+        // Update button states
+        elements.docPrevBtn.disabled = currentIndex <= 0;
+        elements.docNextBtn.disabled = currentIndex >= state.documentList.length - 1;
+    } else {
+        elements.docNavigation.classList.add('hidden');
+    }
+}
+
+async function navigateDocument(direction) {
+    if (state.documentList.length === 0 || state.documentIndex < 0) return;
+    
+    const newIndex = state.documentIndex + direction;
+    
+    // Bounds check
+    if (newIndex < 0 || newIndex >= state.documentList.length) return;
+    
+    const nextDoc = state.documentList[newIndex];
+    if (nextDoc && nextDoc.id) {
+        await openDocument(nextDoc.id, newIndex);
     }
 }
 

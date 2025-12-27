@@ -1480,6 +1480,64 @@ body {
     padding: var(--space-md);
 }
 
+/* Document Navigation */
+.document-navigation {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: var(--space-lg);
+    padding: var(--space-md);
+    margin-top: var(--space-md);
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+}
+
+.document-navigation.hidden {
+    display: none;
+}
+
+.doc-nav-btn {
+    display: flex;
+    align-items: center;
+    gap: var(--space-sm);
+    padding: var(--space-sm) var(--space-md);
+    background: var(--bg-secondary);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    color: var(--text-primary);
+    font-family: var(--font-body);
+    font-size: 0.9rem;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all var(--transition-fast);
+}
+
+.doc-nav-btn:hover:not(:disabled) {
+    background: var(--accent-glow);
+    border-color: var(--accent-dim);
+    color: var(--accent);
+}
+
+.doc-nav-btn:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+}
+
+.doc-nav-btn svg {
+    width: 18px;
+    height: 18px;
+    flex-shrink: 0;
+}
+
+.doc-nav-info {
+    color: var(--text-muted);
+    font-size: 0.9rem;
+    font-weight: 500;
+    min-width: 80px;
+    text-align: center;
+}
+
 .tab-content.active {
     display: block;
 }
@@ -2287,14 +2345,25 @@ body {
 
 /* Responsive */
 @media (max-width: 768px) {
-    /* Donation Banner Mobile Fix */
+    /* Donation Banner Mobile - Fixed at top */
     .donation-banner {
         flex-direction: column;
         text-align: center;
-        padding: var(--space-md);
+        padding: var(--space-sm) var(--space-md);
         gap: var(--space-sm);
-        position: relative; /* Change from sticky to relative on mobile */
-        top: auto;
+        position: fixed;
+        top: 0;
+        left: 0;
+        right: 0;
+        z-index: 1000;
+        background: linear-gradient(90deg, rgba(201, 162, 39, 0.15) 0%, rgba(201, 162, 39, 0.25) 50%, rgba(201, 162, 39, 0.15) 100%);
+        backdrop-filter: blur(12px);
+        border-bottom: 1px solid rgba(201, 162, 39, 0.3);
+    }
+    
+    /* Push header below fixed banner */
+    .header {
+        margin-top: 85px;
     }
     
     .banner-text {
@@ -2465,6 +2534,27 @@ body {
     #modal-document-tab {
         padding: var(--space-sm);
         overflow: hidden;
+    }
+    
+    /* Mobile Document Navigation */
+    .document-navigation {
+        gap: var(--space-sm);
+        padding: var(--space-sm);
+        margin-top: var(--space-md);
+    }
+    
+    .doc-nav-btn {
+        padding: var(--space-xs) var(--space-sm);
+        font-size: 0.85rem;
+    }
+    
+    .doc-nav-btn span {
+        display: none; /* Hide text on mobile, show only arrows */
+    }
+    
+    .doc-nav-info {
+        font-size: 0.8rem;
+        min-width: 60px;
     }
     
     .modal-text {
