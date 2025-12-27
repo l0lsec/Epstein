@@ -25,7 +25,9 @@ let state = {
     lastSearchParams: null,  // Store last search to enable pagination
     // Document navigation state
     documentList: [],  // Current list of documents (from search or browse)
-    documentIndex: -1  // Current index within documentList
+    documentIndex: -1,  // Current index within documentList
+    // Desktop zoom state
+    originalZoom: null  // Store user's zoom level before opening modal
 };
 
 // DOM Elements
@@ -1210,6 +1212,12 @@ async function openDocument(docId, index = -1) {
         // Reset to document tab (default)
         switchModalTab('document');
         
+        // Desktop zoom feature - zoom out to show navigation buttons
+        if (isDesktop()) {
+            state.originalZoom = document.body.style.zoom || '100%';
+            document.body.style.zoom = '50%';
+        }
+        
         // Show modal
         elements.modal.classList.remove('hidden');
         document.body.style.overflow = 'hidden';
@@ -1221,6 +1229,12 @@ async function openDocument(docId, index = -1) {
 }
 
 function closeModal() {
+    // Restore original zoom level on desktop
+    if (state.originalZoom !== null) {
+        document.body.style.zoom = state.originalZoom;
+        state.originalZoom = null;
+    }
+    
     elements.modal.classList.add('hidden');
     document.body.style.overflow = '';
     state.currentDocument = null;
@@ -1530,6 +1544,13 @@ function isAndroid() {
  */
 function isIOS() {
     return /iPhone|iPad|iPod/i.test(navigator.userAgent);
+}
+
+/**
+ * Detect if user is on desktop (not mobile and large viewport)
+ */
+function isDesktop() {
+    return window.innerWidth >= 1024 && !isMobileDevice();
 }
 
 /**
