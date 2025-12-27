@@ -1404,6 +1404,11 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
         path = str(request.url.path).lower()
         user_agent = request.headers.get("user-agent", "").lower()
         
+        # Skip suspicious pattern checks for authenticated admin API endpoints
+        # These are legitimate admin requests that should not be flagged
+        if path.startswith("/api/admin/"):
+            return
+        
         # Common attack patterns
         suspicious_paths = [
             "/admin", "/wp-admin", "/phpmyadmin", "/.env", 
