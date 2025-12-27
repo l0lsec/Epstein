@@ -27,6 +27,11 @@ Thumbs.db
 *.log
 vector_store/
 feedback.json
+plans/
+House Disclosures/
+FOIA Files/
+Court Records/
+DOJ Disclosures/
 
 *.db
 *.pdf
