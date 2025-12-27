@@ -2287,6 +2287,21 @@ body {
 
 /* Responsive */
 @media (max-width: 768px) {
+    /* Donation Banner Mobile Fix */
+    .donation-banner {
+        flex-direction: column;
+        text-align: center;
+        padding: var(--space-md);
+        gap: var(--space-sm);
+        position: relative; /* Change from sticky to relative on mobile */
+        top: auto;
+    }
+    
+    .banner-text {
+        text-align: center;
+        line-height: 1.4;
+    }
+    
     .header-content {
         flex-direction: column;
         gap: var(--space-md);

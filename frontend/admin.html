@@ -1006,6 +1006,30 @@
                     </div>
                 </div>
             </div>
+
+            <!-- Recent Requests with IP/User Agent -->
+            <div class="card" style="margin-top: var(--space-lg);">
+                <div class="card-header">
+                    <span class="card-title">🌐 Recent Requests (with Location)</span>
+                </div>
+                <div class="card-body" style="max-height: 500px; overflow-y: auto;">
+                    <table class="data-table" id="recent-requests-table">
+                        <thead>
+                            <tr>
+                                <th>Time</th>
+                                <th>IP Address</th>
+                                <th>Location</th>
+                                <th>Path</th>
+                                <th>User Agent</th>
+                                <th>Status</th>
+                            </tr>
+                        </thead>
+                        <tbody id="recent-requests-body">
+                            <tr><td colspan="6" class="loading"><span class="spinner"></span>Loading...</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
         </div>
 
         <!-- Search Tab -->
@@ -1185,6 +1209,28 @@
                             <li class="loading"><span class="spinner"></span>Loading...</li>
                         </ul>
                     </div>
+                </div>
+            </div>
+
+            <!-- Top IPs with Location -->
+            <div class="card" style="margin-top: var(--space-lg);">
+                <div class="card-header">
+                    <span class="card-title">📍 Top Visitor IPs (with Location)</span>
+                </div>
+                <div class="card-body" style="max-height: 400px; overflow-y: auto;">
+                    <table class="data-table" id="top-ips-table">
+                        <thead>
+                            <tr>
+                                <th>IP Address</th>
+                                <th>Location</th>
+                                <th>ISP/Org</th>
+                                <th>Requests</th>
+                            </tr>
+                        </thead>
+                        <tbody id="top-ips-body">
+                            <tr><td colspan="4" class="loading"><span class="spinner"></span>Loading...</td></tr>
+                        </tbody>
+                    </table>
                 </div>
             </div>
         </div>

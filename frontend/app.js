@@ -1039,14 +1039,14 @@ async function openDocument(docId) {
                             <div class="pdf-icon">📄</div>
                             <h3>${doc.filename}</h3>
                             <p class="pdf-info">${doc.page_count || ''} ${doc.page_count ? 'pages' : ''}</p>
-                            <p class="ios-pdf-message">iOS Safari has limited PDF viewing in-app. For the best experience, open the PDF directly.</p>
+                            <p class="ios-pdf-message">For the best experience, open the PDF directly with the link below.</p>
                             <a href="${fileUrl}" target="_blank" class="ios-pdf-open-btn">
                                 <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2">
                                     <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path>
                                     <polyline points="15 3 21 3 21 9"></polyline>
                                     <line x1="10" y1="14" x2="21" y2="3"></line>
                                 </svg>
-                                Open PDF in Safari
+                                Open PDF
                             </a>
                             <p class="ios-pdf-hint">You can also view the extracted text in the "Text Content" tab</p>
                         </div>

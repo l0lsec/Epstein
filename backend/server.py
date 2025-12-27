@@ -199,7 +199,9 @@ app = FastAPI(
     title="Epstein Files Search Platform",
     description="Search and analyze the Epstein document archive with AI assistance",
     version="1.0.0",
-    lifespan=lifespan
+    lifespan=lifespan,
+    docs_url=None,  # Disable default docs - we'll add protected versions
+    redoc_url=None  # Disable default redoc
 )
 
 # CORS for frontend - configurable origins
@@ -1261,6 +1263,51 @@ async def admin_console():
     raise HTTPException(status_code=404, detail="Admin console not found")
 
 
+# Protected API Documentation (admin only)
+@app.get("/docs", include_in_schema=False)
+async def get_docs(request: Request, x_api_key: str = Header(None)):
+    """Protected Swagger UI documentation - requires admin authentication"""
+    is_authorized, error = verify_admin_access(request, x_api_key)
+    if not is_authorized:
+        raise HTTPException(status_code=401, detail="Admin authentication required to view API docs")
+    
+    from fastapi.openapi.docs import get_swagger_ui_html
+    return get_swagger_ui_html(
+        openapi_url="/openapi.json",
+        title=app.title + " - API Docs"
+    )
+
+
+@app.get("/redoc", include_in_schema=False)
+async def get_redoc(request: Request, x_api_key: str = Header(None)):
+    """Protected ReDoc documentation - requires admin authentication"""
+    is_authorized, error = verify_admin_access(request, x_api_key)
+    if not is_authorized:
+        raise HTTPException(status_code=401, detail="Admin authentication required to view API docs")
+    
+    from fastapi.openapi.docs import get_redoc_html
+    return get_redoc_html(
+        openapi_url="/openapi.json",
+        title=app.title + " - API Docs"
+    )
+
+
+@app.get("/openapi.json", include_in_schema=False)
+async def get_openapi(request: Request, x_api_key: str = Header(None)):
+    """Protected OpenAPI schema - requires admin authentication"""
+    is_authorized, error = verify_admin_access(request, x_api_key)
+    if not is_authorized:
+        raise HTTPException(status_code=401, detail="Admin authentication required to view API schema")
+    
+    from fastapi.openapi.utils import get_openapi
+    return get_openapi(
+        title=app.title,
+        version=app.version,
+        description=app.description,
+        routes=app.routes
+    )
+
+
 @app.post("/api/admin/login")
 async def admin_login(request: Request, x_api_key: str = Header(None)):
     """
@@ -1452,12 +1499,27 @@ async def get_request_telemetry(
         "5s+": len([d for d in durations if d >= 5000])
     }
     
+    # Get recent requests with details (last 50)
+    recent_requests = []
+    for entry in filtered[-50:]:
+        recent_requests.append({
+            "timestamp": entry.get("timestamp"),
+            "client_ip": entry.get("client_ip", "unknown"),
+            "path": entry.get("path", ""),
+            "method": entry.get("method", ""),
+            "status_code": entry.get("status_code"),
+            "user_agent": entry.get("user_agent", "")[:150],
+            "duration_ms": entry.get("duration_ms")
+        })
+    recent_requests.reverse()  # Most recent first
+    
     return {
         "timeframe": timeframe,
         "total_requests": len(filtered),
         "time_series": time_series,
         "methods": methods,
-        "response_time_distribution": duration_buckets
+        "response_time_distribution": duration_buckets,
+        "recent_requests": recent_requests
     }
 
 
@@ -1772,12 +1834,22 @@ async def get_visitor_telemetry(request: Request, x_api_key: str = Header(None))
     
     top_referrers = sorted(referrers.items(), key=lambda x: x[1], reverse=True)[:10]
     
+    # Top IPs by request count
+    ip_counts = {}
+    for entry in last_day:
+        ip = entry.get("client_ip", "")
+        if ip and ip != "unknown":
+            ip_counts[ip] = ip_counts.get(ip, 0) + 1
+    
+    top_ips = sorted(ip_counts.items(), key=lambda x: x[1], reverse=True)[:20]
+    
     return {
         "unique_visitors_today": len(set(e.get("client_ip", "") for e in last_day)),
         "unique_visitors_week": len(set(e.get("client_ip", "") for e in last_week)),
         "daily_unique_visitors": daily_unique,
         "browsers": user_agents,
-        "top_referrers": [{"domain": d, "count": c} for d, c in top_referrers]
+        "top_referrers": [{"domain": d, "count": c} for d, c in top_referrers],
+        "top_ips": [{"ip": ip, "count": c} for ip, c in top_ips]
     }
 
 
