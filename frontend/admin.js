@@ -304,8 +304,24 @@ async function loadAIData() {
         
         renderAIStats(data);
         renderTopQuestions(data.top_questions);
+        
+        // Also load AI summaries data
+        loadAISummariesData();
     } catch (error) {
         console.error('Error loading AI data:', error);
+    }
+}
+
+async function loadAISummariesData() {
+    try {
+        const response = await authFetch(`${API_BASE}/ai-summaries`);
+        if (!response.ok) throw new Error('Failed to load AI summaries data');
+        const data = await response.json();
+        
+        renderAISummariesStats(data);
+        renderAISummaryDocs(data.documents);
+    } catch (error) {
+        console.error('Error loading AI summaries data:', error);
     }
 }
 
@@ -809,6 +825,59 @@ function renderTopQuestions(questions) {
     `).join('');
 }
 
+function renderAISummariesStats(data) {
+    const el = document.getElementById('ai-summaries-stats');
+    if (!el) return;
+    
+    el.innerHTML = `
+        <div style="display: flex; gap: var(--space-lg); flex-wrap: wrap;">
+            <div>
+                <span style="color: var(--text-muted); font-size: 0.8rem;">Documents with Summaries</span>
+                <div style="font-size: 1.2rem; font-weight: 600; color: var(--accent);">${formatNumber(data.total_documents_with_summaries)}</div>
+            </div>
+            <div>
+                <span style="color: var(--text-muted); font-size: 0.8rem;">Total Generations</span>
+                <div style="font-size: 1.2rem; font-weight: 600;">${formatNumber(data.total_generations)}</div>
+            </div>
+            <div>
+                <span style="color: var(--text-muted); font-size: 0.8rem;">Cache Hits</span>
+                <div style="font-size: 1.2rem; font-weight: 600; color: var(--success);">${formatNumber(data.total_cache_hits)}</div>
+            </div>
+        </div>
+    `;
+}
+
+function renderAISummaryDocs(documents) {
+    const el = document.getElementById('ai-summary-docs');
+    if (!el) return;
+    
+    if (!documents || documents.length === 0) {
+        el.innerHTML = '<li><span class="key">No documents with AI summaries yet</span></li>';
+        return;
+    }
+    
+    el.innerHTML = documents.map(doc => `
+        <li style="display: flex; justify-content: space-between; align-items: center; padding: var(--space-sm) 0;">
+            <div style="flex: 1; min-width: 0;">
+                <a href="/?doc=${doc.document_id}" target="_blank" 
+                   style="display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--accent); text-decoration: none; transition: color 0.15s ease;" 
+                   title="Click to view: ${escapeHtml(doc.filename)}"
+                   onmouseover="this.style.color='var(--text-primary)'" 
+                   onmouseout="this.style.color='var(--accent)'">
+                    📄 ${escapeHtml(truncate(doc.filename, 50))}
+                </a>
+                <span style="font-size: 0.75rem; color: var(--text-muted);">
+                    Last: ${formatTimeAgo(doc.last_generated)}
+                </span>
+            </div>
+            <div style="text-align: right; flex-shrink: 0; margin-left: var(--space-md);">
+                <span class="badge badge-info" title="Generated">${doc.generated_count}x</span>
+                ${doc.cached_count > 0 ? `<span class="badge badge-success" title="Cached">${doc.cached_count} cached</span>` : ''}
+            </div>
+        </li>
+    `).join('');
+}
+
 function renderSecurityStats(data) {
     document.getElementById('security-stats').innerHTML = `
         <div class="stat-card ${data.total_security_events > 1000 ? 'warning' : ''}">
@@ -1097,6 +1166,69 @@ function formatTimestamp(iso) {
     }
 }
 
+function formatTimeAgo(iso) {
+    if (!iso) return 'Never';
+    try {
+        const date = new Date(iso);
+        const now = new Date();
+        const diffMs = now - date;
+        const diffSecs = Math.floor(diffMs / 1000);
+        const diffMins = Math.floor(diffSecs / 60);
+        const diffHours = Math.floor(diffMins / 60);
+        const diffDays = Math.floor(diffHours / 24);
+        
+        if (diffSecs < 60) return 'Just now';
+        if (diffMins < 60) return `${diffMins}m ago`;
+        if (diffHours < 24) return `${diffHours}h ago`;
+        if (diffDays < 7) return `${diffDays}d ago`;
+        return date.toLocaleDateString();
+    } catch {
+        return iso;
+    }
+}
+
+// ============================================================================
+// LOG MANAGEMENT FUNCTIONS
+// ============================================================================
+
+async function clearLogs(logType) {
+    const logNames = {
+        'access': 'Requests (access.log)',
+        'audit': 'Search/Documents (audit.log)',
+        'security': 'Security (security.log)',
+        'error': 'Errors (error.log)',
+        'all': 'ALL logs'
+    };
+    
+    const logName = logNames[logType] || logType;
+    
+    if (!confirm(`Are you sure you want to clear ${logName}?\n\nA backup will be created, but this action cannot be easily undone.`)) {
+        return;
+    }
+    
+    try {
+        const response = await authFetch(`${window.location.origin}/api/admin/logs/clear?log_type=${logType}`, {
+            method: 'POST'
+        });
+        
+        if (!response.ok) {
+            const data = await response.json();
+            throw new Error(data.detail || 'Failed to clear logs');
+        }
+        
+        const data = await response.json();
+        alert(`✓ ${data.message}\n\nCleared: ${data.cleared.join(', ')}`);
+        
+        // Refresh system data to update log sizes
+        loadSystemData();
+        
+    } catch (error) {
+        console.error('Error clearing logs:', error);
+        alert(`Error: ${error.message}`);
+    }
+}
+
 // Global refresh function
 window.refreshAll = refreshAll;
+window.clearLogs = clearLogs;
 

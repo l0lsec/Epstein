@@ -1095,6 +1095,19 @@
                         </ul>
                     </div>
                 </div>
+                <div class="card" style="grid-column: 1 / -1;">
+                    <div class="card-header">
+                        <span class="card-title">📄 Documents with AI Summaries</span>
+                    </div>
+                    <div class="card-body" style="max-height: 400px; overflow-y: auto;">
+                        <div id="ai-summaries-stats" style="margin-bottom: var(--space-md); padding-bottom: var(--space-md); border-bottom: 1px solid var(--border);">
+                            <span class="loading"><span class="spinner"></span>Loading summary stats...</span>
+                        </div>
+                        <ul id="ai-summary-docs" class="data-list">
+                            <li class="loading"><span class="spinner"></span>Loading...</li>
+                        </ul>
+                    </div>
+                </div>
             </div>
         </div>
 
@@ -1211,6 +1224,50 @@
                         <strong>Full Reindex:</strong> Scans all document folders, extracts text, and rebuilds the entire database.<br>
                         <strong>Rebuild Search Index:</strong> Rebuilds only the FTS5 search index (faster, for fixing search issues).
                     </p>
+                </div>
+            </div>
+
+            <!-- Log Management Card -->
+            <div class="card" style="margin-bottom: var(--space-lg);">
+                <div class="card-header">
+                    <span class="card-title">🗑️ Log Management</span>
+                </div>
+                <div class="card-body">
+                    <p style="margin-bottom: var(--space-md); font-size: 0.85rem; color: var(--text-muted);">
+                        Clear log files to free up disk space. A backup is created before clearing.
+                    </p>
+                    <div style="display: flex; gap: var(--space-sm); flex-wrap: wrap;">
+                        <button class="btn btn-danger" onclick="clearLogs('access')">
+                            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
+                                <polyline points="3,6 5,6 21,6"/>
+                                <path d="M19,6v14a2,2,0,0,1-2,2H7a2,2,0,0,1-2-2V6M8,6V4a2,2,0,0,1,2-2h4a2,2,0,0,1,2,2V6"/>
+                            </svg>
+                            Clear Requests
+                        </button>
+                        <button class="btn btn-danger" onclick="clearLogs('audit')">
+                            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
+                                <polyline points="3,6 5,6 21,6"/>
+                                <path d="M19,6v14a2,2,0,0,1-2,2H7a2,2,0,0,1-2-2V6M8,6V4a2,2,0,0,1,2-2h4a2,2,0,0,1,2,2V6"/>
+                            </svg>
+                            Clear Search/Docs
+                        </button>
+                        <button class="btn btn-danger" onclick="clearLogs('security')">
+                            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
+                                <polyline points="3,6 5,6 21,6"/>
+                                <path d="M19,6v14a2,2,0,0,1-2,2H7a2,2,0,0,1-2-2V6M8,6V4a2,2,0,0,1,2-2h4a2,2,0,0,1,2,2V6"/>
+                            </svg>
+                            Clear Security
+                        </button>
+                        <button class="btn btn-danger" onclick="clearLogs('all')" style="background: var(--danger); color: #fff;">
+                            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
+                                <polyline points="3,6 5,6 21,6"/>
+                                <path d="M19,6v14a2,2,0,0,1-2,2H7a2,2,0,0,1-2-2V6M8,6V4a2,2,0,0,1,2-2h4a2,2,0,0,1,2,2V6"/>
+                                <line x1="10" y1="11" x2="10" y2="17"/>
+                                <line x1="14" y1="11" x2="14" y2="17"/>
+                            </svg>
+                            Clear All Logs
+                        </button>
+                    </div>
                 </div>
             </div>
 

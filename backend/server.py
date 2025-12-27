@@ -1852,6 +1852,134 @@ async def get_system_telemetry(request: Request, x_api_key: str = Header(None)):
     }
 
 
+# =============================================================================
+# ADMIN LOG MANAGEMENT ENDPOINTS
+# =============================================================================
+
+@app.post("/api/admin/logs/clear")
+async def clear_logs(
+    request: Request,
+    log_type: str = Query(..., description="Log type to clear: access, security, audit, error, or all"),
+    x_api_key: str = Header(None)
+):
+    """Clear specified log files (requires admin authentication)"""
+    is_authorized, error = verify_admin_access(request, x_api_key)
+    if not is_authorized:
+        raise HTTPException(status_code=401, detail=error)
+    
+    client_ip, request_id = get_client_info(request)
+    
+    # Map log types to files
+    log_files = {
+        "access": "access.log",
+        "security": "security.log",
+        "audit": "audit.log",
+        "error": "error.log"
+    }
+    
+    cleared = []
+    errors = []
+    
+    if log_type == "all":
+        files_to_clear = list(log_files.values())
+    elif log_type in log_files:
+        files_to_clear = [log_files[log_type]]
+    else:
+        raise HTTPException(status_code=400, detail=f"Invalid log type: {log_type}. Use: access, security, audit, error, or all")
+    
+    for log_file in files_to_clear:
+        log_path = LOG_DIR / log_file
+        try:
+            if log_path.exists():
+                # Create backup before clearing
+                backup_path = LOG_DIR / f"{log_file}.backup"
+                import shutil
+                shutil.copy2(log_path, backup_path)
+                
+                # Clear the log file
+                with open(log_path, 'w') as f:
+                    f.write('')
+                
+                cleared.append(log_file)
+                
+                # Log the clear action (to security log, which might have just been cleared)
+                security_logger.log_security_event(
+                    event_type="log_cleared",
+                    severity="high",
+                    client_ip=client_ip,
+                    message=f"Log file cleared: {log_file}",
+                    request_id=request_id
+                )
+        except Exception as e:
+            errors.append({"file": log_file, "error": str(e)})
+    
+    return {
+        "success": len(errors) == 0,
+        "cleared": cleared,
+        "errors": errors,
+        "message": f"Cleared {len(cleared)} log file(s)" + (f" with {len(errors)} error(s)" if errors else "")
+    }
+
+
+@app.get("/api/admin/telemetry/ai-summaries")
+async def get_ai_summaries_telemetry(request: Request, x_api_key: str = Header(None)):
+    """Get list of documents that have had AI summaries generated (requires admin authentication)"""
+    is_authorized, error = verify_admin_access(request, x_api_key)
+    if not is_authorized:
+        raise HTTPException(status_code=401, detail=error)
+    
+    audit_entries = parse_log_file(LOG_DIR / "audit.log", max_lines=50000)
+    
+    # Filter for summary generation events
+    summary_entries = [
+        e for e in audit_entries 
+        if e.get("event_type") == "document_access" 
+        and e.get("action") in ["summary_generate", "summary_cached"]
+    ]
+    
+    # Group by document
+    doc_summaries = {}
+    for entry in summary_entries:
+        doc_id = entry.get("document_id", "")
+        filename = entry.get("filename", "Unknown")
+        
+        if doc_id not in doc_summaries:
+            doc_summaries[doc_id] = {
+                "document_id": doc_id,
+                "filename": filename,
+                "generated_count": 0,
+                "cached_count": 0,
+                "last_generated": None,
+                "first_generated": None
+            }
+        
+        if entry.get("action") == "summary_generate":
+            doc_summaries[doc_id]["generated_count"] += 1
+        else:
+            doc_summaries[doc_id]["cached_count"] += 1
+        
+        timestamp = entry.get("timestamp", "")
+        if timestamp:
+            if not doc_summaries[doc_id]["first_generated"] or timestamp < doc_summaries[doc_id]["first_generated"]:
+                doc_summaries[doc_id]["first_generated"] = timestamp
+            if not doc_summaries[doc_id]["last_generated"] or timestamp > doc_summaries[doc_id]["last_generated"]:
+                doc_summaries[doc_id]["last_generated"] = timestamp
+    
+    # Sort by most recently generated
+    sorted_docs = sorted(
+        doc_summaries.values(),
+        key=lambda x: x["last_generated"] or "",
+        reverse=True
+    )
+    
+    return {
+        "total_documents_with_summaries": len(sorted_docs),
+        "total_generations": sum(d["generated_count"] for d in sorted_docs),
+        "total_cache_hits": sum(d["cached_count"] for d in sorted_docs),
+        "documents": sorted_docs[:50]  # Return top 50 most recent
+    }
+
+
 # Mount static files last (if frontend exists)
 if STATIC_PATH.exists():
     app.mount("/static", StaticFiles(directory=str(STATIC_PATH)), name="static")
