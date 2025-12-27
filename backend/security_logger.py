@@ -33,6 +33,42 @@ BASE_PATH = Path(os.getenv("EPSTEIN_BASE_PATH", Path(__file__).parent.parent))
 
 # Trusted proxy IPs - only trust X-Forwarded-For from these IPs
 TRUSTED_PROXIES = set(filter(None, os.getenv("TRUSTED_PROXIES", "").split(",")))
+
+# Cloudflare IP ranges (IPv4) - these are the IPs Cloudflare uses to connect to origin servers
+# Updated from: https://www.cloudflare.com/ips-v4
+CLOUDFLARE_IP_RANGES = [
+    "173.245.48.0/20",
+    "103.21.244.0/22",
+    "103.22.200.0/22",
+    "103.31.4.0/22",
+    "141.101.64.0/18",
+    "108.162.192.0/18",
+    "190.93.240.0/20",
+    "188.114.96.0/20",
+    "197.234.240.0/22",
+    "198.41.128.0/17",
+    "162.158.0.0/15",
+    "104.16.0.0/13",
+    "104.24.0.0/14",
+    "172.64.0.0/13",
+    "131.0.72.0/22",
+]
+
+# Enable Cloudflare mode (auto-detect CF-Connecting-IP header)
+CLOUDFLARE_MODE = os.getenv("CLOUDFLARE_MODE", "auto").lower()  # "auto", "enabled", "disabled"
+
+def _ip_in_cloudflare_range(ip: str) -> bool:
+    """Check if an IP is in Cloudflare's IP ranges"""
+    import ipaddress
+    try:
+        ip_obj = ipaddress.ip_address(ip)
+        for cidr in CLOUDFLARE_IP_RANGES:
+            if ip_obj in ipaddress.ip_network(cidr):
+                return True
+    except ValueError:
+        pass
+    return False
+
 LOG_DIR = BASE_PATH / "logs"
 LOG_DIR.mkdir(exist_ok=True)
 
@@ -1316,11 +1352,34 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
         return response
     
     def _get_client_ip(self, request: Request) -> str:
-        """Extract the real client IP, handling proxies securely"""
+        """Extract the real client IP, handling proxies and Cloudflare securely"""
         # Get the direct connection IP first
         direct_ip = request.client.host if request.client else "unknown"
         
-        # Only trust proxy headers if the direct connection is from a trusted proxy
+        # Check if request is coming through Cloudflare
+        is_cloudflare = False
+        if CLOUDFLARE_MODE == "enabled":
+            is_cloudflare = True
+        elif CLOUDFLARE_MODE == "auto":
+            # Auto-detect Cloudflare by checking if direct IP is in CF ranges
+            # or if CF-specific headers are present
+            is_cloudflare = (
+                _ip_in_cloudflare_range(direct_ip) or
+                request.headers.get("CF-Connecting-IP") is not None
+            )
+        
+        if is_cloudflare:
+            # Cloudflare provides the real client IP in CF-Connecting-IP
+            cf_ip = request.headers.get("CF-Connecting-IP")
+            if cf_ip:
+                return cf_ip.strip()
+            
+            # Fallback to X-Forwarded-For (CF also sets this)
+            forwarded = request.headers.get("X-Forwarded-For")
+            if forwarded:
+                return forwarded.split(",")[0].strip()
+        
+        # Check if from a trusted proxy (like nginx)
         if direct_ip in TRUSTED_PROXIES:
             # Check X-Forwarded-For header (from reverse proxies)
             forwarded = request.headers.get("X-Forwarded-For")

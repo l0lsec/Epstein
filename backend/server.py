@@ -9,7 +9,7 @@ import asyncio
 from pathlib import Path
 from typing import Optional, List
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from fastapi import FastAPI, HTTPException, Query, Request, Header
 from fastapi.middleware.cors import CORSMiddleware
@@ -34,8 +34,9 @@ VECTOR_PATH = BASE_PATH / "vector_store"
 STATIC_PATH = BASE_PATH / "frontend"
 
 # Auto-indexing configuration (in seconds)
-AUTO_INDEX_INTERVAL = int(os.getenv("AUTO_INDEX_INTERVAL", "172800"))  # Default: 24 hour
-AUTO_INDEX_ENABLED = os.getenv("AUTO_INDEX_ENABLED", "true").lower() == "true"
+# NOTE: Auto-indexing is disabled by default. Use admin dashboard to trigger reindex manually.
+AUTO_INDEX_INTERVAL = int(os.getenv("AUTO_INDEX_INTERVAL", "172800"))  # Default: 48 hours (if enabled)
+AUTO_INDEX_ENABLED = os.getenv("AUTO_INDEX_ENABLED", "false").lower() == "true"
 
 # Global instances
 db: Optional[Database] = None
@@ -238,6 +239,49 @@ async def add_security_headers(request: Request, call_next):
 # Admin API key for protected endpoints
 ADMIN_API_KEY = os.getenv("ADMIN_API_KEY")
 
+# Admin IP whitelist - only these IPs can access admin console (comma-separated)
+# Set to empty to allow any IP with valid API key
+ADMIN_IP_WHITELIST = set(filter(None, os.getenv("ADMIN_IP_WHITELIST", "").split(",")))
+
+def verify_admin_access(request: Request, x_api_key: str = None) -> tuple[bool, str]:
+    """
+    Verify admin access by checking:
+    1. API key must match ADMIN_API_KEY
+    2. If ADMIN_IP_WHITELIST is set, client IP must be in whitelist
+    Returns (is_authorized, error_message)
+    """
+    client_ip, request_id = get_client_info(request)
+    
+    # Check if admin key is configured
+    if not ADMIN_API_KEY:
+        return False, "Admin access not configured"
+    
+    # Check API key
+    if not x_api_key or x_api_key != ADMIN_API_KEY:
+        security_logger.log_security_event(
+            event_type="unauthorized_admin_access",
+            severity="high",
+            client_ip=client_ip,
+            message="Invalid or missing admin API key",
+            request_id=request_id,
+            endpoint=str(request.url.path)
+        )
+        return False, "Invalid API key"
+    
+    # Check IP whitelist if configured
+    if ADMIN_IP_WHITELIST and client_ip not in ADMIN_IP_WHITELIST:
+        security_logger.log_security_event(
+            event_type="admin_ip_blocked",
+            severity="high",
+            client_ip=client_ip,
+            message=f"Admin access denied: IP {client_ip} not in whitelist",
+            request_id=request_id,
+            endpoint=str(request.url.path)
+        )
+        return False, "IP not authorized"
+    
+    return True, ""
+
 
 # Request/Response Models
 class SearchRequest(BaseModel):
@@ -373,21 +417,15 @@ async def get_index_status() -> IndexStatusResponse:
 
 @app.post("/api/index/trigger")
 async def trigger_index(request: Request, x_api_key: str = Header(None)):
-    """Manually trigger a re-index (requires ADMIN_API_KEY)"""
+    """Manually trigger a re-index (requires admin authentication)"""
     global db, vector_store, last_index_time, is_indexing
     
-    client_ip, request_id = get_client_info(request)
+    # Verify admin access
+    is_authorized, error = verify_admin_access(request, x_api_key)
+    if not is_authorized:
+        raise HTTPException(status_code=401, detail=error)
     
-    # Check admin API key if configured
-    if ADMIN_API_KEY and x_api_key != ADMIN_API_KEY:
-        security_logger.log_security_event(
-            event_type="unauthorized_index_attempt",
-            severity="high",
-            client_ip=client_ip,
-            message="Unauthorized index trigger attempt",
-            request_id=request_id
-        )
-        raise HTTPException(status_code=401, detail="Unauthorized")
+    client_ip, request_id = get_client_info(request)
     
     if is_indexing:
         security_logger.log_system_event(
@@ -450,24 +488,15 @@ async def trigger_index(request: Request, x_api_key: str = Header(None)):
 
 @app.post("/api/index/rebuild-fts")
 async def rebuild_fts_index(request: Request, x_api_key: str = Header(None)):
-    """Rebuild the FTS5 full-text search index to fix sync issues (requires ADMIN_API_KEY)"""
+    """Rebuild the FTS5 full-text search index to fix sync issues (requires admin authentication)"""
     global db
     
+    # Verify admin access
+    is_authorized, error = verify_admin_access(request, x_api_key)
+    if not is_authorized:
+        raise HTTPException(status_code=401, detail=error)
+    
     client_ip, request_id = get_client_info(request)
-    
-    # Check admin API key
-    if not ADMIN_API_KEY:
-        raise HTTPException(status_code=503, detail="Admin API key not configured")
-    
-    if x_api_key != ADMIN_API_KEY:
-        security_logger.log_security_event(
-            event_type="invalid_admin_key",
-            severity="high",
-            client_ip=client_ip,
-            message="Invalid API key for FTS rebuild",
-            request_id=request_id
-        )
-        raise HTTPException(status_code=403, detail="Invalid API key")
     
     if not db:
         raise HTTPException(status_code=503, detail="Database not initialized")
@@ -1145,6 +1174,681 @@ async def get_document_summary(doc_id: str, request: Request, regenerate: bool =
         "filename": doc["filename"],
         "summary": summary,
         "cached": False
+    }
+
+
+# =============================================================================
+# ADMIN TELEMETRY ENDPOINTS
+# =============================================================================
+
+LOG_DIR = BASE_PATH / "logs"
+
+
+def parse_log_file(log_path: Path, max_lines: int = 10000) -> List[dict]:
+    """Parse a JSON log file and return list of log entries"""
+    if not log_path.exists():
+        return []
+    
+    entries = []
+    try:
+        with open(log_path, 'r') as f:
+            lines = f.readlines()
+            # Get the last max_lines entries
+            for line in lines[-max_lines:]:
+                try:
+                    entry = json.loads(line.strip())
+                    entries.append(entry)
+                except json.JSONDecodeError:
+                    continue
+    except Exception:
+        pass
+    return entries
+
+
+def get_time_buckets(entries: List[dict], bucket_minutes: int = 5, max_buckets: int = 288) -> dict:
+    """Group log entries into time buckets for charting"""
+    from collections import defaultdict
+    
+    buckets = defaultdict(lambda: {"count": 0, "errors": 0, "avg_duration": 0, "durations": []})
+    
+    for entry in entries:
+        try:
+            timestamp = entry.get("timestamp", "")
+            if not timestamp:
+                continue
+            
+            # Parse ISO timestamp
+            dt = datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
+            # Round to bucket
+            bucket_key = dt.replace(
+                minute=(dt.minute // bucket_minutes) * bucket_minutes,
+                second=0,
+                microsecond=0
+            ).isoformat()
+            
+            buckets[bucket_key]["count"] += 1
+            
+            if entry.get("status_code", 200) >= 400:
+                buckets[bucket_key]["errors"] += 1
+            
+            duration = entry.get("duration_ms")
+            if duration:
+                buckets[bucket_key]["durations"].append(duration)
+        except Exception:
+            continue
+    
+    # Calculate averages and sort
+    result = []
+    for key in sorted(buckets.keys())[-max_buckets:]:
+        bucket = buckets[key]
+        avg_duration = sum(bucket["durations"]) / len(bucket["durations"]) if bucket["durations"] else 0
+        result.append({
+            "time": key,
+            "requests": bucket["count"],
+            "errors": bucket["errors"],
+            "avg_duration_ms": round(avg_duration, 2)
+        })
+    
+    return result
+
+
+@app.get("/admin")
+async def admin_console():
+    """Serve the admin console page"""
+    admin_path = STATIC_PATH / "admin.html"
+    if admin_path.exists():
+        return FileResponse(admin_path)
+    raise HTTPException(status_code=404, detail="Admin console not found")
+
+
+@app.post("/api/admin/login")
+async def admin_login(request: Request, x_api_key: str = Header(None)):
+    """
+    Verify admin credentials and return access status.
+    The API key should be sent in the X-API-Key header.
+    """
+    client_ip, request_id = get_client_info(request)
+    
+    is_authorized, error = verify_admin_access(request, x_api_key)
+    
+    if not is_authorized:
+        security_logger.log_security_event(
+            event_type="admin_login_failed",
+            severity="high",
+            client_ip=client_ip,
+            message=f"Admin login failed: {error}",
+            request_id=request_id
+        )
+        raise HTTPException(status_code=401, detail=error)
+    
+    # Log successful login
+    security_logger.log_security_event(
+        event_type="admin_login_success",
+        severity="info",
+        client_ip=client_ip,
+        message="Admin login successful",
+        request_id=request_id
+    )
+    
+    return {
+        "success": True,
+        "message": "Authentication successful",
+        "client_ip": client_ip
+    }
+
+
+@app.get("/api/admin/verify")
+async def admin_verify(request: Request, x_api_key: str = Header(None)):
+    """Verify if current credentials are valid without logging"""
+    is_authorized, error = verify_admin_access(request, x_api_key)
+    if not is_authorized:
+        raise HTTPException(status_code=401, detail=error)
+    return {"valid": True}
+
+
+@app.get("/api/admin/telemetry/overview")
+async def get_telemetry_overview(request: Request, x_api_key: str = Header(None)):
+    """Get overview telemetry statistics (requires admin authentication)"""
+    # Verify admin access
+    is_authorized, error = verify_admin_access(request, x_api_key)
+    if not is_authorized:
+        raise HTTPException(status_code=401, detail=error)
+    
+    # Parse access logs
+    access_entries = parse_log_file(LOG_DIR / "access.log", max_lines=50000)
+    security_entries = parse_log_file(LOG_DIR / "security.log", max_lines=10000)
+    audit_entries = parse_log_file(LOG_DIR / "audit.log", max_lines=10000)
+    error_entries = parse_log_file(LOG_DIR / "error.log", max_lines=1000)
+    
+    # Calculate time periods
+    now = datetime.utcnow()
+    hour_ago = (now - timedelta(hours=1)).isoformat()
+    day_ago = (now - timedelta(days=1)).isoformat()
+    
+    # Filter entries by time
+    last_hour = [e for e in access_entries if e.get("timestamp", "") >= hour_ago]
+    last_day = [e for e in access_entries if e.get("timestamp", "") >= day_ago]
+    
+    # Calculate metrics
+    total_requests = len(access_entries)
+    requests_last_hour = len(last_hour)
+    requests_last_day = len(last_day)
+    
+    # Status code breakdown
+    status_codes = {}
+    for entry in access_entries:
+        code = str(entry.get("status_code", "unknown"))
+        status_codes[code] = status_codes.get(code, 0) + 1
+    
+    # Error rate
+    errors = sum(1 for e in access_entries if e.get("status_code", 200) >= 400)
+    error_rate = (errors / total_requests * 100) if total_requests > 0 else 0
+    
+    # Average response time
+    durations = [e.get("duration_ms", 0) for e in access_entries if e.get("duration_ms")]
+    avg_duration = sum(durations) / len(durations) if durations else 0
+    
+    # Unique IPs
+    unique_ips = len(set(e.get("client_ip", "") for e in access_entries))
+    unique_ips_hour = len(set(e.get("client_ip", "") for e in last_hour))
+    
+    # Top endpoints
+    endpoint_counts = {}
+    for entry in access_entries:
+        path = entry.get("path", "")
+        endpoint_counts[path] = endpoint_counts.get(path, 0) + 1
+    top_endpoints = sorted(endpoint_counts.items(), key=lambda x: x[1], reverse=True)[:10]
+    
+    # Security events count
+    security_events = len(security_entries)
+    security_high = len([e for e in security_entries if e.get("severity") in ["high", "critical"]])
+    
+    # Rate limited requests
+    rate_limited = len([e for e in access_entries if e.get("rate_limited")])
+    
+    # Get session stats from security logger
+    from security_logger import get_session_stats, get_blocked_ips, get_blocked_sessions
+    session_stats = get_session_stats()
+    blocked_ips_count = len(get_blocked_ips())
+    blocked_sessions_count = len(get_blocked_sessions())
+    
+    return {
+        "generated_at": now.isoformat(),
+        "overview": {
+            "total_requests": total_requests,
+            "requests_last_hour": requests_last_hour,
+            "requests_last_day": requests_last_day,
+            "avg_response_time_ms": round(avg_duration, 2),
+            "error_rate_percent": round(error_rate, 2),
+            "unique_visitors": unique_ips,
+            "unique_visitors_hour": unique_ips_hour,
+            "security_events": security_events,
+            "security_events_high": security_high,
+            "rate_limited_requests": rate_limited,
+            "error_count": len(error_entries)
+        },
+        "status_codes": status_codes,
+        "top_endpoints": [{"path": p, "count": c} for p, c in top_endpoints],
+        "sessions": {
+            "active_sessions": session_stats.get("active_sessions", 0),
+            "blocked_sessions": blocked_sessions_count,
+            "blocked_ips": blocked_ips_count
+        }
+    }
+
+
+@app.get("/api/admin/telemetry/requests")
+async def get_request_telemetry(
+    request: Request,
+    timeframe: str = "1h",  # 1h, 6h, 24h, 7d
+    x_api_key: str = Header(None)
+):
+    """Get request telemetry with time series data (requires admin authentication)"""
+    is_authorized, error = verify_admin_access(request, x_api_key)
+    if not is_authorized:
+        raise HTTPException(status_code=401, detail=error)
+    
+    # Parse access logs
+    access_entries = parse_log_file(LOG_DIR / "access.log", max_lines=100000)
+    
+    now = datetime.utcnow()
+    
+    # Determine time filter
+    if timeframe == "1h":
+        cutoff = (now - timedelta(hours=1)).isoformat()
+        bucket_minutes = 1
+    elif timeframe == "6h":
+        cutoff = (now - timedelta(hours=6)).isoformat()
+        bucket_minutes = 5
+    elif timeframe == "24h":
+        cutoff = (now - timedelta(hours=24)).isoformat()
+        bucket_minutes = 15
+    elif timeframe == "7d":
+        cutoff = (now - timedelta(days=7)).isoformat()
+        bucket_minutes = 60
+    else:
+        cutoff = (now - timedelta(hours=1)).isoformat()
+        bucket_minutes = 1
+    
+    filtered = [e for e in access_entries if e.get("timestamp", "") >= cutoff]
+    
+    # Get time series
+    time_series = get_time_buckets(filtered, bucket_minutes=bucket_minutes)
+    
+    # Method breakdown
+    methods = {}
+    for entry in filtered:
+        method = entry.get("method", "UNKNOWN")
+        methods[method] = methods.get(method, 0) + 1
+    
+    # Response time distribution
+    durations = [e.get("duration_ms", 0) for e in filtered if e.get("duration_ms")]
+    duration_buckets = {
+        "0-50ms": len([d for d in durations if d < 50]),
+        "50-100ms": len([d for d in durations if 50 <= d < 100]),
+        "100-500ms": len([d for d in durations if 100 <= d < 500]),
+        "500ms-1s": len([d for d in durations if 500 <= d < 1000]),
+        "1s-5s": len([d for d in durations if 1000 <= d < 5000]),
+        "5s+": len([d for d in durations if d >= 5000])
+    }
+    
+    return {
+        "timeframe": timeframe,
+        "total_requests": len(filtered),
+        "time_series": time_series,
+        "methods": methods,
+        "response_time_distribution": duration_buckets
+    }
+
+
+@app.get("/api/admin/telemetry/search")
+async def get_search_telemetry(request: Request, x_api_key: str = Header(None)):
+    """Get search-specific telemetry (requires admin authentication)"""
+    is_authorized, error = verify_admin_access(request, x_api_key)
+    if not is_authorized:
+        raise HTTPException(status_code=401, detail=error)
+    
+    audit_entries = parse_log_file(LOG_DIR / "audit.log", max_lines=50000)
+    
+    # Filter search queries
+    search_entries = [e for e in audit_entries if e.get("event_type") == "search_query"]
+    
+    # Search type breakdown
+    search_types = {}
+    for entry in search_entries:
+        st = entry.get("search_type", "unknown")
+        search_types[st] = search_types.get(st, 0) + 1
+    
+    # Top search queries
+    query_counts = {}
+    for entry in search_entries:
+        query = entry.get("query", "")[:100]  # Truncate
+        if query:
+            query_counts[query] = query_counts.get(query, 0) + 1
+    top_queries = sorted(query_counts.items(), key=lambda x: x[1], reverse=True)[:20]
+    
+    # Category filter usage
+    category_usage = {}
+    for entry in search_entries:
+        cat = entry.get("category")
+        if cat:
+            category_usage[cat] = category_usage.get(cat, 0) + 1
+    
+    # File type filter usage
+    file_type_usage = {}
+    for entry in search_entries:
+        ft = entry.get("file_type")
+        if ft:
+            file_type_usage[ft] = file_type_usage.get(ft, 0) + 1
+    
+    # Results statistics
+    result_counts = [e.get("result_count", 0) for e in search_entries]
+    avg_results = sum(result_counts) / len(result_counts) if result_counts else 0
+    zero_result_searches = len([r for r in result_counts if r == 0])
+    
+    return {
+        "total_searches": len(search_entries),
+        "search_types": search_types,
+        "top_queries": [{"query": q, "count": c} for q, c in top_queries],
+        "category_usage": category_usage,
+        "file_type_usage": file_type_usage,
+        "avg_results_per_search": round(avg_results, 2),
+        "zero_result_searches": zero_result_searches
+    }
+
+
+@app.get("/api/admin/telemetry/documents")
+async def get_document_telemetry(request: Request, x_api_key: str = Header(None)):
+    """Get document access telemetry (requires admin authentication)"""
+    is_authorized, error = verify_admin_access(request, x_api_key)
+    if not is_authorized:
+        raise HTTPException(status_code=401, detail=error)
+    
+    audit_entries = parse_log_file(LOG_DIR / "audit.log", max_lines=50000)
+    
+    # Filter document access
+    doc_entries = [e for e in audit_entries if e.get("event_type") == "document_access"]
+    
+    # Access type breakdown
+    access_types = {}
+    for entry in doc_entries:
+        action = entry.get("action", "unknown")
+        access_types[action] = access_types.get(action, 0) + 1
+    
+    # Top accessed documents
+    doc_counts = {}
+    for entry in doc_entries:
+        filename = entry.get("filename", "")
+        if filename:
+            doc_counts[filename] = doc_counts.get(filename, 0) + 1
+    top_docs = sorted(doc_counts.items(), key=lambda x: x[1], reverse=True)[:20]
+    
+    # File type distribution
+    file_types = {}
+    for entry in doc_entries:
+        ft = entry.get("file_type", ".pdf")
+        file_types[ft] = file_types.get(ft, 0) + 1
+    
+    # Total data served (approximate)
+    total_bytes = sum(e.get("file_size_bytes", 0) for e in doc_entries)
+    
+    return {
+        "total_document_accesses": len(doc_entries),
+        "access_types": access_types,
+        "top_documents": [{"filename": f, "count": c} for f, c in top_docs],
+        "file_types": file_types,
+        "total_data_served_mb": round(total_bytes / (1024 * 1024), 2)
+    }
+
+
+@app.get("/api/admin/telemetry/ai")
+async def get_ai_telemetry(request: Request, x_api_key: str = Header(None)):
+    """Get AI/LLM usage telemetry (requires admin authentication)"""
+    is_authorized, error = verify_admin_access(request, x_api_key)
+    if not is_authorized:
+        raise HTTPException(status_code=401, detail=error)
+    
+    audit_entries = parse_log_file(LOG_DIR / "audit.log", max_lines=50000)
+    
+    # Filter LLM queries
+    llm_entries = [e for e in audit_entries if e.get("event_type") == "llm_query"]
+    
+    # Summary generation
+    summary_entries = [e for e in audit_entries 
+                       if e.get("event_type") == "document_access" 
+                       and e.get("action") in ["summary_generate", "summary_cached"]]
+    
+    # Top questions
+    question_counts = {}
+    for entry in llm_entries:
+        question = entry.get("question", "")[:100]
+        if question:
+            question_counts[question] = question_counts.get(question, 0) + 1
+    top_questions = sorted(question_counts.items(), key=lambda x: x[1], reverse=True)[:15]
+    
+    # Streaming vs non-streaming
+    streaming_count = len([e for e in llm_entries if e.get("streaming")])
+    
+    return {
+        "total_ai_queries": len(llm_entries),
+        "total_summaries": len(summary_entries),
+        "streaming_queries": streaming_count,
+        "non_streaming_queries": len(llm_entries) - streaming_count,
+        "top_questions": [{"question": q, "count": c} for q, c in top_questions]
+    }
+
+
+@app.get("/api/admin/telemetry/security")
+async def get_security_telemetry(request: Request, x_api_key: str = Header(None)):
+    """Get security events telemetry (requires admin authentication)"""
+    is_authorized, error = verify_admin_access(request, x_api_key)
+    if not is_authorized:
+        raise HTTPException(status_code=401, detail=error)
+    
+    security_entries = parse_log_file(LOG_DIR / "security.log", max_lines=10000)
+    
+    # Event type breakdown
+    event_types = {}
+    for entry in security_entries:
+        et = entry.get("event_type", "unknown")
+        event_types[et] = event_types.get(et, 0) + 1
+    
+    # Severity breakdown
+    severities = {}
+    for entry in security_entries:
+        sev = entry.get("severity", "unknown")
+        severities[sev] = severities.get(sev, 0) + 1
+    
+    # Recent high-severity events
+    high_severity = [
+        {
+            "timestamp": e.get("timestamp"),
+            "event_type": e.get("event_type"),
+            "message": e.get("message", "")[:200],
+            "client_ip": e.get("client_ip")
+        }
+        for e in security_entries 
+        if e.get("severity") in ["high", "critical"]
+    ][-20:]
+    
+    # Rate limit violations
+    rate_limit_events = [e for e in security_entries if e.get("event_type") == "rate_limit_exceeded"]
+    
+    # Suspicious activity
+    suspicious = [e for e in security_entries if e.get("event_type") == "suspicious_activity"]
+    
+    # IPs with most security events
+    ip_events = {}
+    for entry in security_entries:
+        ip = entry.get("client_ip")
+        if ip:
+            ip_events[ip] = ip_events.get(ip, 0) + 1
+    top_ips = sorted(ip_events.items(), key=lambda x: x[1], reverse=True)[:10]
+    
+    # Get blocked IPs and sessions
+    from security_logger import get_blocked_ips, get_blocked_sessions
+    
+    return {
+        "total_security_events": len(security_entries),
+        "event_types": event_types,
+        "severities": severities,
+        "recent_high_severity": high_severity,
+        "rate_limit_violations": len(rate_limit_events),
+        "suspicious_activities": len(suspicious),
+        "top_ips_by_events": [{"ip": ip, "count": c} for ip, c in top_ips],
+        "blocked_ips": list(get_blocked_ips()),
+        "blocked_sessions": len(get_blocked_sessions())
+    }
+
+
+@app.get("/api/admin/telemetry/errors")
+async def get_error_telemetry(request: Request, x_api_key: str = Header(None)):
+    """Get error logs telemetry (requires admin authentication)"""
+    is_authorized, error = verify_admin_access(request, x_api_key)
+    if not is_authorized:
+        raise HTTPException(status_code=401, detail=error)
+    
+    error_entries = parse_log_file(LOG_DIR / "error.log", max_lines=1000)
+    
+    # Error type breakdown
+    error_types = {}
+    for entry in error_entries:
+        et = entry.get("error_type", "unknown")
+        error_types[et] = error_types.get(et, 0) + 1
+    
+    # Context breakdown (where errors occur)
+    contexts = {}
+    for entry in error_entries:
+        ctx = entry.get("context", "unknown")
+        contexts[ctx] = contexts.get(ctx, 0) + 1
+    
+    # Recent errors
+    recent_errors = [
+        {
+            "timestamp": e.get("timestamp"),
+            "error_type": e.get("error_type"),
+            "context": e.get("context"),
+            "message": e.get("error_message", "")[:200]
+        }
+        for e in error_entries
+    ][-20:]
+    
+    return {
+        "total_errors": len(error_entries),
+        "error_types": error_types,
+        "error_contexts": contexts,
+        "recent_errors": recent_errors
+    }
+
+
+@app.get("/api/admin/telemetry/visitors")
+async def get_visitor_telemetry(request: Request, x_api_key: str = Header(None)):
+    """Get visitor/user analytics (requires admin authentication)"""
+    is_authorized, error = verify_admin_access(request, x_api_key)
+    if not is_authorized:
+        raise HTTPException(status_code=401, detail=error)
+    
+    access_entries = parse_log_file(LOG_DIR / "access.log", max_lines=100000)
+    
+    now = datetime.utcnow()
+    day_ago = (now - timedelta(days=1)).isoformat()
+    week_ago = (now - timedelta(days=7)).isoformat()
+    
+    # Filter by time
+    last_day = [e for e in access_entries if e.get("timestamp", "") >= day_ago]
+    last_week = [e for e in access_entries if e.get("timestamp", "") >= week_ago]
+    
+    # Unique IPs per day (last 7 days)
+    from collections import defaultdict
+    daily_visitors = defaultdict(set)
+    for entry in last_week:
+        try:
+            ts = entry.get("timestamp", "")
+            if ts:
+                date = ts[:10]  # YYYY-MM-DD
+                ip = entry.get("client_ip", "")
+                if ip:
+                    daily_visitors[date].add(ip)
+        except Exception:
+            continue
+    
+    daily_unique = sorted([
+        {"date": date, "unique_visitors": len(ips)}
+        for date, ips in daily_visitors.items()
+    ], key=lambda x: x["date"])
+    
+    # User agents
+    user_agents = {}
+    for entry in last_day:
+        ua = entry.get("user_agent", "")[:100]
+        if ua:
+            # Simplify user agent
+            if "Chrome" in ua:
+                browser = "Chrome"
+            elif "Firefox" in ua:
+                browser = "Firefox"
+            elif "Safari" in ua:
+                browser = "Safari"
+            elif "curl" in ua:
+                browser = "curl/CLI"
+            elif "bot" in ua.lower() or "spider" in ua.lower():
+                browser = "Bot/Crawler"
+            else:
+                browser = "Other"
+            user_agents[browser] = user_agents.get(browser, 0) + 1
+    
+    # Referrers
+    referrers = {}
+    for entry in last_day:
+        ref = entry.get("referer", "")
+        if ref and "localhost" not in ref and "127.0.0.1" not in ref:
+            # Extract domain
+            try:
+                from urllib.parse import urlparse
+                domain = urlparse(ref).netloc or "Direct"
+            except Exception:
+                domain = "Direct"
+            referrers[domain] = referrers.get(domain, 0) + 1
+    
+    top_referrers = sorted(referrers.items(), key=lambda x: x[1], reverse=True)[:10]
+    
+    return {
+        "unique_visitors_today": len(set(e.get("client_ip", "") for e in last_day)),
+        "unique_visitors_week": len(set(e.get("client_ip", "") for e in last_week)),
+        "daily_unique_visitors": daily_unique,
+        "browsers": user_agents,
+        "top_referrers": [{"domain": d, "count": c} for d, c in top_referrers]
+    }
+
+
+@app.get("/api/admin/telemetry/system")
+async def get_system_telemetry(request: Request, x_api_key: str = Header(None)):
+    """Get system health and status information (requires admin authentication)"""
+    is_authorized, error = verify_admin_access(request, x_api_key)
+    if not is_authorized:
+        raise HTTPException(status_code=401, detail=error)
+    
+    import psutil
+    import platform
+    
+    # System info
+    system_info = {
+        "platform": platform.system(),
+        "platform_release": platform.release(),
+        "python_version": platform.python_version(),
+    }
+    
+    # Memory usage
+    memory = psutil.virtual_memory()
+    memory_info = {
+        "total_gb": round(memory.total / (1024**3), 2),
+        "available_gb": round(memory.available / (1024**3), 2),
+        "used_percent": memory.percent
+    }
+    
+    # Disk usage
+    disk = psutil.disk_usage('/')
+    disk_info = {
+        "total_gb": round(disk.total / (1024**3), 2),
+        "free_gb": round(disk.free / (1024**3), 2),
+        "used_percent": round(disk.percent, 1)
+    }
+    
+    # CPU
+    cpu_info = {
+        "cores": psutil.cpu_count(),
+        "usage_percent": psutil.cpu_percent(interval=0.1)
+    }
+    
+    # Database stats
+    db_stats = db.get_stats() if db else {}
+    
+    # Log file sizes
+    log_sizes = {}
+    for log_file in ["access.log", "security.log", "audit.log", "error.log"]:
+        log_path = LOG_DIR / log_file
+        if log_path.exists():
+            log_sizes[log_file] = round(log_path.stat().st_size / (1024 * 1024), 2)  # MB
+    
+    # Uptime (approximated from first log entry)
+    access_entries = parse_log_file(LOG_DIR / "access.log", max_lines=1)
+    first_request = access_entries[0].get("timestamp") if access_entries else None
+    
+    return {
+        "system": system_info,
+        "memory": memory_info,
+        "disk": disk_info,
+        "cpu": cpu_info,
+        "database": {
+            "total_documents": db_stats.get("total_documents", 0),
+            "total_pages": db_stats.get("total_pages", 0),
+            "vector_chunks": vector_store.get_count() if vector_store else 0
+        },
+        "log_sizes_mb": log_sizes,
+        "llm_available": llm.is_available() if llm else False,
+        "auto_index_enabled": AUTO_INDEX_ENABLED,
+        "is_indexing": is_indexing,
+        "last_index_time": last_index_time.isoformat() if last_index_time else None
     }
 
 

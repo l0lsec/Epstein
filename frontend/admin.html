@@ -1,0 +1,1253 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Admin Console | Epstein Files Archive</title>
+    <meta name="robots" content="noindex, nofollow">
+    
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Crimson+Pro:wght@400;500;600&family=JetBrains+Mono:wght@400;500&family=Source+Sans+3:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+    
+    <style>
+        :root {
+            /* Colors - Deep, serious palette */
+            --bg-primary: #0a0b0d;
+            --bg-secondary: #12141a;
+            --bg-tertiary: #1a1d25;
+            --bg-hover: #22262f;
+            
+            --text-primary: #e8e9eb;
+            --text-secondary: #9ca3af;
+            --text-muted: #6b7280;
+            
+            --accent: #c9a227;
+            --accent-dim: #8b7320;
+            --accent-glow: rgba(201, 162, 39, 0.15);
+            
+            --border: #2a2e38;
+            --border-light: #3a3f4b;
+            
+            --danger: #dc2626;
+            --danger-dim: rgba(220, 38, 38, 0.2);
+            --success: #16a34a;
+            --success-dim: rgba(22, 163, 74, 0.2);
+            --warning: #f59e0b;
+            --warning-dim: rgba(245, 158, 11, 0.2);
+            --info: #3b82f6;
+            --info-dim: rgba(59, 130, 246, 0.2);
+            
+            /* Typography */
+            --font-display: 'Crimson Pro', Georgia, serif;
+            --font-body: 'Source Sans 3', -apple-system, BlinkMacSystemFont, sans-serif;
+            --font-mono: 'JetBrains Mono', 'Fira Code', monospace;
+            
+            /* Spacing */
+            --space-xs: 0.25rem;
+            --space-sm: 0.5rem;
+            --space-md: 1rem;
+            --space-lg: 1.5rem;
+            --space-xl: 2rem;
+            --space-2xl: 3rem;
+            
+            /* Animation */
+            --transition-fast: 150ms ease;
+            --transition-base: 250ms ease;
+        }
+
+        *, *::before, *::after {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        html {
+            font-size: 16px;
+            -webkit-font-smoothing: antialiased;
+        }
+
+        body {
+            font-family: var(--font-body);
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            line-height: 1.6;
+            min-height: 100vh;
+        }
+
+        /* Noise overlay */
+        .noise-overlay {
+            position: fixed;
+            top: 0; left: 0;
+            width: 100%; height: 100%;
+            pointer-events: none;
+            opacity: 0.03;
+            z-index: 1000;
+            background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%' height='100%' filter='url(%23noise)'/%3E%3C/svg%3E");
+        }
+
+        /* Header */
+        .header {
+            position: sticky;
+            top: 0;
+            z-index: 100;
+            background: linear-gradient(180deg, var(--bg-primary) 0%, rgba(10, 11, 13, 0.95) 100%);
+            backdrop-filter: blur(12px);
+            border-bottom: 1px solid var(--border);
+        }
+
+        .header-content {
+            max-width: 1600px;
+            margin: 0 auto;
+            padding: var(--space-md) var(--space-xl);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .logo {
+            display: flex;
+            align-items: center;
+            gap: var(--space-md);
+        }
+
+        .logo-icon {
+            width: 40px;
+            height: 40px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: var(--danger-dim);
+            border: 1px solid var(--danger);
+            border-radius: 8px;
+        }
+
+        .logo-icon svg {
+            width: 24px;
+            height: 24px;
+            color: var(--danger);
+        }
+
+        .logo-text {
+            display: flex;
+            flex-direction: column;
+        }
+
+        .logo-title {
+            font-family: var(--font-display);
+            font-size: 1.25rem;
+            font-weight: 600;
+            letter-spacing: 0.1em;
+            color: var(--text-primary);
+        }
+
+        .logo-subtitle {
+            font-size: 0.65rem;
+            font-weight: 500;
+            letter-spacing: 0.2em;
+            color: var(--danger);
+            text-transform: uppercase;
+        }
+
+        .header-actions {
+            display: flex;
+            align-items: center;
+            gap: var(--space-md);
+        }
+
+        .btn {
+            display: flex;
+            align-items: center;
+            gap: var(--space-sm);
+            padding: var(--space-sm) var(--space-md);
+            background: var(--bg-tertiary);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            color: var(--text-secondary);
+            font-family: var(--font-body);
+            font-size: 0.9rem;
+            cursor: pointer;
+            transition: all var(--transition-fast);
+            text-decoration: none;
+        }
+
+        .btn:hover {
+            background: var(--bg-hover);
+            color: var(--text-primary);
+            border-color: var(--border-light);
+        }
+
+        .btn-primary {
+            background: var(--accent);
+            border-color: var(--accent);
+            color: var(--bg-primary);
+        }
+
+        .btn-primary:hover {
+            background: var(--accent-dim);
+        }
+
+        .btn-danger {
+            background: var(--danger-dim);
+            border-color: var(--danger);
+            color: var(--danger);
+        }
+
+        .btn-danger:hover {
+            background: var(--danger);
+            color: #fff;
+        }
+
+        #last-refresh {
+            font-size: 0.8rem;
+            color: var(--text-muted);
+        }
+
+        /* Main */
+        .main {
+            max-width: 1600px;
+            margin: 0 auto;
+            padding: var(--space-xl);
+        }
+
+        /* Tab Navigation */
+        .tab-nav {
+            display: flex;
+            gap: var(--space-sm);
+            margin-bottom: var(--space-xl);
+            border-bottom: 1px solid var(--border);
+            padding-bottom: var(--space-md);
+            flex-wrap: wrap;
+        }
+
+        .tab-btn {
+            padding: var(--space-sm) var(--space-lg);
+            background: transparent;
+            border: 1px solid transparent;
+            border-radius: 6px;
+            color: var(--text-secondary);
+            font-family: var(--font-body);
+            font-size: 0.9rem;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all var(--transition-fast);
+        }
+
+        .tab-btn:hover {
+            color: var(--text-primary);
+            background: var(--bg-tertiary);
+        }
+
+        .tab-btn.active {
+            color: var(--accent);
+            background: var(--accent-glow);
+            border-color: var(--accent-dim);
+        }
+
+        /* Tab Panels */
+        .tab-panel {
+            display: none;
+            animation: fadeIn 0.3s ease;
+        }
+
+        .tab-panel.active {
+            display: block;
+        }
+
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        /* Stats Grid */
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: var(--space-md);
+            margin-bottom: var(--space-2xl);
+        }
+
+        .stat-card {
+            padding: var(--space-lg);
+            background: var(--bg-secondary);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+        }
+
+        .stat-value {
+            font-family: var(--font-display);
+            font-size: 2.5rem;
+            font-weight: 600;
+            color: var(--accent);
+            margin-bottom: var(--space-xs);
+        }
+
+        .stat-label {
+            font-size: 0.85rem;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+
+        .stat-card.danger .stat-value {
+            color: var(--danger);
+        }
+
+        .stat-card.success .stat-value {
+            color: var(--success);
+        }
+
+        .stat-card.warning .stat-value {
+            color: var(--warning);
+        }
+
+        .stat-card.info .stat-value {
+            color: var(--info);
+        }
+
+        /* Section */
+        .section {
+            margin-bottom: var(--space-2xl);
+        }
+
+        .section-title {
+            font-family: var(--font-display);
+            font-size: 1.5rem;
+            font-weight: 500;
+            color: var(--accent);
+            margin-bottom: var(--space-lg);
+            display: flex;
+            align-items: center;
+            gap: var(--space-sm);
+        }
+
+        .section-title svg {
+            width: 24px;
+            height: 24px;
+        }
+
+        /* Cards Grid */
+        .cards-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(350px, 1fr));
+            gap: var(--space-lg);
+        }
+
+        .card {
+            background: var(--bg-secondary);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            overflow: hidden;
+        }
+
+        .card-header {
+            padding: var(--space-md) var(--space-lg);
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .card-title {
+            font-family: var(--font-display);
+            font-size: 1.1rem;
+            font-weight: 500;
+            color: var(--text-primary);
+        }
+
+        .card-body {
+            padding: var(--space-lg);
+        }
+
+        /* Charts */
+        .chart-container {
+            height: 250px;
+            position: relative;
+        }
+
+        .simple-chart {
+            display: flex;
+            align-items: flex-end;
+            gap: 2px;
+            height: 100%;
+            padding: var(--space-md) 0;
+        }
+
+        .chart-bar {
+            flex: 1;
+            min-width: 4px;
+            max-width: 30px;
+            background: var(--accent);
+            border-radius: 2px 2px 0 0;
+            transition: all var(--transition-fast);
+            position: relative;
+        }
+
+        .chart-bar:hover {
+            background: var(--accent-dim);
+        }
+
+        .chart-bar[data-tooltip]:hover::after {
+            content: attr(data-tooltip);
+            position: absolute;
+            bottom: 100%;
+            left: 50%;
+            transform: translateX(-50%);
+            padding: 4px 8px;
+            background: var(--bg-primary);
+            border: 1px solid var(--border);
+            border-radius: 4px;
+            font-size: 0.75rem;
+            white-space: nowrap;
+            z-index: 10;
+        }
+
+        /* Data List */
+        .data-list {
+            list-style: none;
+        }
+
+        .data-list li {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: var(--space-sm) 0;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .data-list li:last-child {
+            border-bottom: none;
+        }
+
+        .data-list .key {
+            color: var(--text-secondary);
+            font-size: 0.9rem;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            max-width: 70%;
+        }
+
+        .data-list .value {
+            font-family: var(--font-mono);
+            font-size: 0.85rem;
+            color: var(--accent);
+            font-weight: 500;
+        }
+
+        /* Progress Bar */
+        .progress-container {
+            margin-bottom: var(--space-md);
+        }
+
+        .progress-label {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: var(--space-xs);
+            font-size: 0.85rem;
+        }
+
+        .progress-bar {
+            height: 8px;
+            background: var(--bg-tertiary);
+            border-radius: 4px;
+            overflow: hidden;
+        }
+
+        .progress-fill {
+            height: 100%;
+            background: linear-gradient(90deg, var(--accent) 0%, var(--accent-dim) 100%);
+            border-radius: 4px;
+            transition: width var(--transition-base);
+        }
+
+        .progress-fill.danger {
+            background: linear-gradient(90deg, var(--danger) 0%, #991b1b 100%);
+        }
+
+        .progress-fill.warning {
+            background: linear-gradient(90deg, var(--warning) 0%, #b45309 100%);
+        }
+
+        /* Table */
+        .data-table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+
+        .data-table th,
+        .data-table td {
+            padding: var(--space-sm) var(--space-md);
+            text-align: left;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .data-table th {
+            background: var(--bg-tertiary);
+            font-size: 0.8rem;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            color: var(--text-muted);
+            font-weight: 500;
+        }
+
+        .data-table td {
+            font-size: 0.9rem;
+        }
+
+        .data-table tr:hover td {
+            background: var(--bg-hover);
+        }
+
+        /* Badge */
+        .badge {
+            display: inline-flex;
+            align-items: center;
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-size: 0.75rem;
+            font-weight: 500;
+        }
+
+        .badge-success {
+            background: var(--success-dim);
+            color: var(--success);
+        }
+
+        .badge-danger {
+            background: var(--danger-dim);
+            color: var(--danger);
+        }
+
+        .badge-warning {
+            background: var(--warning-dim);
+            color: var(--warning);
+        }
+
+        .badge-info {
+            background: var(--info-dim);
+            color: var(--info);
+        }
+
+        /* Timeframe Selector */
+        .timeframe-select {
+            display: flex;
+            gap: var(--space-xs);
+            background: var(--bg-tertiary);
+            padding: 3px;
+            border-radius: 6px;
+        }
+
+        .timeframe-btn {
+            padding: var(--space-xs) var(--space-md);
+            background: transparent;
+            border: none;
+            border-radius: 4px;
+            color: var(--text-muted);
+            font-size: 0.8rem;
+            cursor: pointer;
+            transition: all var(--transition-fast);
+        }
+
+        .timeframe-btn:hover {
+            color: var(--text-primary);
+        }
+
+        .timeframe-btn.active {
+            background: var(--bg-secondary);
+            color: var(--accent);
+        }
+
+        /* Event Log */
+        .event-log {
+            max-height: 400px;
+            overflow-y: auto;
+        }
+
+        .event-item {
+            display: flex;
+            gap: var(--space-md);
+            padding: var(--space-sm) 0;
+            border-bottom: 1px solid var(--border);
+            font-size: 0.85rem;
+        }
+
+        .event-time {
+            color: var(--text-muted);
+            font-family: var(--font-mono);
+            font-size: 0.75rem;
+            flex-shrink: 0;
+            width: 160px;
+        }
+
+        .event-type {
+            flex-shrink: 0;
+            width: 150px;
+        }
+
+        .event-message {
+            color: var(--text-secondary);
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        /* Loading State */
+        .loading {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: var(--space-2xl);
+            color: var(--text-muted);
+        }
+
+        .spinner {
+            width: 24px;
+            height: 24px;
+            border: 2px solid var(--border);
+            border-top-color: var(--accent);
+            border-radius: 50%;
+            animation: spin 0.8s linear infinite;
+            margin-right: var(--space-md);
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        /* Status Indicator */
+        .status-indicator {
+            display: flex;
+            align-items: center;
+            gap: var(--space-sm);
+        }
+
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: var(--success);
+        }
+
+        .status-dot.warning {
+            background: var(--warning);
+        }
+
+        .status-dot.danger {
+            background: var(--danger);
+        }
+
+        /* Responsive */
+        @media (max-width: 768px) {
+            .header-content {
+                flex-direction: column;
+                gap: var(--space-md);
+            }
+
+            .tab-nav {
+                overflow-x: auto;
+                flex-wrap: nowrap;
+                -webkit-overflow-scrolling: touch;
+            }
+
+            .cards-grid {
+                grid-template-columns: 1fr;
+            }
+
+            .stats-grid {
+                grid-template-columns: repeat(2, 1fr);
+            }
+
+            .stat-value {
+                font-size: 1.8rem;
+            }
+        }
+
+        /* Login Overlay */
+        .login-overlay {
+            position: fixed;
+            inset: 0;
+            z-index: 10000;
+            background: var(--bg-primary);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            flex-direction: column;
+        }
+
+        .login-overlay.hidden {
+            display: none;
+        }
+
+        .login-container {
+            background: var(--bg-secondary);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: var(--space-2xl);
+            width: 100%;
+            max-width: 400px;
+            box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
+        }
+
+        .login-logo {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: var(--space-md);
+            margin-bottom: var(--space-xl);
+        }
+
+        .login-logo-icon {
+            width: 48px;
+            height: 48px;
+            background: var(--danger-dim);
+            border-radius: 10px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: var(--danger);
+        }
+
+        .login-logo-icon svg {
+            width: 28px;
+            height: 28px;
+        }
+
+        .login-title {
+            font-family: var(--font-display);
+            font-size: 1.5rem;
+            letter-spacing: 0.1em;
+            color: var(--text-primary);
+        }
+
+        .login-subtitle {
+            font-size: 0.75rem;
+            letter-spacing: 0.15em;
+            color: var(--accent);
+            text-transform: uppercase;
+        }
+
+        .login-form {
+            display: flex;
+            flex-direction: column;
+            gap: var(--space-md);
+        }
+
+        .login-input-group {
+            display: flex;
+            flex-direction: column;
+            gap: var(--space-xs);
+        }
+
+        .login-label {
+            font-size: 0.85rem;
+            color: var(--text-secondary);
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+
+        .login-input {
+            padding: var(--space-md);
+            background: var(--bg-tertiary);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            color: var(--text-primary);
+            font-family: var(--font-mono);
+            font-size: 0.9rem;
+        }
+
+        .login-input:focus {
+            outline: none;
+            border-color: var(--accent);
+            box-shadow: 0 0 0 3px var(--accent-glow);
+        }
+
+        .login-input::placeholder {
+            color: var(--text-muted);
+        }
+
+        .login-btn {
+            margin-top: var(--space-md);
+            padding: var(--space-md);
+            background: linear-gradient(135deg, var(--accent), var(--accent-dim));
+            border: none;
+            border-radius: 6px;
+            color: var(--bg-primary);
+            font-weight: 600;
+            font-size: 1rem;
+            cursor: pointer;
+            transition: all var(--transition-fast);
+        }
+
+        .login-btn:hover {
+            transform: translateY(-1px);
+            box-shadow: 0 4px 12px var(--accent-glow);
+        }
+
+        .login-btn:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+            transform: none;
+        }
+
+        .login-error {
+            padding: var(--space-sm) var(--space-md);
+            background: var(--danger-dim);
+            border: 1px solid var(--danger);
+            border-radius: 6px;
+            color: var(--danger);
+            font-size: 0.85rem;
+            display: none;
+        }
+
+        .login-error.visible {
+            display: block;
+        }
+
+        .login-footer {
+            margin-top: var(--space-xl);
+            text-align: center;
+            font-size: 0.8rem;
+            color: var(--text-muted);
+        }
+
+        .login-footer a {
+            color: var(--accent);
+            text-decoration: none;
+        }
+
+        .login-footer a:hover {
+            text-decoration: underline;
+        }
+
+        /* Content hidden when logged out */
+        .admin-content {
+            transition: opacity var(--transition-base);
+        }
+
+        body.logged-out .admin-content {
+            opacity: 0;
+            pointer-events: none;
+        }
+    </style>
+</head>
+<body class="logged-out">
+    <div class="noise-overlay"></div>
+
+    <!-- Login Overlay -->
+    <div id="login-overlay" class="login-overlay">
+        <div class="login-container">
+            <div class="login-logo">
+                <div class="login-logo-icon">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                        <path d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"/>
+                    </svg>
+                </div>
+                <div>
+                    <div class="login-title">ADMIN CONSOLE</div>
+                    <div class="login-subtitle">Epstein Files Archive</div>
+                </div>
+            </div>
+            
+            <form id="login-form" class="login-form">
+                <div class="login-input-group">
+                    <label class="login-label" for="api-key">Admin API Key</label>
+                    <input 
+                        type="password" 
+                        id="api-key" 
+                        class="login-input" 
+                        placeholder="Enter your API key..."
+                        autocomplete="current-password"
+                        required
+                    >
+                </div>
+                
+                <div id="login-error" class="login-error">
+                    Invalid API key. Access denied.
+                </div>
+                
+                <button type="submit" id="login-btn" class="login-btn">
+                    Authenticate
+                </button>
+            </form>
+            
+            <div class="login-footer">
+                <a href="/">← Return to main site</a>
+            </div>
+        </div>
+    </div>
+
+    <header class="header">
+        <div class="header-content">
+            <div class="logo">
+                <div class="logo-icon">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                        <path d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"/>
+                    </svg>
+                </div>
+                <div class="logo-text">
+                    <span class="logo-title">ADMIN CONSOLE</span>
+                    <span class="logo-subtitle">Epstein Files Archive</span>
+                </div>
+            </div>
+            <div class="header-actions">
+                <span id="last-refresh">Last refresh: --</span>
+                <button class="btn" onclick="refreshAll()">
+                    <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M1 4v6h6M23 20v-6h-6"/>
+                        <path d="M20.49 9A9 9 0 005.64 5.64L1 10m22 4l-4.64 4.36A9 9 0 013.51 15"/>
+                    </svg>
+                    Refresh
+                </button>
+                <a href="/" class="btn">
+                    <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M3 9l9-7 9 7v11a2 2 0 01-2 2H5a2 2 0 01-2-2z"/>
+                    </svg>
+                    Back to Site
+                </a>
+                <button class="btn btn-danger" onclick="logout()">
+                    <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M9 21H5a2 2 0 01-2-2V5a2 2 0 012-2h4"/>
+                        <polyline points="16,17 21,12 16,7"/>
+                        <line x1="21" y1="12" x2="9" y2="12"/>
+                    </svg>
+                    Logout
+                </button>
+            </div>
+        </div>
+    </header>
+
+    <main class="main">
+        <nav class="tab-nav">
+            <button class="tab-btn active" data-tab="overview">📊 Overview</button>
+            <button class="tab-btn" data-tab="requests">📈 Requests</button>
+            <button class="tab-btn" data-tab="search">🔍 Search</button>
+            <button class="tab-btn" data-tab="documents">📄 Documents</button>
+            <button class="tab-btn" data-tab="ai">🤖 AI Usage</button>
+            <button class="tab-btn" data-tab="security">🛡️ Security</button>
+            <button class="tab-btn" data-tab="visitors">👥 Visitors</button>
+            <button class="tab-btn" data-tab="system">⚙️ System</button>
+        </nav>
+
+        <!-- Overview Tab -->
+        <div id="overview-tab" class="tab-panel active">
+            <div id="overview-stats" class="stats-grid">
+                <div class="loading"><span class="spinner"></span>Loading telemetry...</div>
+            </div>
+
+            <div class="cards-grid">
+                <div class="card">
+                    <div class="card-header">
+                        <span class="card-title">Top Endpoints</span>
+                    </div>
+                    <div class="card-body">
+                        <ul id="top-endpoints" class="data-list">
+                            <li class="loading"><span class="spinner"></span>Loading...</li>
+                        </ul>
+                    </div>
+                </div>
+                <div class="card">
+                    <div class="card-header">
+                        <span class="card-title">Status Codes</span>
+                    </div>
+                    <div class="card-body">
+                        <ul id="status-codes" class="data-list">
+                            <li class="loading"><span class="spinner"></span>Loading...</li>
+                        </ul>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Requests Tab -->
+        <div id="requests-tab" class="tab-panel">
+            <div class="section">
+                <div class="section-title">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <polyline points="22,12 18,12 15,21 9,3 6,12 2,12"/>
+                    </svg>
+                    Request Traffic
+                    <div class="timeframe-select" style="margin-left: auto;">
+                        <button class="timeframe-btn active" data-tf="1h">1H</button>
+                        <button class="timeframe-btn" data-tf="6h">6H</button>
+                        <button class="timeframe-btn" data-tf="24h">24H</button>
+                        <button class="timeframe-btn" data-tf="7d">7D</button>
+                    </div>
+                </div>
+                <div class="card">
+                    <div class="card-body">
+                        <div id="requests-chart" class="chart-container">
+                            <div class="loading"><span class="spinner"></span>Loading chart...</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="cards-grid">
+                <div class="card">
+                    <div class="card-header">
+                        <span class="card-title">HTTP Methods</span>
+                    </div>
+                    <div class="card-body">
+                        <ul id="http-methods" class="data-list">
+                            <li class="loading"><span class="spinner"></span>Loading...</li>
+                        </ul>
+                    </div>
+                </div>
+                <div class="card">
+                    <div class="card-header">
+                        <span class="card-title">Response Time Distribution</span>
+                    </div>
+                    <div class="card-body">
+                        <ul id="response-times" class="data-list">
+                            <li class="loading"><span class="spinner"></span>Loading...</li>
+                        </ul>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Search Tab -->
+        <div id="search-tab" class="tab-panel">
+            <div id="search-stats" class="stats-grid">
+                <div class="loading"><span class="spinner"></span>Loading...</div>
+            </div>
+
+            <div class="cards-grid">
+                <div class="card">
+                    <div class="card-header">
+                        <span class="card-title">Top Search Queries</span>
+                    </div>
+                    <div class="card-body" style="max-height: 400px; overflow-y: auto;">
+                        <ul id="top-queries" class="data-list">
+                            <li class="loading"><span class="spinner"></span>Loading...</li>
+                        </ul>
+                    </div>
+                </div>
+                <div class="card">
+                    <div class="card-header">
+                        <span class="card-title">Search Types</span>
+                    </div>
+                    <div class="card-body">
+                        <ul id="search-types" class="data-list">
+                            <li class="loading"><span class="spinner"></span>Loading...</li>
+                        </ul>
+                    </div>
+                </div>
+                <div class="card">
+                    <div class="card-header">
+                        <span class="card-title">Category Filters Used</span>
+                    </div>
+                    <div class="card-body">
+                        <ul id="category-usage" class="data-list">
+                            <li class="loading"><span class="spinner"></span>Loading...</li>
+                        </ul>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Documents Tab -->
+        <div id="documents-tab" class="tab-panel">
+            <div id="docs-stats" class="stats-grid">
+                <div class="loading"><span class="spinner"></span>Loading...</div>
+            </div>
+
+            <div class="cards-grid">
+                <div class="card">
+                    <div class="card-header">
+                        <span class="card-title">Most Accessed Documents</span>
+                    </div>
+                    <div class="card-body" style="max-height: 400px; overflow-y: auto;">
+                        <ul id="top-docs" class="data-list">
+                            <li class="loading"><span class="spinner"></span>Loading...</li>
+                        </ul>
+                    </div>
+                </div>
+                <div class="card">
+                    <div class="card-header">
+                        <span class="card-title">Access Types</span>
+                    </div>
+                    <div class="card-body">
+                        <ul id="access-types" class="data-list">
+                            <li class="loading"><span class="spinner"></span>Loading...</li>
+                        </ul>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- AI Tab -->
+        <div id="ai-tab" class="tab-panel">
+            <div id="ai-stats" class="stats-grid">
+                <div class="loading"><span class="spinner"></span>Loading...</div>
+            </div>
+
+            <div class="cards-grid">
+                <div class="card" style="grid-column: 1 / -1;">
+                    <div class="card-header">
+                        <span class="card-title">Top AI Questions Asked</span>
+                    </div>
+                    <div class="card-body" style="max-height: 400px; overflow-y: auto;">
+                        <ul id="top-questions" class="data-list">
+                            <li class="loading"><span class="spinner"></span>Loading...</li>
+                        </ul>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Security Tab -->
+        <div id="security-tab" class="tab-panel">
+            <div id="security-stats" class="stats-grid">
+                <div class="loading"><span class="spinner"></span>Loading...</div>
+            </div>
+
+            <div class="cards-grid">
+                <div class="card">
+                    <div class="card-header">
+                        <span class="card-title">Security Events by Type</span>
+                    </div>
+                    <div class="card-body">
+                        <ul id="security-events" class="data-list">
+                            <li class="loading"><span class="spinner"></span>Loading...</li>
+                        </ul>
+                    </div>
+                </div>
+                <div class="card">
+                    <div class="card-header">
+                        <span class="card-title">Top IPs by Security Events</span>
+                    </div>
+                    <div class="card-body">
+                        <ul id="security-ips" class="data-list">
+                            <li class="loading"><span class="spinner"></span>Loading...</li>
+                        </ul>
+                    </div>
+                </div>
+                <div class="card" style="grid-column: 1 / -1;">
+                    <div class="card-header">
+                        <span class="card-title">⚠️ Recent High-Severity Events</span>
+                    </div>
+                    <div class="card-body event-log" id="high-severity-events">
+                        <div class="loading"><span class="spinner"></span>Loading...</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Visitors Tab -->
+        <div id="visitors-tab" class="tab-panel">
+            <div id="visitor-stats" class="stats-grid">
+                <div class="loading"><span class="spinner"></span>Loading...</div>
+            </div>
+
+            <div class="cards-grid">
+                <div class="card">
+                    <div class="card-header">
+                        <span class="card-title">Daily Unique Visitors (Last 7 Days)</span>
+                    </div>
+                    <div class="card-body">
+                        <div id="visitors-chart" class="chart-container">
+                            <div class="loading"><span class="spinner"></span>Loading chart...</div>
+                        </div>
+                    </div>
+                </div>
+                <div class="card">
+                    <div class="card-header">
+                        <span class="card-title">Browsers</span>
+                    </div>
+                    <div class="card-body">
+                        <ul id="browsers" class="data-list">
+                            <li class="loading"><span class="spinner"></span>Loading...</li>
+                        </ul>
+                    </div>
+                </div>
+                <div class="card">
+                    <div class="card-header">
+                        <span class="card-title">Top Referrers</span>
+                    </div>
+                    <div class="card-body">
+                        <ul id="referrers" class="data-list">
+                            <li class="loading"><span class="spinner"></span>Loading...</li>
+                        </ul>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- System Tab -->
+        <div id="system-tab" class="tab-panel">
+            <div id="system-stats" class="stats-grid">
+                <div class="loading"><span class="spinner"></span>Loading...</div>
+            </div>
+
+            <!-- Index Management Card -->
+            <div class="card" style="margin-bottom: var(--space-lg);">
+                <div class="card-header">
+                    <span class="card-title">📚 Index Management</span>
+                </div>
+                <div class="card-body">
+                    <div id="index-status" style="margin-bottom: var(--space-lg);">
+                        <div class="loading"><span class="spinner"></span>Loading index status...</div>
+                    </div>
+                    <div style="display: flex; gap: var(--space-md); flex-wrap: wrap;">
+                        <button id="trigger-reindex-btn" class="btn btn-primary" onclick="triggerReindex()">
+                            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M1 4v6h6M23 20v-6h-6"/>
+                                <path d="M20.49 9A9 9 0 005.64 5.64L1 10m22 4l-4.64 4.36A9 9 0 013.51 15"/>
+                            </svg>
+                            Trigger Full Reindex
+                        </button>
+                        <button id="rebuild-fts-btn" class="btn" onclick="rebuildFTS()">
+                            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
+                                <circle cx="11" cy="11" r="8"/>
+                                <path d="M21 21l-4.35-4.35"/>
+                            </svg>
+                            Rebuild Search Index
+                        </button>
+                    </div>
+                    <p style="margin-top: var(--space-md); font-size: 0.85rem; color: var(--text-muted);">
+                        <strong>Full Reindex:</strong> Scans all document folders, extracts text, and rebuilds the entire database.<br>
+                        <strong>Rebuild Search Index:</strong> Rebuilds only the FTS5 search index (faster, for fixing search issues).
+                    </p>
+                </div>
+            </div>
+
+            <div class="cards-grid">
+                <div class="card">
+                    <div class="card-header">
+                        <span class="card-title">System Resources</span>
+                    </div>
+                    <div class="card-body" id="system-resources">
+                        <div class="loading"><span class="spinner"></span>Loading...</div>
+                    </div>
+                </div>
+                <div class="card">
+                    <div class="card-header">
+                        <span class="card-title">Log File Sizes</span>
+                    </div>
+                    <div class="card-body">
+                        <ul id="log-sizes" class="data-list">
+                            <li class="loading"><span class="spinner"></span>Loading...</li>
+                        </ul>
+                    </div>
+                </div>
+                <div class="card">
+                    <div class="card-header">
+                        <span class="card-title">Database</span>
+                    </div>
+                    <div class="card-body">
+                        <ul id="db-stats" class="data-list">
+                            <li class="loading"><span class="spinner"></span>Loading...</li>
+                        </ul>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </main>
+
+    <script src="/static/admin.js"></script>
+</body>
+</html>
+
