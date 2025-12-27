@@ -285,6 +285,101 @@ When files are updated, old versions are automatically archived with timestamps 
 - Full-text search uses SQLite FTS5 with BM25 ranking
 - Image OCR (JPG/TIF) requires Tesseract and processes ~1-2 images/second
 
+## Production Deployment (systemd)
+
+For production servers, run the application as a systemd service for automatic startup and restart on failure.
+
+### 1. Create the systemd service file
+
+```bash
+sudo tee /etc/systemd/system/epstein.service << 'EOF'
+[Unit]
+Description=Epstein Files Search Platform
+After=network.target
+
+[Service]
+User=your_username
+Group=your_username
+WorkingDirectory=/opt/epstein
+Environment="PATH=/opt/epstein/venv/bin"
+EnvironmentFile=/opt/epstein/.env
+ExecStart=/opt/epstein/venv/bin/uvicorn backend.server:app --host 127.0.0.1 --port 8000
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+```
+
+### 2. Create the environment file
+
+```bash
+sudo tee /opt/epstein/.env << 'EOF'
+OPENAI_API_KEY=your_openai_key_here
+RECAPTCHA_SECRET_KEY=your_recaptcha_key_here
+ADMIN_API_KEY=your_admin_api_key_here
+ALLOWED_ORIGINS=https://yourdomain.com
+HOST=127.0.0.1
+PORT=8000
+EOF
+sudo chmod 600 /opt/epstein/.env
+```
+
+### 3. Enable and start the service
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable epstein
+sudo systemctl start epstein
+```
+
+### 4. Manage the service
+
+```bash
+# Check status
+sudo systemctl status epstein
+
+# View logs
+sudo journalctl -u epstein -f
+
+# Restart after code changes
+sudo systemctl restart epstein
+
+# Stop the service
+sudo systemctl stop epstein
+```
+
+### 5. nginx reverse proxy (recommended)
+
+```bash
+sudo tee /etc/nginx/sites-available/epstein << 'EOF'
+server {
+    listen 80;
+    server_name yourdomain.com www.yourdomain.com;
+    
+    client_max_body_size 100M;
+    
+    location / {
+        proxy_pass http://127.0.0.1:8000;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection 'upgrade';
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_cache_bypass $http_upgrade;
+        proxy_read_timeout 300s;
+    }
+}
+EOF
+
+sudo ln -sf /etc/nginx/sites-available/epstein /etc/nginx/sites-enabled/
+sudo rm -f /etc/nginx/sites-enabled/default
+sudo nginx -t && sudo systemctl reload nginx
+```
+
 ## Disclaimer
 
 This archive contains documents from public sources for research and transparency purposes. Some documents contain redactions. We make no claims about the completeness or accuracy of OCR-extracted text.

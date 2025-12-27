@@ -1893,6 +1893,65 @@ body {
     user-select: none;
 }
 
+/* Media Buffering Notice */
+.media-notice {
+    display: flex;
+    align-items: center;
+    gap: var(--space-sm);
+    padding: var(--space-sm) var(--space-md);
+    background: rgba(201, 162, 39, 0.15);
+    border: 1px solid rgba(201, 162, 39, 0.3);
+    border-radius: 8px;
+    margin-bottom: var(--space-lg);
+    font-size: 0.85rem;
+    color: var(--text-secondary);
+    max-width: 500px;
+    text-align: left;
+}
+
+.media-notice .notice-icon {
+    font-size: 1.2rem;
+    flex-shrink: 0;
+}
+
+/* TIFF Fallback Viewer */
+.tiff-fallback {
+    background: linear-gradient(180deg, #1a1d25 0%, #12141a 100%);
+}
+
+.tiff-notice {
+    color: var(--text-muted);
+    margin-bottom: var(--space-lg);
+    font-size: 0.95rem;
+}
+
+.tiff-download-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-sm);
+    padding: var(--space-md) var(--space-xl);
+    background: var(--accent);
+    color: var(--bg-primary);
+    border: none;
+    border-radius: 8px;
+    font-size: 1rem;
+    font-weight: 600;
+    text-decoration: none;
+    cursor: pointer;
+    transition: all var(--transition-fast);
+    margin-bottom: var(--space-lg);
+}
+
+.tiff-download-btn:hover {
+    background: #ddb52e;
+    transform: translateY(-2px);
+    box-shadow: 0 4px 12px rgba(201, 162, 39, 0.3);
+}
+
+.tiff-download-btn svg {
+    stroke: var(--bg-primary);
+}
+
 /* Donation Banner */
 .donation-banner {
     display: flex;

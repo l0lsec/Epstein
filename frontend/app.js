@@ -1070,6 +1070,10 @@ async function openDocument(docId) {
                     <div class="media-player-container audio-player">
                         <div class="media-icon">🎵</div>
                         <h3>Audio Recording</h3>
+                        <div class="media-notice">
+                            <span class="notice-icon">⏳</span>
+                            <span>Large files may take time to buffer. Please click play only once and allow time for loading.</span>
+                        </div>
                         <audio controls controlsList="nodownload noplaybackrate" preload="metadata" class="audio-element" oncontextmenu="return false;">
                             <source src="${fileUrl}" type="audio/mpeg">
                             <source src="${fileUrl}" type="audio/wav">
@@ -1088,6 +1092,10 @@ async function openDocument(docId) {
                 mediaViewer.classList.remove('hidden');
                 mediaViewer.innerHTML = `
                     <div class="media-player-container video-player">
+                        <div class="media-notice">
+                            <span class="notice-icon">⏳</span>
+                            <span>Large files may take time to buffer. Please click play only once and allow time for loading.</span>
+                        </div>
                         <video controls controlsList="nodownload" preload="metadata" class="video-element" oncontextmenu="return false;">
                             <source src="${fileUrl}" type="video/mp4">
                             <source src="${fileUrl}" type="video/webm">
@@ -1102,14 +1110,38 @@ async function openDocument(docId) {
             elements.pdfIframe.src = '';
             elements.pdfIframe.style.display = 'none';
             elements.pdfFallback.classList.add('hidden');
+            
+            // Check if it's a TIF/TIFF file - browsers don't support these natively
+            const isTiff = doc.filename && /\.(tif|tiff)$/i.test(doc.filename);
+            
             if (mediaViewer) {
                 mediaViewer.classList.remove('hidden');
-                mediaViewer.innerHTML = `
-                    <div class="media-player-container image-viewer">
-                        <img src="${fileUrl}" alt="${doc.filename}" class="image-preview" />
-                        <p class="media-hint">See "Text Content" tab for OCR-extracted text</p>
-                    </div>
-                `;
+                if (isTiff) {
+                    // TIF files need special handling - show download option
+                    mediaViewer.innerHTML = `
+                        <div class="media-player-container image-viewer tiff-fallback">
+                            <div class="media-icon">🖼️</div>
+                            <h3>TIFF Image</h3>
+                            <p class="tiff-notice">TIFF files cannot be displayed directly in the browser.</p>
+                            <a href="${fileUrl}" download="${escapeHtml(doc.filename)}" class="tiff-download-btn">
+                                <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2">
+                                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                                    <polyline points="7 10 12 15 17 10"></polyline>
+                                    <line x1="12" y1="15" x2="12" y2="3"></line>
+                                </svg>
+                                Download TIFF Image
+                            </a>
+                            <p class="media-hint">See "Text Content" tab for OCR-extracted text</p>
+                        </div>
+                    `;
+                } else {
+                    mediaViewer.innerHTML = `
+                        <div class="media-player-container image-viewer">
+                            <img src="${fileUrl}" alt="${escapeHtml(doc.filename)}" class="image-preview" />
+                            <p class="media-hint">See "Text Content" tab for OCR-extracted text</p>
+                        </div>
+                    `;
+                }
             }
         } else {
             // Generic fallback
