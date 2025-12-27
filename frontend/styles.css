@@ -2345,25 +2345,18 @@ body {
 
 /* Responsive */
 @media (max-width: 768px) {
-    /* Donation Banner Mobile - Fixed at top */
+    /* Donation Banner Mobile - Below header like desktop */
     .donation-banner {
         flex-direction: column;
         text-align: center;
         padding: var(--space-sm) var(--space-md);
         gap: var(--space-sm);
-        position: fixed;
+        position: sticky;
         top: 0;
-        left: 0;
-        right: 0;
-        z-index: 1000;
+        z-index: 99;
         background: linear-gradient(90deg, rgba(201, 162, 39, 0.15) 0%, rgba(201, 162, 39, 0.25) 50%, rgba(201, 162, 39, 0.15) 100%);
         backdrop-filter: blur(12px);
         border-bottom: 1px solid rgba(201, 162, 39, 0.3);
-    }
-    
-    /* Push header below fixed banner */
-    .header {
-        margin-top: 85px;
     }
     
     .banner-text {
