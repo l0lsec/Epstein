@@ -77,6 +77,39 @@ class PDFExtractor:
         self.extracted_dir.mkdir(exist_ok=True)
         self.index_file = self.extracted_dir / "index.json"
         self.index = self._load_index()
+        self._tesseract_available = None
+    
+    def _check_tesseract(self) -> bool:
+        """Check if Tesseract OCR is available"""
+        if self._tesseract_available is not None:
+            return self._tesseract_available
+        
+        try:
+            import pytesseract
+            pytesseract.get_tesseract_version()
+            self._tesseract_available = True
+        except Exception:
+            self._tesseract_available = False
+        
+        return self._tesseract_available
+    
+    def _ocr_pdf_page(self, page) -> str:
+        """Extract text from a PDF page using OCR"""
+        try:
+            import pytesseract
+            from PIL import Image
+            import io
+            
+            # Convert page to image
+            page_image = page.to_image(resolution=150)
+            pil_image = page_image.original
+            
+            # Perform OCR
+            text = pytesseract.image_to_string(pil_image, lang='eng')
+            return text.strip()
+        except Exception as e:
+            print(f"    OCR error: {e}")
+            return ""
     
     def _load_index(self) -> Dict[str, Any]:
         """Load existing extraction index"""
@@ -160,6 +193,18 @@ class PDFExtractor:
                 subcategory = "Maxwell Proffer"
             else:
                 subcategory = "Other Documents"
+        elif "FBI Vault" in parts:
+            category = "FBI Vault"
+            filename = self._clean_filename(filepath.name)
+            # Extract part number from filename like "Jeffrey Epstein Part 01 of 08.pdf"
+            import re
+            match = re.search(r'Part (\d+) of (\d+)', filename)
+            if match:
+                part_num = int(match.group(1))
+                total_parts = int(match.group(2))
+                subcategory = f"Part {part_num:02d} of {total_parts:02d}"
+            else:
+                subcategory = "FBI Records"
         elif "House Disclosures" in parts:
             category = "House Disclosures"
             # Subcategorize by folder structure (e.g., Prod 01_20250822/VOL00001/IMAGES)
@@ -261,15 +306,26 @@ class PDFExtractor:
         
         return "Legal_Filings"
     
-    def extract_pdf(self, filepath: Path) -> Optional[Dict[str, Any]]:
-        """Extract text from a single PDF file"""
+    def extract_pdf(self, filepath: Path, use_ocr: bool = True) -> Optional[Dict[str, Any]]:
+        """Extract text from a single PDF file, with OCR fallback for scanned documents"""
         try:
             pages = []
             full_text = []
+            used_ocr = False
             
             with pdfplumber.open(str(filepath)) as pdf:
+                total_pages = len(pdf.pages)
+                
                 for page_num, page in enumerate(pdf.pages):
                     text = page.extract_text() or ""
+                    
+                    # If no text but page has images, try OCR
+                    if not text.strip() and use_ocr and self._check_tesseract():
+                        if page.images:  # Page has images (likely scanned)
+                            text = self._ocr_pdf_page(page)
+                            if text:
+                                used_ocr = True
+                    
                     if text.strip():
                         pages.append({
                             "page": page_num + 1,
@@ -282,7 +338,7 @@ class PDFExtractor:
             clean_name = self._clean_filename(filepath.name)
             categorization = self._categorize_file(filepath)
             
-            return {
+            result = {
                 "id": self._file_hash(filepath),
                 "filename": clean_name,
                 "original_filename": filepath.name,
@@ -297,6 +353,11 @@ class PDFExtractor:
                 "char_count": sum(len(p["text"]) for p in pages),
                 "has_content": len(full_text) > 0
             }
+            
+            if used_ocr:
+                result["extraction_method"] = "ocr"
+            
+            return result
             
         except Exception as e:
             return {
@@ -432,6 +493,17 @@ class ImageExtractor:
         if "DOJ Disclosures" in parts:
             category = "DOJ Disclosures"
             subcategory = "Scanned Documents"
+        elif "FBI Vault" in parts:
+            category = "FBI Vault"
+            # Extract part number from filename
+            import re
+            match = re.search(r'Part (\d+) of (\d+)', filename)
+            if match:
+                part_num = int(match.group(1))
+                total_parts = int(match.group(2))
+                subcategory = f"Part {part_num:02d} of {total_parts:02d}"
+            else:
+                subcategory = "FBI Records"
         elif "House Disclosures" in parts:
             category = "House Disclosures"
             # Get production folder as subcategory
@@ -803,6 +875,17 @@ class AudioVideoExtractor:
                 subcategory = "BOP Video Footage"
             else:
                 subcategory = media_type
+        elif "FBI Vault" in parts:
+            category = "FBI Vault"
+            # Extract part number from filename
+            import re
+            match = re.search(r'Part (\d+) of (\d+)', filename)
+            if match:
+                part_num = int(match.group(1))
+                total_parts = int(match.group(2))
+                subcategory = f"Part {part_num:02d} of {total_parts:02d}"
+            else:
+                subcategory = "FBI Records"
         elif "House Disclosures" in parts:
             category = "House Disclosures"
             # Subcategorize by production folder
