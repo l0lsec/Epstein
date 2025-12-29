@@ -163,9 +163,16 @@ class PDFExtractor:
         """Categorize file based on path and filename"""
         relative_path = filepath.relative_to(self.base_path)
         parts = relative_path.parts
+        filename = self._clean_filename(filepath.name)
         
         category = "Unknown"
         subcategory = ""
+        
+        # EFTA files always go to DOJ Disclosures regardless of folder location
+        if filename.startswith("EFTA"):
+            category = "DOJ Disclosures"
+            subcategory = self._get_efta_dataset(filename)
+            return {"category": category, "subcategory": subcategory}
         
         if "DOJ Disclosures" in parts:
             category = "DOJ Disclosures"
@@ -261,14 +268,16 @@ class PDFExtractor:
         
         if "BOP" in filename or "Bureau of Prisons" in filename:
             return "Federal Bureau of Prisons (BOP)"
-        elif "TECS" in filename or "Travel" in filename or "Aircraft" in filename or "Records" in filename:
+        elif "TECS" in filename or "Travel" in filename or "Aircraft" in filename:
             return "Customs and Border Protection (CBP)"
         elif filename.startswith("Epstein Part") and "Redacted" not in filename:
             return "Federal Bureau of Investigation (FBI)"
+        elif filename.startswith("Epstein Travel"):
+            return "Travel Records"
         elif "06CF009454" in filename or "Redacted" in filename or "Stac" in filename or "Phone" in filename:
             return "Florida"
         
-        return "Other"
+        return "Other FOIA Documents"
     
     def _get_court_case_name(self, relative_path: Path) -> str:
         """Extract court case name from path for subcategorization"""
@@ -480,6 +489,33 @@ class ImageExtractor:
         from urllib.parse import unquote
         return unquote(filename)
     
+    def _get_efta_dataset(self, filename: str) -> str:
+        """Determine which dataset an EFTA file belongs to based on file number"""
+        import re
+        match = re.search(r'EFTA(\d+)', filename)
+        if not match:
+            return "EFTA Documents"
+        
+        file_num = int(match.group(1))
+        
+        # Dataset ranges per DOJ website
+        if file_num <= 3158:
+            return "Data Set 1"
+        elif file_num <= 3857:
+            return "Data Set 2"
+        elif file_num <= 5704:
+            return "Data Set 3"
+        elif file_num <= 8408:
+            return "Data Set 4"
+        elif file_num <= 8528:
+            return "Data Set 5"
+        elif file_num <= 9015:
+            return "Data Set 6"
+        elif file_num <= 9675:
+            return "Data Set 7"
+        else:
+            return "Data Set 8"
+    
     def _categorize_file(self, filepath: Path) -> Dict[str, str]:
         """Categorize file based on path and filename"""
         relative_path = filepath.relative_to(self.base_path)
@@ -488,6 +524,12 @@ class ImageExtractor:
         
         category = "Unknown"
         subcategory = "Scanned Document"
+        
+        # EFTA files always go to DOJ Disclosures regardless of folder location
+        if filename.startswith("EFTA"):
+            category = "DOJ Disclosures"
+            subcategory = self._get_efta_dataset(filename)
+            return {"category": category, "subcategory": subcategory}
         
         # Categorize based on folder structure
         if "DOJ Disclosures" in parts:
@@ -515,8 +557,8 @@ class ImageExtractor:
             category = "FOIA"
             subcategory = self._get_foia_subcategory(relative_path)
         else:
-            # Use parent folder as category
-            if len(parts) > 1:
+            # Use parent folder as category, but skip ignored directories
+            if len(parts) > 1 and parts[0] not in IGNORED_DIRS:
                 category = parts[0]
         
         return {"category": category, "subcategory": subcategory}
@@ -556,7 +598,22 @@ class ImageExtractor:
                     return folder_name
         except (ValueError, IndexError):
             pass
-        return "Other"
+        
+        # Fallback: try to determine source from filename patterns
+        filename = self._clean_filename(relative_path.name)
+        
+        if "BOP" in filename or "Bureau of Prisons" in filename:
+            return "Federal Bureau of Prisons (BOP)"
+        elif "TECS" in filename or "Travel" in filename or "Aircraft" in filename:
+            return "Customs and Border Protection (CBP)"
+        elif filename.startswith("Epstein Part") and "Redacted" not in filename:
+            return "Federal Bureau of Investigation (FBI)"
+        elif filename.startswith("Epstein Travel"):
+            return "Travel Records"
+        elif "06CF009454" in filename or "Redacted" in filename or "Stac" in filename or "Phone" in filename:
+            return "Florida"
+        
+        return "Other FOIA Documents"
     
     def extract_image(self, filepath: Path) -> Optional[Dict[str, Any]]:
         """Extract text from a single image using OCR"""
@@ -847,6 +904,33 @@ class AudioVideoExtractor:
         from urllib.parse import unquote
         return unquote(filename)
     
+    def _get_efta_dataset(self, filename: str) -> str:
+        """Determine which dataset an EFTA file belongs to based on file number"""
+        import re
+        match = re.search(r'EFTA(\d+)', filename)
+        if not match:
+            return "EFTA Documents"
+        
+        file_num = int(match.group(1))
+        
+        # Dataset ranges per DOJ website
+        if file_num <= 3158:
+            return "Data Set 1"
+        elif file_num <= 3857:
+            return "Data Set 2"
+        elif file_num <= 5704:
+            return "Data Set 3"
+        elif file_num <= 8408:
+            return "Data Set 4"
+        elif file_num <= 8528:
+            return "Data Set 5"
+        elif file_num <= 9015:
+            return "Data Set 6"
+        elif file_num <= 9675:
+            return "Data Set 7"
+        else:
+            return "Data Set 8"
+    
     def _categorize_file(self, filepath: Path) -> Dict[str, str]:
         """Categorize file based on path and filename"""
         relative_path = filepath.relative_to(self.base_path)
@@ -864,6 +948,12 @@ class AudioVideoExtractor:
         
         category = "Unknown"
         subcategory = media_type
+        
+        # EFTA files always go to DOJ Disclosures regardless of folder location
+        if filename.startswith("EFTA"):
+            category = "DOJ Disclosures"
+            subcategory = self._get_efta_dataset(filename)
+            return {"category": category, "subcategory": subcategory}
         
         # Categorize based on folder structure
         if "DOJ Disclosures" in parts:
@@ -905,8 +995,8 @@ class AudioVideoExtractor:
         elif "Depositions" in parts:
             category = "Depositions"
         else:
-            # Use parent folder as category
-            if len(parts) > 1:
+            # Use parent folder as category, but skip ignored directories
+            if len(parts) > 1 and parts[0] not in IGNORED_DIRS:
                 category = parts[0]
         
         return {"category": category, "subcategory": subcategory}
@@ -955,11 +1045,21 @@ class AudioVideoExtractor:
         except (ValueError, IndexError):
             pass
         
-        # Fallback based on filename patterns
-        filename = relative_path.name
-        if "06CF009454" in filename:
+        # Fallback: try to determine source from filename patterns
+        filename = self._clean_filename(relative_path.name)
+        
+        if "BOP" in filename or "Bureau of Prisons" in filename:
+            return "Federal Bureau of Prisons (BOP)"
+        elif "TECS" in filename or "Travel" in filename or "Aircraft" in filename:
+            return "Customs and Border Protection (CBP)"
+        elif filename.startswith("Epstein Part") and "Redacted" not in filename:
+            return "Federal Bureau of Investigation (FBI)"
+        elif filename.startswith("Epstein Travel"):
+            return "Travel Records"
+        elif "06CF009454" in filename or "Redacted" in filename or "Stac" in filename or "Phone" in filename:
             return "Florida"
-        return "Other"
+        
+        return "Other FOIA Documents"
     
     def _get_file_duration(self, filepath: Path) -> Optional[float]:
         """Get duration of audio/video file in seconds (if ffprobe available)"""
