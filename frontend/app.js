@@ -494,8 +494,8 @@ async function loadCategories() {
             `<option value="${c.category}">${c.category} (${c.count})</option>`
         ).join('');
         
-        elements.searchCategory.innerHTML = '<option value="">All Categories</option>' + categoryOptions;
-        elements.browseCategory.innerHTML = '<option value="">All Categories</option>' + categoryOptions;
+        elements.searchCategory.innerHTML = '<option value="">All File Sets</option>' + categoryOptions;
+        elements.browseCategory.innerHTML = '<option value="">All File Sets</option>' + categoryOptions;
     } catch (error) {
         console.error('Error loading categories:', error);
     }
@@ -960,7 +960,7 @@ function updateSearchFilterCounts(facets) {
         const currentCategory = elements.searchCategory.value;
         const totalResults = facets.categories.reduce((sum, c) => sum + c.count, 0);
         
-        let categoryOptions = `<option value="">All Categories (${formatNumber(totalResults)})</option>`;
+        let categoryOptions = `<option value="">All File Sets (${formatNumber(totalResults)})</option>`;
         categoryOptions += facets.categories.map(c => 
             `<option value="${c.category}"${c.category === currentCategory ? ' selected' : ''}>${c.category} (${formatNumber(c.count)})</option>`
         ).join('');
