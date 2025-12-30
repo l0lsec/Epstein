@@ -1133,6 +1133,58 @@ def generate_image_thumbnail(image_path: Path, output_path: Path) -> bool:
         return False
 
 
+def generate_video_thumbnail(video_path: Path, output_path: Path) -> bool:
+    """Generate a thumbnail from a video file by extracting a frame"""
+    try:
+        import cv2
+        from PIL import Image
+        
+        # Open the video file
+        cap = cv2.VideoCapture(str(video_path))
+        
+        if not cap.isOpened():
+            print(f"Error: Could not open video file: {video_path}")
+            return False
+        
+        # Get total frame count
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        
+        # Try to extract a frame from ~10% into the video (avoids black intro frames)
+        target_frame = max(1, int(total_frames * 0.1))
+        
+        # If video is very short, just use the first frame
+        if total_frames < 10:
+            target_frame = 0
+        
+        # Seek to target frame
+        cap.set(cv2.CAP_PROP_POS_FRAMES, target_frame)
+        
+        # Read the frame
+        ret, frame = cap.read()
+        cap.release()
+        
+        if not ret or frame is None:
+            print(f"Error: Could not read frame from video: {video_path}")
+            return False
+        
+        # Convert BGR (OpenCV format) to RGB (PIL format)
+        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        
+        # Convert to PIL Image
+        img = Image.fromarray(frame_rgb)
+        
+        # Create thumbnail maintaining aspect ratio
+        img.thumbnail((THUMBNAIL_WIDTH, THUMBNAIL_HEIGHT), Image.Resampling.LANCZOS)
+        
+        # Save as JPEG
+        img.save(str(output_path), 'JPEG', quality=85)
+        
+        return True
+    except Exception as e:
+        print(f"Error generating video thumbnail: {e}")
+        return False
+
+
 def create_placeholder_thumbnail(file_type: str, output_path: Path) -> bool:
     """Create a placeholder thumbnail for audio/video files"""
     try:
@@ -1220,7 +1272,9 @@ async def get_document_thumbnail(doc_id: str, request: Request):
         elif file_type == "audio":
             create_placeholder_thumbnail("audio", thumbnail_path)
         elif file_type == "video":
-            create_placeholder_thumbnail("video", thumbnail_path)
+            # Try to extract actual frame from video
+            if not generate_video_thumbnail(file_path, thumbnail_path):
+                create_placeholder_thumbnail("video", thumbnail_path)
         else:
             create_placeholder_thumbnail("document", thumbnail_path)
     
