@@ -625,8 +625,14 @@ function renderPinnedDocumentsBar(docs) {
         </div>
     `;
     
-    // Insert at the end of the search view (after search results, before footer)
-    searchView.appendChild(pinnedBar);
+    // Insert right above the Archive Statistics section
+    const statsDisplay = document.getElementById('stats-display');
+    if (statsDisplay) {
+        statsDisplay.parentNode.insertBefore(pinnedBar, statsDisplay);
+    } else {
+        // Fallback: append to search view
+        searchView.appendChild(pinnedBar);
+    }
 }
 
 async function loadSubcategories(category, target = 'search') {

@@ -1762,8 +1762,8 @@ async function searchDocumentsForPin(query) {
         resultsEl.innerHTML = '<div style="padding: var(--space-md); text-align: center;"><span class="spinner"></span> Searching...</div>';
         
         try {
-            // Use the documents API with filename filter
-            const response = await fetch(`${window.location.origin}/api/documents?filename=${encodeURIComponent(query)}&limit=20`);
+            // Use search parameter which searches both filename AND subcategory
+            const response = await fetch(`${window.location.origin}/api/documents?search=${encodeURIComponent(query)}&limit=100`);
             if (!response.ok) throw new Error('Search failed');
             const data = await response.json();
             

@@ -414,8 +414,13 @@ class Database:
                           subcategory: Optional[str] = None,
                           file_type: Optional[str] = None,
                           filename: Optional[str] = None,
-                          keyword: Optional[str] = None) -> List[Dict[str, Any]]:
-        """Get all documents with pagination and filtering"""
+                          keyword: Optional[str] = None,
+                          search: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Get all documents with pagination and filtering
+        
+        Args:
+            search: Searches both filename AND subcategory (for admin document search)
+        """
         with self.get_connection() as conn:
             params = []
             conditions = []
@@ -453,6 +458,15 @@ class Database:
                 # Case-insensitive partial match on filename
                 conditions.append("LOWER(filename) LIKE LOWER(?)" if not keyword else "LOWER(d.filename) LIKE LOWER(?)")
                 params.append(f"%{filename}%")
+            
+            if search:
+                # Search both filename and subcategory (for admin document search)
+                if keyword:
+                    conditions.append("(LOWER(d.filename) LIKE LOWER(?) OR LOWER(d.subcategory) LIKE LOWER(?))")
+                else:
+                    conditions.append("(LOWER(filename) LIKE LOWER(?) OR LOWER(subcategory) LIKE LOWER(?))")
+                params.append(f"%{search}%")
+                params.append(f"%{search}%")
             
             if conditions:
                 if keyword:

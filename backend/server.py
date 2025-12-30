@@ -932,13 +932,18 @@ async def list_documents(
     subcategory: Optional[str] = None,
     file_type: Optional[str] = None,
     filename: Optional[str] = None,
-    keyword: Optional[str] = None
+    keyword: Optional[str] = None,
+    search: Optional[str] = None
 ):
-    """List all documents with pagination"""
+    """List all documents with pagination
+    
+    Args:
+        search: Searches both filename AND subcategory (for admin document search)
+    """
     if not db:
         raise HTTPException(status_code=503, detail="Database not initialized")
     
-    docs = db.get_all_documents(limit=limit, offset=offset, category=category, subcategory=subcategory, file_type=file_type, filename=filename, keyword=keyword)
+    docs = db.get_all_documents(limit=limit, offset=offset, category=category, subcategory=subcategory, file_type=file_type, filename=filename, keyword=keyword, search=search)
     total = db.count_documents(category=category, subcategory=subcategory, file_type=file_type, filename=filename, keyword=keyword)
     
     return {
