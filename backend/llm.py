@@ -43,23 +43,52 @@ DOJ reports, and other official records."""
         """Check if LLM is configured and available"""
         return self.client is not None
     
-    def format_context(self, documents: List[Dict[str, Any]], max_chars: int = 12000) -> str:
-        """Format documents as context for LLM"""
+    def format_context(self, documents: List[Dict[str, Any]], max_chars: int = 24000) -> str:
+        """Format documents as context for LLM
+        
+        Args:
+            documents: List of documents with 'full_text' or 'text' fields
+            max_chars: Maximum total characters for context (increased for better accuracy)
+        """
         context_parts = []
         total_chars = 0
         
-        for doc in documents:
+        # Sort by relevance score to prioritize most relevant docs
+        sorted_docs = sorted(documents, key=lambda d: d.get('score', 0), reverse=True)
+        
+        for doc in sorted_docs:
+            # Prefer full_text over the shorter text snippet
+            content = doc.get('full_text', doc.get('text', 'No content available'))
+            
+            # Use up to 5000 chars per document for better context
+            content_truncated = content[:5000] if len(content) > 5000 else content
+            
             doc_text = f"""
 ---
 Document: {doc.get('filename', 'Unknown')}
-Category: {doc.get('category', 'Unknown')} / {doc.get('subcategory', '')}
-Relevance Score: {doc.get('score', 'N/A')}
+Category: {doc.get('category', 'Unknown')}
+{f"Subcategory: {doc.get('subcategory')}" if doc.get('subcategory') else ""}
+Relevance Score: {doc.get('score', 'N/A'):.3f if isinstance(doc.get('score'), float) else 'N/A'}
 
 Content:
-{doc.get('text', doc.get('full_text', 'No content available'))[:3000]}
+{content_truncated}
 ---
 """
             if total_chars + len(doc_text) > max_chars:
+                # Try to include at least a shorter version
+                remaining = max_chars - total_chars - 200
+                if remaining > 500:
+                    short_content = content[:remaining]
+                    short_doc = f"""
+---
+Document: {doc.get('filename', 'Unknown')}
+Category: {doc.get('category', 'Unknown')}
+
+Content (truncated):
+{short_content}...
+---
+"""
+                    context_parts.append(short_doc)
                 break
             context_parts.append(doc_text)
             total_chars += len(doc_text)

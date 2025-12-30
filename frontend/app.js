@@ -39,6 +39,8 @@ async function init() {
     setupEventListeners();
     await loadStats();
     await loadCategories();
+    await loadPublicSettings();
+    await loadPinnedDocuments();
     
     // Set timestamp for spam protection
     const timestampField = document.getElementById('feedback-timestamp');
@@ -499,6 +501,103 @@ async function loadCategories() {
     }
 }
 
+// Load public settings (like Ask AI visibility)
+async function loadPublicSettings() {
+    try {
+        const response = await fetch(`${API_BASE}/settings`);
+        if (!response.ok) return;
+        
+        const settings = await response.json();
+        
+        // Handle Ask AI visibility
+        if (settings.ask_ai_enabled === false) {
+            // Hide the Ask AI nav button and view
+            const askNavBtn = document.querySelector('.nav-btn[data-view="ask"]');
+            const askView = document.getElementById('ask-view');
+            
+            if (askNavBtn) askNavBtn.style.display = 'none';
+            if (askView) askView.style.display = 'none';
+        }
+    } catch (error) {
+        console.error('Error loading public settings:', error);
+    }
+}
+
+// Load and display pinned documents on homepage
+async function loadPinnedDocuments() {
+    try {
+        const response = await fetch(`${API_BASE}/pinned-documents`);
+        if (!response.ok) return;
+        
+        const data = await response.json();
+        const pinnedDocs = data.pinned_documents || [];
+        
+        if (pinnedDocs.length > 0) {
+            renderPinnedDocumentsBar(pinnedDocs);
+        }
+    } catch (error) {
+        console.error('Error loading pinned documents:', error);
+    }
+}
+
+function renderPinnedDocumentsBar(docs) {
+    // Only show on search view / homepage
+    const searchView = document.getElementById('search-view');
+    if (!searchView) return;
+    
+    // Check if bar already exists
+    let pinnedBar = document.getElementById('pinned-documents-bar');
+    if (pinnedBar) {
+        pinnedBar.remove();
+    }
+    
+    // Generate the card HTML
+    const generateCardHTML = (doc) => `
+        <div class="pinned-card" onclick="openDocument('${escapeHtml(doc.document_id)}')">
+            <div class="pinned-card-thumbnail">
+                <img src="${API_BASE}/documents/${doc.document_id}/thumbnail" 
+                     alt="${escapeHtml(doc.filename)}"
+                     onerror="this.style.display='none'; this.nextElementSibling.style.display='flex';">
+                <div class="thumbnail-fallback" style="display: none;">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                        <path d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/>
+                    </svg>
+                </div>
+            </div>
+            <div class="pinned-card-content">
+                <div class="pinned-card-filename">${escapeHtml(doc.filename)}</div>
+                ${doc.reason ? `<div class="pinned-card-reason">"${escapeHtml(doc.reason)}"</div>` : ''}
+                <div class="pinned-card-meta">${escapeHtml(doc.category || 'Document')}</div>
+            </div>
+        </div>
+    `;
+    
+    // Create cards HTML - duplicate for seamless infinite scroll
+    const cardsHTML = docs.map(generateCardHTML).join('');
+    const duplicatedCardsHTML = cardsHTML + cardsHTML; // Duplicate for seamless loop
+    
+    // Create the pinned documents bar
+    pinnedBar = document.createElement('div');
+    pinnedBar.id = 'pinned-documents-bar';
+    pinnedBar.className = 'pinned-documents-bar';
+    
+    pinnedBar.innerHTML = `
+        <div class="pinned-header">
+            <span class="pinned-icon">📌</span>
+            <span class="pinned-title">Featured Documents</span>
+            <span class="pinned-subtitle">Controversial & Notable Files</span>
+        </div>
+        <div class="pinned-scroll-container">
+            <div class="pinned-scroll" id="pinned-scroll">
+                ${duplicatedCardsHTML}
+            </div>
+        </div>
+    `;
+    
+    // Insert at the end of the search view (after search results, before footer)
+    searchView.appendChild(pinnedBar);
+}
+
 async function loadSubcategories(category, target = 'search') {
     const subcategoryEl = target === 'search' ? elements.searchSubcategory : elements.browseSubcategory;
     const groupEl = target === 'search' ? elements.searchSubcategoryGroup : null;
@@ -787,7 +886,9 @@ function renderSearchResults(data) {
         if (data.total > state.searchLimit) {
             elements.searchPagination.classList.remove('hidden');
             elements.searchPrevPage.disabled = state.searchPage === 0;
-            elements.searchNextPage.disabled = (state.searchPage + 1) >= totalPages;
+            // Disable next button if there are no more results to show
+            const hasMoreResults = (state.searchPage + 1) * state.searchLimit < data.total;
+            elements.searchNextPage.disabled = !hasMoreResults;
             
             // Generate page number buttons
             renderSearchPageNumbers(totalPages);
@@ -1016,10 +1117,12 @@ function renderDocuments(data) {
     elements.browseCount.textContent = `${formatNumber(data.total)} documents`;
     
     const totalPages = Math.ceil(data.total / state.browseLimit);
-    elements.pageInfo.textContent = `Page ${state.browsePage + 1} of ${totalPages}`;
+    elements.pageInfo.textContent = `Page ${state.browsePage + 1} of ${Math.max(1, totalPages)}`;
     
     elements.prevPage.disabled = state.browsePage === 0;
-    elements.nextPage.disabled = (state.browsePage + 1) >= totalPages;
+    // Disable next button if there are no more results to show
+    const hasMoreResults = (state.browsePage + 1) * state.browseLimit < data.total;
+    elements.nextPage.disabled = !hasMoreResults || totalPages <= 1;
     
     if (!data.documents || data.documents.length === 0) {
         elements.documentsGrid.innerHTML = '<p class="no-results">No documents found.</p>';

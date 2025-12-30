@@ -105,6 +105,28 @@ class Database:
                 )
             """)
             conn.commit()
+            
+            # Settings table for app-wide settings (e.g., AI visibility)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS settings (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            conn.commit()
+            
+            # Pinned documents table for controversial/featured documents
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS pinned_documents (
+                    document_id TEXT PRIMARY KEY,
+                    reason TEXT,
+                    display_order INTEGER DEFAULT 0,
+                    pinned_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (document_id) REFERENCES documents(id)
+                )
+            """)
+            conn.commit()
     
     def rebuild_fts(self):
         """Rebuild the FTS5 index to fix sync issues"""
@@ -514,6 +536,111 @@ class Database:
         with self.get_connection() as conn:
             cursor = conn.execute("SELECT id FROM documents")
             return {row[0] for row in cursor.fetchall()}
+    
+    # =========================================================================
+    # Settings Methods
+    # =========================================================================
+    
+    def get_setting(self, key: str, default: str = None) -> Optional[str]:
+        """Get a setting value by key"""
+        with self.get_connection() as conn:
+            cursor = conn.execute(
+                "SELECT value FROM settings WHERE key = ?", (key,)
+            )
+            row = cursor.fetchone()
+            return row["value"] if row else default
+    
+    def set_setting(self, key: str, value: str) -> None:
+        """Set a setting value"""
+        with self.get_connection() as conn:
+            conn.execute("""
+                INSERT OR REPLACE INTO settings (key, value, updated_at)
+                VALUES (?, ?, CURRENT_TIMESTAMP)
+            """, (key, value))
+            conn.commit()
+    
+    def get_all_settings(self) -> Dict[str, str]:
+        """Get all settings as a dictionary"""
+        with self.get_connection() as conn:
+            cursor = conn.execute("SELECT key, value FROM settings")
+            return {row["key"]: row["value"] for row in cursor.fetchall()}
+    
+    # =========================================================================
+    # Pinned Documents Methods
+    # =========================================================================
+    
+    def get_pinned_documents(self) -> List[Dict[str, Any]]:
+        """Get all pinned documents with their details"""
+        with self.get_connection() as conn:
+            cursor = conn.execute("""
+                SELECT 
+                    p.document_id, p.reason, p.display_order, p.pinned_at,
+                    d.filename, d.path, d.category, d.subcategory, d.file_type,
+                    d.page_count, d.char_count
+                FROM pinned_documents p
+                JOIN documents d ON p.document_id = d.id
+                ORDER BY p.display_order ASC, p.pinned_at DESC
+            """)
+            return [dict(row) for row in cursor.fetchall()]
+    
+    def pin_document(self, document_id: str, reason: str = None, display_order: int = 0) -> bool:
+        """Pin a document with an optional reason"""
+        with self.get_connection() as conn:
+            # Verify document exists
+            cursor = conn.execute("SELECT id FROM documents WHERE id = ?", (document_id,))
+            if not cursor.fetchone():
+                return False
+            
+            conn.execute("""
+                INSERT OR REPLACE INTO pinned_documents (document_id, reason, display_order, pinned_at)
+                VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+            """, (document_id, reason, display_order))
+            conn.commit()
+            return True
+    
+    def unpin_document(self, document_id: str) -> bool:
+        """Unpin a document"""
+        with self.get_connection() as conn:
+            cursor = conn.execute(
+                "DELETE FROM pinned_documents WHERE document_id = ?",
+                (document_id,)
+            )
+            conn.commit()
+            return cursor.rowcount > 0
+    
+    def update_pinned_document(self, document_id: str, reason: str = None, display_order: int = None) -> bool:
+        """Update a pinned document's reason or order"""
+        with self.get_connection() as conn:
+            updates = []
+            params = []
+            
+            if reason is not None:
+                updates.append("reason = ?")
+                params.append(reason)
+            
+            if display_order is not None:
+                updates.append("display_order = ?")
+                params.append(display_order)
+            
+            if not updates:
+                return False
+            
+            params.append(document_id)
+            cursor = conn.execute(
+                f"UPDATE pinned_documents SET {', '.join(updates)} WHERE document_id = ?",
+                params
+            )
+            conn.commit()
+            return cursor.rowcount > 0
+    
+    def is_document_pinned(self, document_id: str) -> bool:
+        """Check if a document is pinned"""
+        with self.get_connection() as conn:
+            cursor = conn.execute(
+                "SELECT 1 FROM pinned_documents WHERE document_id = ?",
+                (document_id,)
+            )
+            return cursor.fetchone() is not None
 
 
 class VectorStore:

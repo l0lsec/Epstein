@@ -230,6 +230,9 @@ function loadTabData(tabId) {
         case 'feedback':
             loadFeedbackData();
             break;
+        case 'content':
+            loadContentData();
+            break;
         case 'system':
             loadSystemData();
             break;
@@ -1593,10 +1596,302 @@ async function deleteFeedback(feedbackId) {
     }
 }
 
+// ============================================================================
+// CONTENT MANAGEMENT FUNCTIONS (Ask AI Toggle + Pinned Documents)
+// ============================================================================
+
+async function loadContentData() {
+    await Promise.all([
+        loadAskAIStatus(),
+        loadPinnedDocuments()
+    ]);
+}
+
+async function loadAskAIStatus() {
+    try {
+        const response = await authFetch(`${window.location.origin}/api/admin/settings`);
+        if (!response.ok) throw new Error('Failed to load settings');
+        const settings = await response.json();
+        
+        const isEnabled = settings.ask_ai_enabled !== 'false';
+        const toggle = document.getElementById('ask-ai-toggle');
+        const statusEl = document.getElementById('ask-ai-status');
+        
+        if (toggle) toggle.checked = isEnabled;
+        if (statusEl) {
+            statusEl.innerHTML = isEnabled 
+                ? '<span style="color: var(--success);">✓ Ask AI is currently <strong>visible</strong> on the frontend</span>'
+                : '<span style="color: var(--warning);">⚠️ Ask AI is currently <strong>hidden</strong> from the frontend</span>';
+        }
+    } catch (error) {
+        console.error('Error loading Ask AI status:', error);
+        const statusEl = document.getElementById('ask-ai-status');
+        if (statusEl) statusEl.innerHTML = '<span style="color: var(--danger);">Error loading status</span>';
+    }
+}
+
+async function toggleAskAI(enabled) {
+    try {
+        const response = await authFetch(`${window.location.origin}/api/admin/settings`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ key: 'ask_ai_enabled', value: enabled ? 'true' : 'false' })
+        });
+        
+        if (!response.ok) throw new Error('Failed to update setting');
+        
+        const statusEl = document.getElementById('ask-ai-status');
+        if (statusEl) {
+            statusEl.innerHTML = enabled 
+                ? '<span style="color: var(--success);">✓ Ask AI is now <strong>visible</strong> on the frontend</span>'
+                : '<span style="color: var(--warning);">⚠️ Ask AI is now <strong>hidden</strong> from the frontend</span>';
+        }
+    } catch (error) {
+        console.error('Error toggling Ask AI:', error);
+        alert('Error updating setting: ' + error.message);
+        // Revert toggle
+        const toggle = document.getElementById('ask-ai-toggle');
+        if (toggle) toggle.checked = !enabled;
+    }
+}
+
+// Store pinned documents data
+let pinnedDocsData = [];
+
+async function loadPinnedDocuments() {
+    try {
+        const response = await authFetch(`${window.location.origin}/api/admin/pinned-documents`);
+        if (!response.ok) throw new Error('Failed to load pinned documents');
+        const data = await response.json();
+        
+        pinnedDocsData = data.pinned_documents || [];
+        renderPinnedDocuments(pinnedDocsData);
+    } catch (error) {
+        console.error('Error loading pinned documents:', error);
+        const el = document.getElementById('pinned-docs-list');
+        if (el) el.innerHTML = '<div style="color: var(--danger);">Error loading pinned documents</div>';
+    }
+}
+
+function renderPinnedDocuments(docs) {
+    const el = document.getElementById('pinned-docs-list');
+    if (!el) return;
+    
+    if (!docs || docs.length === 0) {
+        el.innerHTML = `
+            <div class="empty-state">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/>
+                </svg>
+                <p>No documents pinned yet</p>
+                <p style="font-size: 0.85rem;">Click "Pin Document" to add featured documents to the homepage</p>
+            </div>
+        `;
+        return;
+    }
+    
+    el.innerHTML = docs.map((doc, index) => `
+        <div class="pinned-doc-item" data-id="${escapeHtml(doc.document_id)}">
+            <div class="pinned-doc-order">${doc.display_order || index + 1}</div>
+            <div class="pinned-doc-info">
+                <div class="pinned-doc-filename" title="${escapeHtml(doc.filename)}">${escapeHtml(doc.filename)}</div>
+                ${doc.reason ? `<div class="pinned-doc-reason">"${escapeHtml(doc.reason)}"</div>` : ''}
+                <div class="pinned-doc-meta">${escapeHtml(doc.category || '')} • Pinned ${formatTimeAgo(doc.pinned_at)}</div>
+            </div>
+            <div class="pinned-doc-actions">
+                <button class="btn-icon" onclick="editPinnedDocument('${escapeHtml(doc.document_id)}')" title="Edit">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/>
+                        <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/>
+                    </svg>
+                </button>
+                <button class="btn-icon delete" onclick="unpinDocument('${escapeHtml(doc.document_id)}')" title="Unpin">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <polyline points="3,6 5,6 21,6"/>
+                        <path d="M19,6v14a2,2,0,0,1-2,2H7a2,2,0,0,1-2-2V6M8,6V4a2,2,0,0,1,2-2h4a2,2,0,0,1,2,2V6"/>
+                    </svg>
+                </button>
+            </div>
+        </div>
+    `).join('');
+}
+
+// Document search for pin modal
+let pinSearchTimeout = null;
+
+function openPinDocumentModal() {
+    const modal = document.getElementById('pin-document-modal');
+    if (modal) {
+        modal.style.display = 'flex';
+        // Reset form
+        document.getElementById('pin-doc-search').value = '';
+        document.getElementById('pin-doc-reason').value = '';
+        document.getElementById('pin-doc-order').value = '0';
+        document.getElementById('pin-doc-selected').style.display = 'none';
+        document.getElementById('pin-doc-results').innerHTML = 
+            '<div style="padding: var(--space-md); color: var(--text-muted); text-align: center;">Enter a search term to find documents</div>';
+    }
+}
+
+function closePinDocumentModal() {
+    const modal = document.getElementById('pin-document-modal');
+    if (modal) modal.style.display = 'none';
+}
+
+async function searchDocumentsForPin(query) {
+    if (pinSearchTimeout) clearTimeout(pinSearchTimeout);
+    
+    const resultsEl = document.getElementById('pin-doc-results');
+    
+    if (!query || query.length < 2) {
+        resultsEl.innerHTML = '<div style="padding: var(--space-md); color: var(--text-muted); text-align: center;">Enter at least 2 characters to search</div>';
+        return;
+    }
+    
+    // Debounce search
+    pinSearchTimeout = setTimeout(async () => {
+        resultsEl.innerHTML = '<div style="padding: var(--space-md); text-align: center;"><span class="spinner"></span> Searching...</div>';
+        
+        try {
+            // Use the documents API with filename filter
+            const response = await fetch(`${window.location.origin}/api/documents?filename=${encodeURIComponent(query)}&limit=20`);
+            if (!response.ok) throw new Error('Search failed');
+            const data = await response.json();
+            
+            if (!data.documents || data.documents.length === 0) {
+                resultsEl.innerHTML = '<div style="padding: var(--space-md); color: var(--text-muted); text-align: center;">No documents found</div>';
+                return;
+            }
+            
+            resultsEl.innerHTML = data.documents.map(doc => `
+                <div class="pin-search-item" onclick="selectDocumentForPin('${escapeHtml(doc.id)}', '${escapeHtml(doc.filename.replace(/'/g, "\\'"))}')">
+                    <div class="pin-search-filename">${escapeHtml(doc.filename)}</div>
+                    <div class="pin-search-meta">${escapeHtml(doc.category || '')} • ${doc.page_count || 0} pages</div>
+                </div>
+            `).join('');
+        } catch (error) {
+            console.error('Error searching documents:', error);
+            resultsEl.innerHTML = '<div style="padding: var(--space-md); color: var(--danger); text-align: center;">Error searching documents</div>';
+        }
+    }, 300);
+}
+
+function selectDocumentForPin(docId, filename) {
+    const selectedEl = document.getElementById('pin-doc-selected');
+    const selectedNameEl = document.getElementById('pin-doc-selected-name');
+    const selectedIdEl = document.getElementById('pin-doc-selected-id');
+    
+    selectedIdEl.value = docId;
+    selectedNameEl.textContent = filename;
+    selectedEl.style.display = 'block';
+    
+    // Highlight selected item
+    document.querySelectorAll('.pin-search-item').forEach(el => el.classList.remove('selected'));
+    document.querySelector(`.pin-search-item[onclick*="${docId}"]`)?.classList.add('selected');
+}
+
+async function submitPinDocument() {
+    const docId = document.getElementById('pin-doc-selected-id').value;
+    const reason = document.getElementById('pin-doc-reason').value.trim();
+    const order = parseInt(document.getElementById('pin-doc-order').value) || 0;
+    
+    if (!docId) {
+        alert('Please select a document first');
+        return;
+    }
+    
+    try {
+        const response = await authFetch(`${window.location.origin}/api/admin/pinned-documents`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                document_id: docId,
+                reason: reason || null,
+                display_order: order
+            })
+        });
+        
+        if (!response.ok) {
+            const data = await response.json();
+            throw new Error(data.detail || 'Failed to pin document');
+        }
+        
+        closePinDocumentModal();
+        loadPinnedDocuments();
+        
+    } catch (error) {
+        console.error('Error pinning document:', error);
+        alert('Error: ' + error.message);
+    }
+}
+
+async function unpinDocument(docId) {
+    if (!confirm('Are you sure you want to unpin this document?')) return;
+    
+    try {
+        const response = await authFetch(`${window.location.origin}/api/admin/pinned-documents/${docId}`, {
+            method: 'DELETE'
+        });
+        
+        if (!response.ok) {
+            const data = await response.json();
+            throw new Error(data.detail || 'Failed to unpin document');
+        }
+        
+        loadPinnedDocuments();
+        
+    } catch (error) {
+        console.error('Error unpinning document:', error);
+        alert('Error: ' + error.message);
+    }
+}
+
+function editPinnedDocument(docId) {
+    const doc = pinnedDocsData.find(d => d.document_id === docId);
+    if (!doc) return;
+    
+    const newReason = prompt('Edit reason (why is this document notable?):', doc.reason || '');
+    if (newReason === null) return; // Cancelled
+    
+    const newOrder = prompt('Edit display order (lower = first):', doc.display_order || 0);
+    if (newOrder === null) return; // Cancelled
+    
+    updatePinnedDocument(docId, newReason, parseInt(newOrder) || 0);
+}
+
+async function updatePinnedDocument(docId, reason, order) {
+    try {
+        const response = await authFetch(`${window.location.origin}/api/admin/pinned-documents/${docId}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ reason, display_order: order })
+        });
+        
+        if (!response.ok) {
+            const data = await response.json();
+            throw new Error(data.detail || 'Failed to update pinned document');
+        }
+        
+        loadPinnedDocuments();
+        
+    } catch (error) {
+        console.error('Error updating pinned document:', error);
+        alert('Error: ' + error.message);
+    }
+}
+
 // Global refresh function
 window.refreshAll = refreshAll;
 window.clearLogs = clearLogs;
 window.openFeedbackModal = openFeedbackModal;
 window.closeFeedbackModal = closeFeedbackModal;
 window.deleteFeedback = deleteFeedback;
+window.toggleAskAI = toggleAskAI;
+window.openPinDocumentModal = openPinDocumentModal;
+window.closePinDocumentModal = closePinDocumentModal;
+window.searchDocumentsForPin = searchDocumentsForPin;
+window.selectDocumentForPin = selectDocumentForPin;
+window.submitPinDocument = submitPinDocument;
+window.unpinDocument = unpinDocument;
+window.editPinnedDocument = editPinnedDocument;
 

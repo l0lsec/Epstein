@@ -382,7 +382,7 @@ class SearchRequest(BaseModel):
 class AskRequest(BaseModel):
     question: str
     category: Optional[str] = None
-    num_context_docs: int = 5
+    num_context_docs: int = 8  # Increased default for better accuracy
 
 
 class SearchResult(BaseModel):
@@ -1250,7 +1250,7 @@ async def ask_question(ask_request: AskRequest, request: Request):
     if not vector_store:
         raise HTTPException(status_code=503, detail="Vector store not initialized")
     
-    # Get relevant documents
+    # Get relevant documents via semantic search
     context_docs = vector_store.search(
         query=ask_request.question,
         n_results=ask_request.num_context_docs,
@@ -1273,9 +1273,29 @@ async def ask_question(ask_request: AskRequest, request: Request):
             "sources": []
         }
     
-    # Get answer from LLM
+    # Fetch full document content from database for better accuracy
+    # The vector store only has 500-char snippets, we need full text for LLM
+    enriched_docs = []
+    for doc in context_docs:
+        doc_id = doc.get("id")
+        if doc_id and db:
+            full_doc = db.get_document(doc_id)
+            if full_doc:
+                enriched_docs.append({
+                    **doc,
+                    "full_text": full_doc.get("full_text", doc.get("text", "")),
+                    "filename": full_doc.get("filename", doc.get("filename", "Unknown")),
+                    "category": full_doc.get("category", doc.get("category", "Unknown")),
+                    "subcategory": full_doc.get("subcategory", doc.get("subcategory", ""))
+                })
+            else:
+                enriched_docs.append(doc)
+        else:
+            enriched_docs.append(doc)
+    
+    # Get answer from LLM with enriched context
     try:
-        answer = llm.answer_question(ask_request.question, context_docs)
+        answer = llm.answer_question(ask_request.question, enriched_docs)
     except Exception as e:
         security_logger.log_error(
             error=e,
@@ -1294,7 +1314,7 @@ async def ask_question(ask_request: AskRequest, request: Request):
             "category": doc.get("category", "Unknown"),
             "score": doc.get("score", 0)
         }
-        for doc in context_docs
+        for doc in enriched_docs
     ]
     
     return {
@@ -1315,25 +1335,44 @@ async def ask_question_stream(ask_request: AskRequest, request: Request):
     if not vector_store:
         raise HTTPException(status_code=503, detail="Vector store not initialized")
     
-    # Get relevant documents
+    # Get relevant documents via semantic search
     context_docs = vector_store.search(
         query=ask_request.question,
         n_results=ask_request.num_context_docs,
         category=ask_request.category
     )
     
+    # Fetch full document content from database for better accuracy
+    enriched_docs = []
+    for doc in context_docs:
+        doc_id = doc.get("id")
+        if doc_id and db:
+            full_doc = db.get_document(doc_id)
+            if full_doc:
+                enriched_docs.append({
+                    **doc,
+                    "full_text": full_doc.get("full_text", doc.get("text", "")),
+                    "filename": full_doc.get("filename", doc.get("filename", "Unknown")),
+                    "category": full_doc.get("category", doc.get("category", "Unknown")),
+                    "subcategory": full_doc.get("subcategory", doc.get("subcategory", ""))
+                })
+            else:
+                enriched_docs.append(doc)
+        else:
+            enriched_docs.append(doc)
+    
     # Log the streaming LLM query
     security_logger.log_llm_query(
         client_ip=client_ip,
         question=ask_request.question,
-        context_docs_count=len(context_docs),
+        context_docs_count=len(enriched_docs),
         request_id=request_id,
         category=ask_request.category,
         streaming=True
     )
     
     async def generate():
-        for chunk in llm.answer_question(ask_request.question, context_docs, stream=True):
+        for chunk in llm.answer_question(ask_request.question, enriched_docs, stream=True):
             yield f"data: {chunk}\n\n"
         yield "data: [DONE]\n\n"
     
@@ -2381,6 +2420,196 @@ async def delete_feedback(feedback_id: str, request: Request, x_api_key: str = H
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error deleting feedback: {str(e)}")
+
+
+# =============================================================================
+# SETTINGS API ENDPOINTS
+# =============================================================================
+
+@app.get("/api/settings")
+async def get_public_settings():
+    """Get public settings (no auth required)"""
+    if not db:
+        raise HTTPException(status_code=503, detail="Database not initialized")
+    
+    settings = db.get_all_settings()
+    
+    # Only expose certain settings to the public
+    public_settings = {
+        "ask_ai_enabled": settings.get("ask_ai_enabled", "true") == "true"
+    }
+    
+    return public_settings
+
+
+@app.get("/api/admin/settings")
+async def get_admin_settings(request: Request, x_api_key: str = Header(None)):
+    """Get all settings (requires admin authentication)"""
+    is_authorized, error = verify_admin_access(request, x_api_key)
+    if not is_authorized:
+        raise HTTPException(status_code=401, detail=error)
+    
+    if not db:
+        raise HTTPException(status_code=503, detail="Database not initialized")
+    
+    return db.get_all_settings()
+
+
+class SettingUpdate(BaseModel):
+    key: str
+    value: str
+
+
+@app.post("/api/admin/settings")
+async def update_setting(setting: SettingUpdate, request: Request, x_api_key: str = Header(None)):
+    """Update a setting (requires admin authentication)"""
+    is_authorized, error = verify_admin_access(request, x_api_key)
+    if not is_authorized:
+        raise HTTPException(status_code=401, detail=error)
+    
+    if not db:
+        raise HTTPException(status_code=503, detail="Database not initialized")
+    
+    client_ip, request_id = get_client_info(request)
+    
+    # Log setting change
+    security_logger.log_security_event(
+        event_type="setting_changed",
+        severity="info",
+        client_ip=client_ip,
+        message=f"Setting '{setting.key}' changed to '{setting.value}'",
+        request_id=request_id
+    )
+    
+    db.set_setting(setting.key, setting.value)
+    
+    return {"success": True, "key": setting.key, "value": setting.value}
+
+
+# =============================================================================
+# PINNED DOCUMENTS API ENDPOINTS
+# =============================================================================
+
+@app.get("/api/pinned-documents")
+async def get_pinned_documents():
+    """Get all pinned/featured documents (public endpoint)"""
+    if not db:
+        raise HTTPException(status_code=503, detail="Database not initialized")
+    
+    return {"pinned_documents": db.get_pinned_documents()}
+
+
+class PinDocumentRequest(BaseModel):
+    document_id: str
+    reason: Optional[str] = None
+    display_order: int = 0
+
+
+@app.post("/api/admin/pinned-documents")
+async def pin_document(pin_request: PinDocumentRequest, request: Request, x_api_key: str = Header(None)):
+    """Pin a document (requires admin authentication)"""
+    is_authorized, error = verify_admin_access(request, x_api_key)
+    if not is_authorized:
+        raise HTTPException(status_code=401, detail=error)
+    
+    if not db:
+        raise HTTPException(status_code=503, detail="Database not initialized")
+    
+    client_ip, request_id = get_client_info(request)
+    
+    success = db.pin_document(
+        pin_request.document_id,
+        pin_request.reason,
+        pin_request.display_order
+    )
+    
+    if not success:
+        raise HTTPException(status_code=404, detail="Document not found")
+    
+    security_logger.log_security_event(
+        event_type="document_pinned",
+        severity="info",
+        client_ip=client_ip,
+        message=f"Document pinned: {pin_request.document_id}",
+        request_id=request_id,
+        document_id=pin_request.document_id
+    )
+    
+    return {"success": True, "document_id": pin_request.document_id}
+
+
+class UpdatePinRequest(BaseModel):
+    reason: Optional[str] = None
+    display_order: Optional[int] = None
+
+
+@app.put("/api/admin/pinned-documents/{document_id}")
+async def update_pinned_document(
+    document_id: str, 
+    update_request: UpdatePinRequest, 
+    request: Request, 
+    x_api_key: str = Header(None)
+):
+    """Update a pinned document's reason or order (requires admin authentication)"""
+    is_authorized, error = verify_admin_access(request, x_api_key)
+    if not is_authorized:
+        raise HTTPException(status_code=401, detail=error)
+    
+    if not db:
+        raise HTTPException(status_code=503, detail="Database not initialized")
+    
+    success = db.update_pinned_document(
+        document_id,
+        update_request.reason,
+        update_request.display_order
+    )
+    
+    if not success:
+        raise HTTPException(status_code=404, detail="Pinned document not found")
+    
+    return {"success": True, "document_id": document_id}
+
+
+@app.delete("/api/admin/pinned-documents/{document_id}")
+async def unpin_document(document_id: str, request: Request, x_api_key: str = Header(None)):
+    """Unpin a document (requires admin authentication)"""
+    is_authorized, error = verify_admin_access(request, x_api_key)
+    if not is_authorized:
+        raise HTTPException(status_code=401, detail=error)
+    
+    if not db:
+        raise HTTPException(status_code=503, detail="Database not initialized")
+    
+    client_ip, request_id = get_client_info(request)
+    
+    success = db.unpin_document(document_id)
+    
+    if not success:
+        raise HTTPException(status_code=404, detail="Pinned document not found")
+    
+    security_logger.log_security_event(
+        event_type="document_unpinned",
+        severity="info",
+        client_ip=client_ip,
+        message=f"Document unpinned: {document_id}",
+        request_id=request_id,
+        document_id=document_id
+    )
+    
+    return {"success": True, "document_id": document_id}
+
+
+@app.get("/api/admin/pinned-documents")
+async def get_admin_pinned_documents(request: Request, x_api_key: str = Header(None)):
+    """Get all pinned documents with admin details (requires admin authentication)"""
+    is_authorized, error = verify_admin_access(request, x_api_key)
+    if not is_authorized:
+        raise HTTPException(status_code=401, detail=error)
+    
+    if not db:
+        raise HTTPException(status_code=503, detail="Database not initialized")
+    
+    return {"pinned_documents": db.get_pinned_documents()}
 
 
 # Mount static files last (if frontend exists)
