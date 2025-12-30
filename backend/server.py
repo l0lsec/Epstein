@@ -14,8 +14,9 @@ from datetime import datetime, timedelta
 from fastapi import FastAPI, HTTPException, Query, Request, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse, Response
 from pydantic import BaseModel
+from io import BytesIO
 
 from database import Database, VectorStore, build_index
 from llm import LLMAssistant
@@ -109,6 +110,11 @@ BASE_PATH = Path(os.getenv("EPSTEIN_BASE_PATH", Path(__file__).parent.parent))
 DB_PATH = BASE_PATH / "epstein.db"
 VECTOR_PATH = BASE_PATH / "vector_store"
 STATIC_PATH = BASE_PATH / "frontend"
+THUMBNAILS_PATH = BASE_PATH / "thumbnails"
+
+# Thumbnail settings
+THUMBNAIL_WIDTH = 200
+THUMBNAIL_HEIGHT = 280  # Approximate A4 aspect ratio
 
 # Auto-indexing configuration (in seconds)
 # NOTE: Auto-indexing is disabled by default. Use admin dashboard to trigger reindex manually.
@@ -1067,6 +1073,167 @@ async def get_document_file(doc_id: str, request: Request):
             'Accept-Ranges': 'bytes',  # Explicitly indicate we support range requests
         }
     )
+
+
+def generate_pdf_thumbnail(pdf_path: Path, output_path: Path) -> bool:
+    """Generate a thumbnail from the first page of a PDF using PyMuPDF"""
+    try:
+        import fitz  # PyMuPDF
+        
+        doc = fitz.open(str(pdf_path))
+        if doc.page_count == 0:
+            doc.close()
+            return False
+        
+        page = doc[0]  # First page
+        
+        # Calculate zoom to fit thumbnail dimensions
+        page_rect = page.rect
+        zoom_x = THUMBNAIL_WIDTH / page_rect.width
+        zoom_y = THUMBNAIL_HEIGHT / page_rect.height
+        zoom = min(zoom_x, zoom_y)
+        
+        # Create a transformation matrix
+        mat = fitz.Matrix(zoom, zoom)
+        
+        # Render page to pixmap
+        pix = page.get_pixmap(matrix=mat, alpha=False)
+        
+        # Save as JPEG
+        pix.save(str(output_path))
+        
+        doc.close()
+        return True
+    except Exception as e:
+        print(f"Error generating PDF thumbnail: {e}")
+        return False
+
+
+def generate_image_thumbnail(image_path: Path, output_path: Path) -> bool:
+    """Generate a thumbnail from an image file"""
+    try:
+        from PIL import Image
+        
+        with Image.open(str(image_path)) as img:
+            # Convert to RGB if necessary (handles RGBA, P mode, etc.)
+            if img.mode in ('RGBA', 'P', 'LA'):
+                img = img.convert('RGB')
+            elif img.mode != 'RGB':
+                img = img.convert('RGB')
+            
+            # Create thumbnail maintaining aspect ratio
+            img.thumbnail((THUMBNAIL_WIDTH, THUMBNAIL_HEIGHT), Image.Resampling.LANCZOS)
+            
+            # Save as JPEG
+            img.save(str(output_path), 'JPEG', quality=85)
+        
+        return True
+    except Exception as e:
+        print(f"Error generating image thumbnail: {e}")
+        return False
+
+
+def create_placeholder_thumbnail(file_type: str, output_path: Path) -> bool:
+    """Create a placeholder thumbnail for audio/video files"""
+    try:
+        from PIL import Image, ImageDraw
+        
+        # Create a simple colored rectangle with icon
+        img = Image.new('RGB', (THUMBNAIL_WIDTH, THUMBNAIL_HEIGHT), color='#2a2a40')
+        draw = ImageDraw.Draw(img)
+        
+        # Draw icon based on file type
+        icon_color = '#6366f1'  # Indigo
+        
+        if file_type == 'audio':
+            # Draw music note symbol
+            cx, cy = THUMBNAIL_WIDTH // 2, THUMBNAIL_HEIGHT // 2
+            # Simple circle for note head
+            draw.ellipse([cx-20, cy-10, cx+10, cy+20], fill=icon_color)
+            draw.ellipse([cx+10, cy-30, cx+40, cy], fill=icon_color)
+            # Stems
+            draw.rectangle([cx+5, cy-60, cx+12, cy+5], fill=icon_color)
+            draw.rectangle([cx+35, cy-80, cx+42, cy-15], fill=icon_color)
+            # Connecting bar
+            draw.rectangle([cx+5, cy-80, cx+42, cy-68], fill=icon_color)
+        elif file_type == 'video':
+            # Draw play button triangle
+            cx, cy = THUMBNAIL_WIDTH // 2, THUMBNAIL_HEIGHT // 2
+            points = [(cx-25, cy-35), (cx-25, cy+35), (cx+35, cy)]
+            draw.polygon(points, fill=icon_color)
+            # Draw circle around it
+            draw.ellipse([cx-50, cy-50, cx+50, cy+50], outline=icon_color, width=4)
+        else:
+            # Generic document icon
+            cx, cy = THUMBNAIL_WIDTH // 2, THUMBNAIL_HEIGHT // 2
+            # Document shape
+            draw.rectangle([cx-35, cy-50, cx+35, cy+50], outline=icon_color, width=3)
+            # Lines for text
+            for i in range(4):
+                y = cy - 30 + i * 20
+                draw.line([(cx-25, y), (cx+25, y)], fill=icon_color, width=2)
+        
+        img.save(str(output_path), 'JPEG', quality=85)
+        return True
+    except Exception as e:
+        print(f"Error creating placeholder thumbnail: {e}")
+        return False
+
+
+@app.get("/api/documents/{doc_id}/thumbnail")
+async def get_document_thumbnail(doc_id: str, request: Request):
+    """Get a thumbnail preview of a document"""
+    if not db:
+        raise HTTPException(status_code=503, detail="Database not initialized")
+    
+    doc = db.get_document(doc_id)
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found")
+    
+    # Ensure thumbnails directory exists
+    THUMBNAILS_PATH.mkdir(exist_ok=True)
+    
+    # Check for cached thumbnail
+    thumbnail_path = THUMBNAILS_PATH / f"{doc_id}.jpg"
+    
+    if not thumbnail_path.exists():
+        # Generate thumbnail based on file type
+        file_path = (BASE_PATH / doc["path"]).resolve()
+        file_type = doc.get("file_type", "pdf")
+        
+        # Security check - ensure file is within BASE_PATH
+        if not str(file_path).startswith(str(BASE_PATH.resolve())):
+            raise HTTPException(status_code=403, detail="Access denied")
+        
+        if not file_path.exists():
+            # File missing - create placeholder
+            create_placeholder_thumbnail("document", thumbnail_path)
+        elif file_type == "pdf":
+            # Generate PDF thumbnail
+            if not generate_pdf_thumbnail(file_path, thumbnail_path):
+                # Fallback to placeholder if PDF rendering fails
+                create_placeholder_thumbnail("document", thumbnail_path)
+        elif file_type == "image":
+            # Generate image thumbnail
+            if not generate_image_thumbnail(file_path, thumbnail_path):
+                create_placeholder_thumbnail("image", thumbnail_path)
+        elif file_type == "audio":
+            create_placeholder_thumbnail("audio", thumbnail_path)
+        elif file_type == "video":
+            create_placeholder_thumbnail("video", thumbnail_path)
+        else:
+            create_placeholder_thumbnail("document", thumbnail_path)
+    
+    if thumbnail_path.exists():
+        return FileResponse(
+            path=thumbnail_path,
+            media_type="image/jpeg",
+            headers={
+                'Cache-Control': 'public, max-age=86400',  # Cache for 24 hours
+            }
+        )
+    
+    raise HTTPException(status_code=404, detail="Could not generate thumbnail")
 
 
 @app.post("/api/ask")

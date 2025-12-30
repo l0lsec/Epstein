@@ -386,6 +386,7 @@ RATE_LIMITS: Dict[str, RateLimitConfig] = {
     
     # Document access - allow reasonable browsing
     "/api/documents/*/file": RateLimitConfig(requests=60, window_seconds=60, burst=100),
+    "/api/documents/*/thumbnail": RateLimitConfig(requests=200, window_seconds=60, burst=300),  # Thumbnails load in grids
     "/api/documents/*": RateLimitConfig(requests=120, window_seconds=60, burst=200),
     
     # Index trigger - very restricted (admin action)

@@ -806,18 +806,37 @@ function renderSearchResults(data) {
     
     elements.resultsList.innerHTML = data.results.map((result, index) => `
         <div class="result-item" data-id="${result.id}" data-index="${index}">
-            <div class="result-header">
-                <span class="result-filename">${escapeHtml(result.filename)}</span>
-                ${result.score ? `<span class="result-score">${formatRelevanceScore(result.score, result.search_type)}</span>` : ''}
+            <div class="result-thumbnail" data-file-type="${result.file_type || 'pdf'}">
+                <img src="${API_BASE}/documents/${result.id}/thumbnail" 
+                     alt="${escapeHtml(result.filename)}" 
+                     loading="lazy" />
+                <div class="thumbnail-fallback">${getDocumentIcon(result.file_type)}</div>
             </div>
-            <div class="result-meta">
-                <span class="result-category">${escapeHtml(result.category)}</span>
-                ${result.subcategory ? `<span>${escapeHtml(result.subcategory)}</span>` : ''}
-                <span>${getSearchResultMeta(result)}</span>
+            <div class="result-content">
+                <div class="result-header">
+                    <span class="result-filename">${escapeHtml(result.filename)}</span>
+                    ${result.score ? `<span class="result-score">${formatRelevanceScore(result.score, result.search_type)}</span>` : ''}
+                </div>
+                <div class="result-meta">
+                    <span class="result-category">${escapeHtml(result.category)}</span>
+                    ${result.subcategory ? `<span>${escapeHtml(result.subcategory)}</span>` : ''}
+                    <span>${getSearchResultMeta(result)}</span>
+                </div>
+                ${result.snippet ? `<div class="result-snippet">${sanitizeSnippet(result.snippet)}</div>` : ''}
             </div>
-            ${result.snippet ? `<div class="result-snippet">${sanitizeSnippet(result.snippet)}</div>` : ''}
         </div>
     `).join('');
+    
+    // Add error handlers for thumbnail images
+    elements.resultsList.querySelectorAll('.result-thumbnail img').forEach(img => {
+        img.addEventListener('error', function() {
+            this.style.display = 'none';
+            this.parentElement.querySelector('.thumbnail-fallback').style.display = 'flex';
+        });
+        img.addEventListener('load', function() {
+            this.parentElement.querySelector('.thumbnail-fallback').style.display = 'none';
+        });
+    });
     
     // Add click handlers
     elements.resultsList.querySelectorAll('.result-item').forEach(item => {
@@ -1013,8 +1032,11 @@ function renderDocuments(data) {
     
     elements.documentsGrid.innerHTML = data.documents.map((doc, index) => `
         <div class="document-card" data-id="${doc.id}" data-index="${index}">
-            <div class="document-icon">
-                ${getDocumentIcon(doc.file_type)}
+            <div class="document-thumbnail" data-file-type="${doc.file_type || 'pdf'}">
+                <img src="${API_BASE}/documents/${doc.id}/thumbnail" 
+                     alt="${escapeHtml(doc.filename)}" 
+                     loading="lazy" />
+                <div class="thumbnail-fallback">${getDocumentIcon(doc.file_type)}</div>
             </div>
             <div class="document-title">${escapeHtml(doc.filename)}</div>
             <div class="document-meta">
@@ -1022,6 +1044,17 @@ function renderDocuments(data) {
             </div>
         </div>
     `).join('');
+    
+    // Add error handlers for thumbnail images
+    elements.documentsGrid.querySelectorAll('.document-thumbnail img').forEach(img => {
+        img.addEventListener('error', function() {
+            this.style.display = 'none';
+            this.parentElement.querySelector('.thumbnail-fallback').style.display = 'flex';
+        });
+        img.addEventListener('load', function() {
+            this.parentElement.querySelector('.thumbnail-fallback').style.display = 'none';
+        });
+    });
     
     // Add click handlers
     elements.documentsGrid.querySelectorAll('.document-card').forEach(card => {
@@ -1442,6 +1475,13 @@ function getDocumentIcon(fileType) {
     return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
         <path d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/>
     </svg>`;
+}
+
+/**
+ * Get document icon as escaped string for use in onerror handlers
+ */
+function getDocumentIconEscaped(fileType) {
+    return getDocumentIcon(fileType).replace(/'/g, "\\'").replace(/"/g, '\\"').replace(/\n/g, '');
 }
 
 function getDocumentMeta(doc) {

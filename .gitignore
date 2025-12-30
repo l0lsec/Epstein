@@ -26,6 +26,7 @@ Thumbs.db
 # Project specific
 *.log
 vector_store/
+thumbnails/
 feedback.json
 plans/
 House Disclosures/

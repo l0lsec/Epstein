@@ -416,12 +416,68 @@ body {
     cursor: pointer;
     transition: all var(--transition-fast);
     overflow: hidden;
+    display: flex;
+    gap: var(--space-lg);
+    align-items: flex-start;
 }
 
 .result-item:hover {
     background: var(--bg-tertiary);
     border-color: var(--border-light);
     transform: translateX(4px);
+}
+
+.result-thumbnail {
+    flex-shrink: 0;
+    width: 80px;
+    height: 110px;
+    border-radius: 6px;
+    overflow: hidden;
+    background: var(--bg-tertiary);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border: 1px solid var(--border);
+}
+
+.result-thumbnail img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+}
+
+.result-thumbnail svg {
+    width: 32px;
+    height: 32px;
+    color: var(--accent);
+    opacity: 0.7;
+}
+
+/* Thumbnail fallback - hidden by default, shown when image fails to load */
+.thumbnail-fallback {
+    display: none;
+    width: 100%;
+    height: 100%;
+    align-items: center;
+    justify-content: center;
+    background: var(--bg-tertiary);
+}
+
+.thumbnail-fallback svg {
+    width: 32px;
+    height: 32px;
+    color: var(--accent);
+    opacity: 0.7;
+}
+
+.document-thumbnail .thumbnail-fallback svg {
+    width: 48px;
+    height: 48px;
+}
+
+.result-content {
+    flex: 1;
+    min-width: 0;
 }
 
 .result-header {
@@ -726,12 +782,14 @@ body {
 }
 
 .document-card {
-    padding: var(--space-lg);
+    padding: var(--space-md);
     background: var(--bg-secondary);
     border: 1px solid var(--border);
     border-radius: 10px;
     cursor: pointer;
     transition: all var(--transition-fast);
+    display: flex;
+    flex-direction: column;
 }
 
 .document-card:hover {
@@ -740,6 +798,38 @@ body {
     transform: translateY(-2px);
 }
 
+.document-card:hover .document-thumbnail img {
+    transform: scale(1.03);
+}
+
+.document-thumbnail {
+    width: 100%;
+    height: 180px;
+    border-radius: 6px;
+    overflow: hidden;
+    background: var(--bg-tertiary);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    margin-bottom: var(--space-md);
+    border: 1px solid var(--border);
+}
+
+.document-thumbnail img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    transition: transform var(--transition-fast);
+}
+
+.document-thumbnail svg {
+    width: 48px;
+    height: 48px;
+    color: var(--accent);
+    opacity: 0.7;
+}
+
+/* Legacy icon support for fallback */
 .document-icon {
     width: 40px;
     height: 40px;
@@ -763,6 +853,12 @@ body {
     color: var(--text-primary);
     word-break: break-all;
     margin-bottom: var(--space-sm);
+    line-height: 1.4;
+    /* Limit to 2 lines with ellipsis */
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
 }
 
 .document-meta {
@@ -771,6 +867,7 @@ body {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+    margin-top: auto;
 }
 
 .pagination {
@@ -2411,6 +2508,43 @@ body {
     
     .stats-grid {
         grid-template-columns: repeat(2, 1fr);
+    }
+    
+    /* Mobile Thumbnail Styles */
+    .result-item {
+        flex-direction: row;
+        gap: var(--space-md);
+    }
+    
+    .result-thumbnail {
+        width: 60px;
+        height: 85px;
+    }
+    
+    .result-thumbnail svg {
+        width: 24px;
+        height: 24px;
+    }
+    
+    .document-thumbnail {
+        height: 140px;
+    }
+    
+    .documents-grid {
+        grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+        gap: var(--space-sm);
+    }
+    
+    .document-card {
+        padding: var(--space-sm);
+    }
+    
+    .document-title {
+        font-size: 0.75rem;
+    }
+    
+    .document-meta {
+        font-size: 0.65rem;
     }
     
     /* Mobile Modal Styles */
