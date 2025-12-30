@@ -1360,6 +1360,7 @@ function renderFeedbackStats(data) {
         'bug': '🐛',
         'feature': '✨',
         'content': '📄',
+        'pinned': '📌',
         'other': '💬'
     };
     
@@ -1379,6 +1380,10 @@ function renderFeedbackStats(data) {
         <div class="stat-card">
             <div class="stat-value">${formatNumber(data.type_counts?.content || 0)}</div>
             <div class="stat-label">📄 Content Issues</div>
+        </div>
+        <div class="stat-card accent">
+            <div class="stat-value">${formatNumber(data.type_counts?.pinned || 0)}</div>
+            <div class="stat-label">📌 Pinned Suggestions</div>
         </div>
         <div class="stat-card">
             <div class="stat-value">${formatNumber(data.type_counts?.other || 0)}</div>
@@ -1400,6 +1405,7 @@ function renderFeedbackTypes(types) {
         'bug': '🐛 Bug Reports',
         'feature': '✨ Feature Requests',
         'content': '📄 Content Issues',
+        'pinned': '📌 Pinned Suggestions',
         'other': '💬 Other Feedback'
     };
     
@@ -1410,6 +1416,7 @@ function renderFeedbackTypes(types) {
         if (type === 'bug') badgeClass = 'badge-warning';
         if (type === 'feature') badgeClass = 'badge-success';
         if (type === 'content') badgeClass = 'badge-info';
+        if (type === 'pinned') badgeClass = 'badge-accent';
         
         return `
             <li>
@@ -1433,6 +1440,7 @@ function renderFeedbackTable(feedback) {
         'bug': '<span class="badge badge-warning">🐛 Bug</span>',
         'feature': '<span class="badge badge-success">✨ Feature</span>',
         'content': '<span class="badge badge-info">📄 Content</span>',
+        'pinned': '<span class="badge badge-accent">📌 Pinned</span>',
         'other': '<span class="badge">💬 Other</span>'
     };
     
@@ -1493,6 +1501,7 @@ function openFeedbackModal(feedbackId) {
         'bug': '🐛 Bug Report',
         'feature': '✨ Feature Request',
         'content': '📄 Content Issue',
+        'pinned': '📌 Pinned Suggestion',
         'other': '💬 Other Feedback'
     };
     

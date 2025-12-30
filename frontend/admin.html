@@ -306,6 +306,10 @@
             color: var(--info);
         }
 
+        .stat-card.accent .stat-value {
+            color: #d4af37;
+        }
+
         /* Section */
         .section {
             margin-bottom: var(--space-2xl);
@@ -528,6 +532,11 @@
         .badge-info {
             background: var(--info-dim);
             color: var(--info);
+        }
+
+        .badge-accent {
+            background: rgba(212, 175, 55, 0.15);
+            color: #d4af37;
         }
 
         /* Timeframe Selector */
@@ -1568,6 +1577,7 @@
                             <option value="bug">🐛 Bug Reports</option>
                             <option value="feature">✨ Feature Requests</option>
                             <option value="content">📄 Content Issues</option>
+                            <option value="pinned">📌 Pinned Suggestions</option>
                             <option value="other">💬 Other</option>
                         </select>
                     </div>

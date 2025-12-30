@@ -230,6 +230,20 @@ body {
     margin-left: var(--space-sm);
 }
 
+.pinned-suggestion-note {
+    display: block;
+    width: 100%;
+    font-size: 0.8rem;
+    color: var(--text-muted);
+    margin-top: var(--space-xs);
+    font-style: italic;
+    opacity: 0.85;
+}
+
+.pinned-suggestion-note::before {
+    content: "💡 ";
+}
+
 .pinned-scroll-container {
     overflow: hidden;
     margin: 0 calc(-1 * var(--space-lg));
@@ -355,6 +369,11 @@ body {
         width: 100%;
         margin-left: 0;
         margin-top: var(--space-xs);
+    }
+    
+    .pinned-suggestion-note {
+        font-size: 0.75rem;
+        text-align: center;
     }
     
     .pinned-card {

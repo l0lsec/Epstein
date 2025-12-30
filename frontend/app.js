@@ -586,6 +586,7 @@ function renderPinnedDocumentsBar(docs) {
             <span class="pinned-icon">📌</span>
             <span class="pinned-title">Featured Documents</span>
             <span class="pinned-subtitle">Controversial & Notable Files</span>
+            <span class="pinned-suggestion-note">Have a document that should be featured? Use the "Send Feedback" form below to submit your suggestion!</span>
         </div>
         <div class="pinned-scroll-container">
             <div class="pinned-scroll" id="pinned-scroll">
