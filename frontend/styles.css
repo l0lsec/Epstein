@@ -1051,6 +1051,10 @@ body {
     padding: var(--space-lg);
 }
 
+.pagination.hidden {
+    display: none;
+}
+
 .page-btn {
     padding: var(--space-sm) var(--space-lg);
     background: var(--bg-tertiary);
