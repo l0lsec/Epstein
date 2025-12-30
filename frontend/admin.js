@@ -227,6 +227,9 @@ function loadTabData(tabId) {
         case 'visitors':
             loadVisitorsData();
             break;
+        case 'feedback':
+            loadFeedbackData();
+            break;
         case 'system':
             loadSystemData();
             break;
@@ -1300,7 +1303,300 @@ async function clearLogs(logType) {
     }
 }
 
+// ============================================================================
+// FEEDBACK FUNCTIONS
+// ============================================================================
+
+// Store all feedback data for filtering
+let allFeedbackData = [];
+
+async function loadFeedbackData() {
+    try {
+        const response = await authFetch(`${API_BASE}/feedback`);
+        if (!response.ok) throw new Error('Failed to load feedback');
+        const data = await response.json();
+        
+        allFeedbackData = data.feedback || [];
+        
+        renderFeedbackStats(data);
+        renderFeedbackTypes(data.type_counts);
+        renderFeedbackTable(allFeedbackData);
+        
+        // Setup filter event listener
+        setupFeedbackFilter();
+    } catch (error) {
+        console.error('Error loading feedback:', error);
+        document.getElementById('feedback-stats').innerHTML = 
+            '<div class="stat-card danger"><div class="stat-value">Error</div><div class="stat-label">Failed to load feedback</div></div>';
+    }
+}
+
+function setupFeedbackFilter() {
+    const filter = document.getElementById('feedback-type-filter');
+    if (!filter) return;
+    
+    // Remove existing listener if any
+    filter.removeEventListener('change', handleFeedbackFilter);
+    filter.addEventListener('change', handleFeedbackFilter);
+}
+
+function handleFeedbackFilter() {
+    const filter = document.getElementById('feedback-type-filter');
+    const selectedType = filter.value;
+    
+    if (selectedType === 'all') {
+        renderFeedbackTable(allFeedbackData);
+    } else {
+        const filtered = allFeedbackData.filter(fb => fb.type === selectedType);
+        renderFeedbackTable(filtered);
+    }
+}
+
+function renderFeedbackStats(data) {
+    const typeIcons = {
+        'bug': '🐛',
+        'feature': '✨',
+        'content': '📄',
+        'other': '💬'
+    };
+    
+    document.getElementById('feedback-stats').innerHTML = `
+        <div class="stat-card">
+            <div class="stat-value">${formatNumber(data.total_feedback)}</div>
+            <div class="stat-label">Total Feedback</div>
+        </div>
+        <div class="stat-card ${data.type_counts?.bug > 0 ? 'warning' : ''}">
+            <div class="stat-value">${formatNumber(data.type_counts?.bug || 0)}</div>
+            <div class="stat-label">🐛 Bug Reports</div>
+        </div>
+        <div class="stat-card info">
+            <div class="stat-value">${formatNumber(data.type_counts?.feature || 0)}</div>
+            <div class="stat-label">✨ Feature Requests</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-value">${formatNumber(data.type_counts?.content || 0)}</div>
+            <div class="stat-label">📄 Content Issues</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-value">${formatNumber(data.type_counts?.other || 0)}</div>
+            <div class="stat-label">💬 Other</div>
+        </div>
+    `;
+}
+
+function renderFeedbackTypes(types) {
+    const el = document.getElementById('feedback-types');
+    if (!el) return;
+    
+    if (!types || Object.keys(types).length === 0) {
+        el.innerHTML = '<li><span class="key">No feedback yet</span></li>';
+        return;
+    }
+    
+    const typeLabels = {
+        'bug': '🐛 Bug Reports',
+        'feature': '✨ Feature Requests',
+        'content': '📄 Content Issues',
+        'other': '💬 Other Feedback'
+    };
+    
+    const sorted = Object.entries(types).sort((a, b) => b[1] - a[1]);
+    el.innerHTML = sorted.map(([type, count]) => {
+        const label = typeLabels[type] || type;
+        let badgeClass = 'badge-info';
+        if (type === 'bug') badgeClass = 'badge-warning';
+        if (type === 'feature') badgeClass = 'badge-success';
+        if (type === 'content') badgeClass = 'badge-info';
+        
+        return `
+            <li>
+                <span class="key">${label}</span>
+                <span class="badge ${badgeClass}">${formatNumber(count)}</span>
+            </li>
+        `;
+    }).join('');
+}
+
+function renderFeedbackTable(feedback) {
+    const tbody = document.getElementById('feedback-table-body');
+    if (!tbody) return;
+    
+    if (!feedback || feedback.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="6" style="text-align: center; color: var(--text-muted); padding: var(--space-xl);">No feedback submissions yet</td></tr>';
+        return;
+    }
+    
+    const typeLabels = {
+        'bug': '<span class="badge badge-warning">🐛 Bug</span>',
+        'feature': '<span class="badge badge-success">✨ Feature</span>',
+        'content': '<span class="badge badge-info">📄 Content</span>',
+        'other': '<span class="badge">💬 Other</span>'
+    };
+    
+    tbody.innerHTML = feedback.map(fb => {
+        const date = fb.timestamp ? new Date(fb.timestamp).toLocaleString([], {
+            month: 'short',
+            day: 'numeric',
+            year: 'numeric',
+            hour: '2-digit',
+            minute: '2-digit'
+        }) : 'Unknown';
+        
+        const typeLabel = typeLabels[fb.type] || `<span class="badge">${fb.type}</span>`;
+        const email = fb.email || '<span style="color: var(--text-muted);">—</span>';
+        const messagePreview = fb.message ? truncate(fb.message, 60) : '';
+        const ip = fb.ip || 'Unknown';
+        
+        return `
+            <tr>
+                <td style="white-space: nowrap; font-size: 0.85rem; color: var(--text-muted);">${date}</td>
+                <td>${typeLabel}</td>
+                <td style="font-size: 0.9rem;">${escapeHtml(typeof email === 'string' ? email : '—')}</td>
+                <td>
+                    <span class="feedback-message-preview" onclick="openFeedbackModal('${fb.id}')" title="Click to view full message">
+                        ${escapeHtml(messagePreview)}
+                    </span>
+                </td>
+                <td style="font-family: monospace; font-size: 0.8rem; color: var(--text-muted);">${escapeHtml(ip)}</td>
+                <td>
+                    <div style="display: flex; gap: 4px;">
+                        <button class="btn-icon" onclick="openFeedbackModal('${fb.id}')" title="View details">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/>
+                                <circle cx="12" cy="12" r="3"/>
+                            </svg>
+                        </button>
+                        <button class="btn-icon delete" onclick="deleteFeedback('${fb.id}')" title="Delete">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <polyline points="3,6 5,6 21,6"/>
+                                <path d="M19,6v14a2,2,0,0,1-2,2H7a2,2,0,0,1-2-2V6M8,6V4a2,2,0,0,1,2-2h4a2,2,0,0,1,2,2V6"/>
+                            </svg>
+                        </button>
+                    </div>
+                </td>
+            </tr>
+        `;
+    }).join('');
+}
+
+function openFeedbackModal(feedbackId) {
+    const feedback = allFeedbackData.find(fb => fb.id === feedbackId);
+    if (!feedback) return;
+    
+    const modal = document.getElementById('feedback-modal');
+    const body = document.getElementById('feedback-modal-body');
+    
+    const typeLabels = {
+        'bug': '🐛 Bug Report',
+        'feature': '✨ Feature Request',
+        'content': '📄 Content Issue',
+        'other': '💬 Other Feedback'
+    };
+    
+    const date = feedback.timestamp ? new Date(feedback.timestamp).toLocaleString() : 'Unknown';
+    const typeLabel = typeLabels[feedback.type] || feedback.type;
+    
+    body.innerHTML = `
+        <div class="feedback-detail">
+            <div class="feedback-detail-row">
+                <span class="feedback-detail-label">Date</span>
+                <span class="feedback-detail-value">${date}</span>
+            </div>
+            <div class="feedback-detail-row">
+                <span class="feedback-detail-label">Type</span>
+                <span class="feedback-detail-value">${typeLabel}</span>
+            </div>
+            <div class="feedback-detail-row">
+                <span class="feedback-detail-label">Email</span>
+                <span class="feedback-detail-value">${escapeHtml(feedback.email || 'Not provided')}</span>
+            </div>
+            <div class="feedback-detail-row">
+                <span class="feedback-detail-label">IP</span>
+                <span class="feedback-detail-value" style="font-family: var(--font-mono);">${escapeHtml(feedback.ip || 'Unknown')}</span>
+            </div>
+            <div class="feedback-detail-row">
+                <span class="feedback-detail-label">ID</span>
+                <span class="feedback-detail-value" style="font-family: var(--font-mono); font-size: 0.85rem; color: var(--text-muted);">${escapeHtml(feedback.id)}</span>
+            </div>
+            <div style="margin-top: var(--space-md);">
+                <span class="feedback-detail-label" style="display: block; margin-bottom: var(--space-sm);">Message</span>
+                <div class="feedback-message-full">${escapeHtml(feedback.message || 'No message')}</div>
+            </div>
+            <div style="margin-top: var(--space-lg); display: flex; gap: var(--space-md); justify-content: flex-end;">
+                <button class="btn btn-danger" onclick="deleteFeedback('${feedback.id}'); closeFeedbackModal();">
+                    <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
+                        <polyline points="3,6 5,6 21,6"/>
+                        <path d="M19,6v14a2,2,0,0,1-2,2H7a2,2,0,0,1-2-2V6M8,6V4a2,2,0,0,1,2-2h4a2,2,0,0,1,2,2V6"/>
+                    </svg>
+                    Delete Feedback
+                </button>
+                <button class="btn" onclick="closeFeedbackModal()">Close</button>
+            </div>
+        </div>
+    `;
+    
+    modal.style.display = 'flex';
+    
+    // Close on escape key
+    document.addEventListener('keydown', handleModalEscape);
+    
+    // Close on overlay click
+    modal.addEventListener('click', handleModalOverlayClick);
+}
+
+function closeFeedbackModal() {
+    const modal = document.getElementById('feedback-modal');
+    modal.style.display = 'none';
+    document.removeEventListener('keydown', handleModalEscape);
+    modal.removeEventListener('click', handleModalOverlayClick);
+}
+
+function handleModalEscape(e) {
+    if (e.key === 'Escape') {
+        closeFeedbackModal();
+    }
+}
+
+function handleModalOverlayClick(e) {
+    if (e.target.classList.contains('modal-overlay')) {
+        closeFeedbackModal();
+    }
+}
+
+async function deleteFeedback(feedbackId) {
+    if (!confirm('Are you sure you want to delete this feedback? This action cannot be undone.')) {
+        return;
+    }
+    
+    try {
+        const response = await authFetch(`${window.location.origin}/api/admin/feedback/${feedbackId}`, {
+            method: 'DELETE'
+        });
+        
+        if (!response.ok) {
+            const data = await response.json();
+            throw new Error(data.detail || 'Failed to delete feedback');
+        }
+        
+        // Remove from local data
+        allFeedbackData = allFeedbackData.filter(fb => fb.id !== feedbackId);
+        
+        // Re-render with current filter
+        handleFeedbackFilter();
+        
+        // Reload full data to update stats
+        loadFeedbackData();
+        
+    } catch (error) {
+        console.error('Error deleting feedback:', error);
+        alert(`Error: ${error.message}`);
+    }
+}
+
 // Global refresh function
 window.refreshAll = refreshAll;
 window.clearLogs = clearLogs;
+window.openFeedbackModal = openFeedbackModal;
+window.closeFeedbackModal = closeFeedbackModal;
+window.deleteFeedback = deleteFeedback;
 

@@ -2136,6 +2136,86 @@ async def get_ai_summaries_telemetry(request: Request, x_api_key: str = Header(N
     }
 
 
+@app.get("/api/admin/telemetry/feedback")
+async def get_feedback_telemetry(request: Request, x_api_key: str = Header(None)):
+    """Get user feedback submissions (requires admin authentication)"""
+    is_authorized, error = verify_admin_access(request, x_api_key)
+    if not is_authorized:
+        raise HTTPException(status_code=401, detail=error)
+    
+    feedback_list = []
+    if FEEDBACK_PATH.exists():
+        try:
+            with open(FEEDBACK_PATH, 'r') as f:
+                feedback_list = json.load(f)
+        except Exception:
+            feedback_list = []
+    
+    # Sort by timestamp (newest first)
+    feedback_list = sorted(
+        feedback_list,
+        key=lambda x: x.get("timestamp", ""),
+        reverse=True
+    )
+    
+    # Calculate stats by type
+    type_counts = {}
+    for fb in feedback_list:
+        fb_type = fb.get("type", "unknown")
+        type_counts[fb_type] = type_counts.get(fb_type, 0) + 1
+    
+    # Get recent feedback with limited message preview
+    recent_feedback = []
+    for fb in feedback_list[:100]:  # Last 100 items
+        recent_feedback.append({
+            "id": fb.get("id", ""),
+            "timestamp": fb.get("timestamp", ""),
+            "type": fb.get("type", "unknown"),
+            "email": fb.get("email", ""),
+            "message": fb.get("message", ""),
+            "ip": fb.get("ip", "Unknown")
+        })
+    
+    return {
+        "total_feedback": len(feedback_list),
+        "type_counts": type_counts,
+        "feedback": recent_feedback
+    }
+
+
+@app.delete("/api/admin/feedback/{feedback_id}")
+async def delete_feedback(feedback_id: str, request: Request, x_api_key: str = Header(None)):
+    """Delete a specific feedback entry (requires admin authentication)"""
+    is_authorized, error = verify_admin_access(request, x_api_key)
+    if not is_authorized:
+        raise HTTPException(status_code=401, detail=error)
+    
+    if not FEEDBACK_PATH.exists():
+        raise HTTPException(status_code=404, detail="Feedback file not found")
+    
+    try:
+        with open(FEEDBACK_PATH, 'r') as f:
+            feedback_list = json.load(f)
+        
+        # Find and remove the feedback entry
+        original_length = len(feedback_list)
+        feedback_list = [fb for fb in feedback_list if fb.get("id") != feedback_id]
+        
+        if len(feedback_list) == original_length:
+            raise HTTPException(status_code=404, detail="Feedback entry not found")
+        
+        # Save updated list
+        with open(FEEDBACK_PATH, 'w') as f:
+            json.dump(feedback_list, f, indent=2)
+        
+        return {"message": "Feedback deleted successfully", "id": feedback_id}
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error deleting feedback: {str(e)}")
+
+
 # Mount static files last (if frontend exists)
 if STATIC_PATH.exists():
     app.mount("/static", StaticFiles(directory=str(STATIC_PATH)), name="static")
