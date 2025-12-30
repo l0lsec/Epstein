@@ -614,13 +614,13 @@ async def rebuild_fts_index(request: Request, x_api_key: str = Header(None)):
 
 
 @app.get("/api/categories")
-async def get_categories():
-    """Get all document categories"""
+async def get_categories(keyword: Optional[str] = None):
+    """Get all document categories, optionally filtered by keyword"""
     if not db:
         raise HTTPException(status_code=503, detail="Database not initialized")
     
-    stats = db.get_stats()
-    return {"categories": stats["by_category"]}
+    categories = db.get_category_counts(keyword=keyword)
+    return {"categories": categories}
 
 
 @app.get("/api/subcategories")
@@ -931,14 +931,15 @@ async def list_documents(
     category: Optional[str] = None,
     subcategory: Optional[str] = None,
     file_type: Optional[str] = None,
-    filename: Optional[str] = None
+    filename: Optional[str] = None,
+    keyword: Optional[str] = None
 ):
     """List all documents with pagination"""
     if not db:
         raise HTTPException(status_code=503, detail="Database not initialized")
     
-    docs = db.get_all_documents(limit=limit, offset=offset, category=category, subcategory=subcategory, file_type=file_type, filename=filename)
-    total = db.count_documents(category=category, subcategory=subcategory, file_type=file_type, filename=filename)
+    docs = db.get_all_documents(limit=limit, offset=offset, category=category, subcategory=subcategory, file_type=file_type, filename=filename, keyword=keyword)
+    total = db.count_documents(category=category, subcategory=subcategory, file_type=file_type, filename=filename, keyword=keyword)
     
     return {
         "total": total,

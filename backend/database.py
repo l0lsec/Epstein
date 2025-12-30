@@ -383,41 +383,84 @@ class Database:
             
             return stats
     
+    def get_category_counts(self, keyword: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Get category counts, optionally filtered by keyword search"""
+        with self.get_connection() as conn:
+            if keyword:
+                # Use FTS to filter by keyword
+                escaped_keyword = keyword.replace('"', '""')
+                sql = """
+                    SELECT d.category, COUNT(*) as count
+                    FROM documents d
+                    JOIN documents_fts fts ON d.id = fts.id
+                    WHERE documents_fts MATCH ?
+                    GROUP BY d.category
+                    ORDER BY count DESC
+                """
+                cursor = conn.execute(sql, [f'"{escaped_keyword}"*'])
+            else:
+                sql = """
+                    SELECT category, COUNT(*) as count 
+                    FROM documents 
+                    GROUP BY category 
+                    ORDER BY count DESC
+                """
+                cursor = conn.execute(sql)
+            
+            return [dict(row) for row in cursor]
+    
     def get_all_documents(self, limit: int = 100, offset: int = 0, 
                           category: Optional[str] = None,
                           subcategory: Optional[str] = None,
                           file_type: Optional[str] = None,
-                          filename: Optional[str] = None) -> List[Dict[str, Any]]:
+                          filename: Optional[str] = None,
+                          keyword: Optional[str] = None) -> List[Dict[str, Any]]:
         """Get all documents with pagination and filtering"""
         with self.get_connection() as conn:
-            sql = """
-                SELECT id, filename, path, category, subcategory, file_type, page_count, char_count, duration_seconds
-                FROM documents
-            """
             params = []
             conditions = []
             
+            # If keyword search, use FTS join
+            if keyword:
+                sql = """
+                    SELECT DISTINCT d.id, d.filename, d.path, d.category, d.subcategory, d.file_type, d.page_count, d.char_count, d.duration_seconds
+                    FROM documents d
+                    JOIN documents_fts fts ON d.id = fts.id
+                    WHERE documents_fts MATCH ?
+                """
+                # Escape special FTS characters and add wildcards for partial matching
+                escaped_keyword = keyword.replace('"', '""')
+                params.append(f'"{escaped_keyword}"*')
+            else:
+                sql = """
+                    SELECT id, filename, path, category, subcategory, file_type, page_count, char_count, duration_seconds
+                    FROM documents
+                """
+            
             if category:
-                conditions.append("category = ?")
+                conditions.append("category = ?" if not keyword else "d.category = ?")
                 params.append(category)
             
             if subcategory:
-                conditions.append("subcategory = ?")
+                conditions.append("subcategory = ?" if not keyword else "d.subcategory = ?")
                 params.append(subcategory)
             
             if file_type:
-                conditions.append("file_type = ?")
+                conditions.append("file_type = ?" if not keyword else "d.file_type = ?")
                 params.append(file_type)
             
             if filename:
                 # Case-insensitive partial match on filename
-                conditions.append("LOWER(filename) LIKE LOWER(?)")
+                conditions.append("LOWER(filename) LIKE LOWER(?)" if not keyword else "LOWER(d.filename) LIKE LOWER(?)")
                 params.append(f"%{filename}%")
             
             if conditions:
-                sql += " WHERE " + " AND ".join(conditions)
+                if keyword:
+                    sql += " AND " + " AND ".join(conditions)
+                else:
+                    sql += " WHERE " + " AND ".join(conditions)
             
-            sql += " ORDER BY filename LIMIT ? OFFSET ?"
+            sql += " ORDER BY filename LIMIT ? OFFSET ?" if not keyword else " ORDER BY d.filename LIMIT ? OFFSET ?"
             params.extend([limit, offset])
             
             cursor = conn.execute(sql, params)
@@ -426,31 +469,47 @@ class Database:
     def count_documents(self, category: Optional[str] = None,
                         subcategory: Optional[str] = None,
                         file_type: Optional[str] = None,
-                        filename: Optional[str] = None) -> int:
+                        filename: Optional[str] = None,
+                        keyword: Optional[str] = None) -> int:
         """Count documents with optional filters"""
         with self.get_connection() as conn:
-            sql = "SELECT COUNT(*) FROM documents"
             params = []
             conditions = []
             
+            # If keyword search, use FTS join
+            if keyword:
+                sql = """
+                    SELECT COUNT(DISTINCT d.id)
+                    FROM documents d
+                    JOIN documents_fts fts ON d.id = fts.id
+                    WHERE documents_fts MATCH ?
+                """
+                escaped_keyword = keyword.replace('"', '""')
+                params.append(f'"{escaped_keyword}"*')
+            else:
+                sql = "SELECT COUNT(*) FROM documents"
+            
             if category:
-                conditions.append("category = ?")
+                conditions.append("category = ?" if not keyword else "d.category = ?")
                 params.append(category)
             
             if subcategory:
-                conditions.append("subcategory = ?")
+                conditions.append("subcategory = ?" if not keyword else "d.subcategory = ?")
                 params.append(subcategory)
             
             if file_type:
-                conditions.append("file_type = ?")
+                conditions.append("file_type = ?" if not keyword else "d.file_type = ?")
                 params.append(file_type)
             
             if filename:
-                conditions.append("LOWER(filename) LIKE LOWER(?)")
+                conditions.append("LOWER(filename) LIKE LOWER(?)" if not keyword else "LOWER(d.filename) LIKE LOWER(?)")
                 params.append(f"%{filename}%")
             
             if conditions:
-                sql += " WHERE " + " AND ".join(conditions)
+                if keyword:
+                    sql += " AND " + " AND ".join(conditions)
+                else:
+                    sql += " WHERE " + " AND ".join(conditions)
             
             cursor = conn.execute(sql, params)
             return cursor.fetchone()[0]

@@ -16,6 +16,7 @@ let state = {
     browseSubcategory: '',
     browseFileType: '',
     browseFilename: '',
+    browseKeyword: '',
     searchSubcategory: '',
     currentDocument: null,
     // Search pagination state
@@ -75,6 +76,7 @@ function cacheElements() {
     
     // Browse
     elements.browseFilename = document.getElementById('browse-filename');
+    elements.browseKeyword = document.getElementById('browse-keyword');
     elements.browseCategory = document.getElementById('browse-category');
     elements.browseSubcategory = document.getElementById('browse-subcategory');
     elements.browseFileType = document.getElementById('browse-file-type');
@@ -185,6 +187,17 @@ function setupEventListeners() {
                 state.browsePage = 0;
                 loadDocuments();
             }, 300); // Debounce 300ms
+        });
+    }
+    
+    // Topic keyword dropdown
+    if (elements.browseKeyword) {
+        elements.browseKeyword.addEventListener('change', async () => {
+            state.browseKeyword = elements.browseKeyword.value;
+            state.browsePage = 0;
+            // Reload categories with filtered counts
+            await loadCategories(state.browseKeyword || null);
+            loadDocuments();
         });
     }
     
@@ -481,9 +494,14 @@ async function loadStats() {
     }
 }
 
-async function loadCategories() {
+async function loadCategories(keyword = null) {
     try {
-        const response = await fetch(`${API_BASE}/categories`);
+        let url = `${API_BASE}/categories`;
+        if (keyword) {
+            url += `?keyword=${encodeURIComponent(keyword)}`;
+        }
+        
+        const response = await fetch(url);
         if (!response.ok) throw new Error('Failed to load categories');
         
         const data = await response.json();
@@ -494,8 +512,20 @@ async function loadCategories() {
             `<option value="${c.category}">${c.category} (${c.count})</option>`
         ).join('');
         
+        // Preserve current selection
+        const currentBrowseCategory = elements.browseCategory.value;
+        const currentSearchCategory = elements.searchCategory.value;
+        
         elements.searchCategory.innerHTML = '<option value="">All File Sets</option>' + categoryOptions;
         elements.browseCategory.innerHTML = '<option value="">All File Sets</option>' + categoryOptions;
+        
+        // Restore selection if still valid
+        if (currentBrowseCategory && state.categories.some(c => c.category === currentBrowseCategory)) {
+            elements.browseCategory.value = currentBrowseCategory;
+        }
+        if (currentSearchCategory && state.categories.some(c => c.category === currentSearchCategory)) {
+            elements.searchCategory.value = currentSearchCategory;
+        }
     } catch (error) {
         console.error('Error loading categories:', error);
     }
@@ -687,7 +717,7 @@ function renderStats() {
     
     // Add click handlers for browsable stat cards
     elements.statsGrid.querySelectorAll('.stat-card.clickable').forEach(card => {
-        card.addEventListener('click', () => {
+        card.addEventListener('click', async () => {
             const browseType = card.dataset.browse;
             if (browseType === 'all') {
                 state.browseFileType = '';
@@ -695,6 +725,7 @@ function renderStats() {
                 state.browseFileType = browseType;
             }
             state.browseCategory = '';
+            state.browseKeyword = '';
             state.browsePage = 0;
             
             // Update the browse filter dropdown
@@ -704,6 +735,12 @@ function renderStats() {
             if (elements.browseCategory) {
                 elements.browseCategory.value = '';
             }
+            if (elements.browseKeyword) {
+                elements.browseKeyword.value = '';
+            }
+            
+            // Reload categories with full counts (no keyword filter)
+            await loadCategories();
             
             // Switch to browse view
             switchView('browse');
@@ -1100,6 +1137,10 @@ async function loadDocuments() {
         
         if (state.browseFilename) {
             params.append('filename', state.browseFilename);
+        }
+        
+        if (state.browseKeyword) {
+            params.append('keyword', state.browseKeyword);
         }
         
         const response = await fetch(`${API_BASE}/documents?${params}`);

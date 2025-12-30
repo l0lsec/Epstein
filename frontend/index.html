@@ -37,7 +37,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Crimson+Pro:wght@400;500;600&family=JetBrains+Mono:wght@400;500&family=Source+Sans+3:wght@300;400;500;600;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="/static/styles.css?v=19">
+    <link rel="stylesheet" href="/static/styles.css?v=22">
     
     <!-- Structured Data (JSON-LD) -->
     <script type="application/ld+json">
@@ -183,6 +183,40 @@
                 <div class="filename-search">
                     <input type="text" id="browse-filename" placeholder="🔍 Search by filename..." />
                 </div>
+                <select id="browse-keyword">
+                    <option value="">All Topics</option>
+                    <optgroup label="👤 People">
+                        <option value="Maxwell">Ghislaine Maxwell</option>
+                        <option value="Clinton">Bill Clinton</option>
+                        <option value="Trump">Donald Trump</option>
+                        <option value="Andrew">Prince Andrew</option>
+                        <option value="Dershowitz">Alan Dershowitz</option>
+                        <option value="Brunel">Jean-Luc Brunel</option>
+                        <option value="Giuffre">Virginia Giuffre</option>
+                        <option value="Kellen">Sarah Kellen</option>
+                        <option value="Wexner">Les Wexner</option>
+                        <option value="Black">Leon Black</option>
+                    </optgroup>
+                    <optgroup label="📍 Locations">
+                        <option value="Palm Beach">Palm Beach</option>
+                        <option value="Manhattan">Manhattan / New York</option>
+                        <option value="Little St. James">Little St. James Island</option>
+                        <option value="Zorro Ranch">Zorro Ranch</option>
+                        <option value="Paris">Paris</option>
+                    </optgroup>
+                    <optgroup label="📋 Topics">
+                        <option value="flight">Flight Logs</option>
+                        <option value="massage">Massage</option>
+                        <option value="trafficking">Trafficking</option>
+                        <option value="minor">Minors / Underage</option>
+                        <option value="victim">Victims</option>
+                        <option value="settlement">Settlement</option>
+                        <option value="deposition">Deposition</option>
+                        <option value="interview">Interview</option>
+                        <option value="FBI">FBI</option>
+                        <option value="DOJ">DOJ</option>
+                    </optgroup>
+                </select>
                 <select id="browse-category">
                     <option value="">All File Sets</option>
                 </select>
@@ -499,7 +533,7 @@
     </footer>
 
     <script src="https://www.google.com/recaptcha/api.js?render=6Lf9EDYsAAAAANDlA_xYFIM7Ylccgmc24LhZgDIr"></script>
-    <script src="/static/app.js?v=19"></script>
+    <script src="/static/app.js?v=22"></script>
 </body>
 </html>
 
