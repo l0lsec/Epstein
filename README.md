@@ -1,4 +1,4 @@
-# Epstein Files Search Platform
+# Epstein Library Files Public Archive
 
 A powerful, public-facing search platform for exploring the Epstein document archive. Features full-text search, semantic AI search, and LLM-powered document analysis.
 

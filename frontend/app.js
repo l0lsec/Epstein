@@ -1,5 +1,5 @@
 /**
- * Epstein Library Files Archive - Frontend Application
+ * Epstein Library Files Public Archive - Frontend Application
  */
 
 const API_BASE = window.location.origin + '/api';
@@ -1778,7 +1778,7 @@ function handleShare(platform) {
     if (doc.subcategory) contextParts.push(doc.subcategory);
     const context = contextParts.length > 0 ? ` (${contextParts.join(' - ')})` : '';
     
-    const shareText = `Check out this document from the Epstein Library Files Archive: "${doc.filename}"${context}`;
+    const shareText = `Check out this document from the Epstein Library Files Public Archive: "${doc.filename}"${context}`;
     
     const isMobile = isMobileDevice();
     let webUrl = '';
