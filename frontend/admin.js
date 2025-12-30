@@ -1772,12 +1772,15 @@ async function searchDocumentsForPin(query) {
                 return;
             }
             
-            resultsEl.innerHTML = data.documents.map(doc => `
+            resultsEl.innerHTML = data.documents.map(doc => {
+                const categoryInfo = [doc.category, doc.subcategory].filter(Boolean).join(' › ');
+                return `
                 <div class="pin-search-item" onclick="selectDocumentForPin('${escapeHtml(doc.id)}', '${escapeHtml(doc.filename.replace(/'/g, "\\'"))}')">
                     <div class="pin-search-filename">${escapeHtml(doc.filename)}</div>
-                    <div class="pin-search-meta">${escapeHtml(doc.category || '')} • ${doc.page_count || 0} pages</div>
+                    <div class="pin-search-meta">${escapeHtml(categoryInfo || 'Unknown')} • ${doc.page_count || 0} pages</div>
                 </div>
-            `).join('');
+            `;
+            }).join('');
         } catch (error) {
             console.error('Error searching documents:', error);
             resultsEl.innerHTML = '<div style="padding: var(--space-md); color: var(--danger); text-align: center;">Error searching documents</div>';
