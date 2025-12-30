@@ -1850,13 +1850,35 @@ function editPinnedDocument(docId) {
     const doc = pinnedDocsData.find(d => d.document_id === docId);
     if (!doc) return;
     
-    const newReason = prompt('Edit reason (why is this document notable?):', doc.reason || '');
-    if (newReason === null) return; // Cancelled
+    // Open the edit modal
+    const modal = document.getElementById('edit-pinned-modal');
+    if (!modal) return;
     
-    const newOrder = prompt('Edit display order (lower = first):', doc.display_order || 0);
-    if (newOrder === null) return; // Cancelled
+    // Populate the modal with current values
+    document.getElementById('edit-pinned-doc-id').value = docId;
+    document.getElementById('edit-pinned-doc-name').textContent = doc.filename || docId;
+    document.getElementById('edit-pinned-reason').value = doc.reason || '';
+    document.getElementById('edit-pinned-order').value = doc.display_order || 0;
     
-    updatePinnedDocument(docId, newReason, parseInt(newOrder) || 0);
+    modal.style.display = 'flex';
+}
+
+function closeEditPinnedModal() {
+    const modal = document.getElementById('edit-pinned-modal');
+    if (modal) {
+        modal.style.display = 'none';
+    }
+}
+
+async function submitEditPinned() {
+    const docId = document.getElementById('edit-pinned-doc-id').value;
+    const reason = document.getElementById('edit-pinned-reason').value.trim();
+    const order = parseInt(document.getElementById('edit-pinned-order').value) || 0;
+    
+    if (!docId) return;
+    
+    await updatePinnedDocument(docId, reason, order);
+    closeEditPinnedModal();
 }
 
 async function updatePinnedDocument(docId, reason, order) {
@@ -1894,4 +1916,6 @@ window.selectDocumentForPin = selectDocumentForPin;
 window.submitPinDocument = submitPinDocument;
 window.unpinDocument = unpinDocument;
 window.editPinnedDocument = editPinnedDocument;
+window.closeEditPinnedModal = closeEditPinnedModal;
+window.submitEditPinned = submitEditPinned;
 
