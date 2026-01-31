@@ -455,7 +455,7 @@ Data Sources:
     
     print("""
 ╔═══════════════════════════════════════════════════════════════╗
-║         EPSTEIN FILES SEARCH PLATFORM                         ║
+║         EPSTEIN LIBRARY FILES PUBLIC ARCHIVE                 ║
 ║         Public Document Archive & AI Analysis                 ║
 ╚═══════════════════════════════════════════════════════════════╝
     """)
