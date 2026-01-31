@@ -1612,7 +1612,8 @@ async function deleteFeedback(feedbackId) {
 async function loadContentData() {
     await Promise.all([
         loadAskAIStatus(),
-        loadPinnedDocuments()
+        loadPinnedDocuments(),
+        loadKeywords()
     ]);
 }
 
@@ -1914,6 +1915,272 @@ async function updatePinnedDocument(docId, reason, order) {
     }
 }
 
+// =============================================================================
+// Keywords/Topics Management
+// =============================================================================
+
+let keywordsData = [];
+
+async function loadKeywords() {
+    try {
+        const response = await authFetch(`${window.location.origin}/api/admin/keywords`);
+        if (!response.ok) throw new Error('Failed to load keywords');
+        const data = await response.json();
+        
+        keywordsData = data.keywords || [];
+        renderKeywords(keywordsData);
+    } catch (error) {
+        console.error('Error loading keywords:', error);
+        const el = document.getElementById('keywords-list');
+        if (el) el.innerHTML = '<div style="color: var(--danger);">Error loading keywords</div>';
+    }
+}
+
+function renderKeywords(keywords) {
+    const el = document.getElementById('keywords-list');
+    if (!el) return;
+    
+    if (!keywords || keywords.length === 0) {
+        el.innerHTML = `
+            <div style="text-align: center; padding: var(--space-xl); color: var(--text-muted);">
+                <p style="margin-bottom: var(--space-md);">No keywords configured yet.</p>
+                <button class="btn btn-primary" onclick="seedKeywords()">
+                    <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M12 2v20M2 12h20"/>
+                    </svg>
+                    Seed Default Keywords
+                </button>
+            </div>
+        `;
+        return;
+    }
+    
+    // Group by category
+    const grouped = {};
+    keywords.forEach(kw => {
+        if (!grouped[kw.category]) grouped[kw.category] = [];
+        grouped[kw.category].push(kw);
+    });
+    
+    // Category icons
+    const categoryIcons = {
+        'People': '👤',
+        'Locations': '📍',
+        'Topics': '📋'
+    };
+    
+    let html = '';
+    for (const [category, items] of Object.entries(grouped)) {
+        const icon = categoryIcons[category] || '🏷️';
+        html += `
+            <div style="margin-bottom: var(--space-lg);">
+                <h4 style="margin-bottom: var(--space-sm); color: var(--text-primary);">${icon} ${category}</h4>
+                <div class="data-table-container">
+                    <table class="data-table">
+                        <thead>
+                            <tr>
+                                <th>Name</th>
+                                <th>Search Term</th>
+                                <th>Doc Count</th>
+                                <th>Order</th>
+                                <th>Status</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+        `;
+        
+        items.forEach(kw => {
+            const statusBadge = kw.is_active 
+                ? '<span style="color: var(--success); font-weight: 500;">Active</span>'
+                : '<span style="color: var(--text-muted);">Inactive</span>';
+            
+            html += `
+                <tr>
+                    <td style="font-weight: 500;">${escapeHtml(kw.name)}</td>
+                    <td><code style="background: var(--bg-tertiary); padding: 2px 6px; border-radius: 3px;">${escapeHtml(kw.search_term)}</code></td>
+                    <td>${formatNumber(kw.document_count)}</td>
+                    <td>${kw.display_order}</td>
+                    <td>${statusBadge}</td>
+                    <td>
+                        <button class="btn btn-sm" onclick="editKeyword(${kw.id})" title="Edit">
+                            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"/>
+                            </svg>
+                        </button>
+                        <button class="btn btn-sm btn-danger" onclick="deleteKeyword(${kw.id}, '${escapeHtml(kw.name)}')" title="Delete">
+                            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
+                                <polyline points="3,6 5,6 21,6"/>
+                                <path d="M19,6v14a2,2,0,0,1-2,2H7a2,2,0,0,1-2-2V6M8,6V4a2,2,0,0,1,2-2h4a2,2,0,0,1,2,2V6"/>
+                            </svg>
+                        </button>
+                    </td>
+                </tr>
+            `;
+        });
+        
+        html += `
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        `;
+    }
+    
+    el.innerHTML = html;
+}
+
+function openAddKeywordModal() {
+    document.getElementById('keyword-modal-title').textContent = 'Add Keyword';
+    document.getElementById('keyword-edit-id').value = '';
+    document.getElementById('keyword-name').value = '';
+    document.getElementById('keyword-search-term').value = '';
+    document.getElementById('keyword-category').value = 'People';
+    document.getElementById('keyword-order').value = '0';
+    document.getElementById('keyword-active').value = '1';
+    document.getElementById('keyword-modal').style.display = 'flex';
+}
+
+function editKeyword(keywordId) {
+    const kw = keywordsData.find(k => k.id === keywordId);
+    if (!kw) return;
+    
+    document.getElementById('keyword-modal-title').textContent = 'Edit Keyword';
+    document.getElementById('keyword-edit-id').value = kw.id;
+    document.getElementById('keyword-name').value = kw.name;
+    document.getElementById('keyword-search-term').value = kw.search_term;
+    document.getElementById('keyword-category').value = kw.category;
+    document.getElementById('keyword-order').value = kw.display_order;
+    document.getElementById('keyword-active').value = kw.is_active ? '1' : '0';
+    document.getElementById('keyword-modal').style.display = 'flex';
+}
+
+function closeKeywordModal() {
+    document.getElementById('keyword-modal').style.display = 'none';
+}
+
+async function submitKeyword() {
+    const editId = document.getElementById('keyword-edit-id').value;
+    const name = document.getElementById('keyword-name').value.trim();
+    const searchTerm = document.getElementById('keyword-search-term').value.trim();
+    const category = document.getElementById('keyword-category').value;
+    const displayOrder = parseInt(document.getElementById('keyword-order').value) || 0;
+    const isActive = document.getElementById('keyword-active').value === '1';
+    
+    if (!name || !searchTerm) {
+        alert('Please fill in both Name and Search Term');
+        return;
+    }
+    
+    try {
+        const isEdit = !!editId;
+        const url = isEdit 
+            ? `${window.location.origin}/api/admin/keywords/${editId}`
+            : `${window.location.origin}/api/admin/keywords`;
+        
+        const response = await authFetch(url, {
+            method: isEdit ? 'PUT' : 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                name,
+                search_term: searchTerm,
+                category,
+                display_order: displayOrder,
+                is_active: isActive
+            })
+        });
+        
+        if (!response.ok) {
+            const data = await response.json();
+            throw new Error(data.detail || 'Failed to save keyword');
+        }
+        
+        closeKeywordModal();
+        loadKeywords();
+        
+    } catch (error) {
+        console.error('Error saving keyword:', error);
+        alert('Error: ' + error.message);
+    }
+}
+
+async function deleteKeyword(keywordId, keywordName) {
+    if (!confirm(`Are you sure you want to delete the keyword "${keywordName}"?`)) {
+        return;
+    }
+    
+    try {
+        const response = await authFetch(`${window.location.origin}/api/admin/keywords/${keywordId}`, {
+            method: 'DELETE'
+        });
+        
+        if (!response.ok) {
+            const data = await response.json();
+            throw new Error(data.detail || 'Failed to delete keyword');
+        }
+        
+        loadKeywords();
+        
+    } catch (error) {
+        console.error('Error deleting keyword:', error);
+        alert('Error: ' + error.message);
+    }
+}
+
+async function recountKeywords() {
+    if (!confirm('This will scan all documents to recount keyword matches. This may take a while. Continue?')) {
+        return;
+    }
+    
+    const el = document.getElementById('keywords-list');
+    if (el) el.innerHTML = '<div class="loading"><span class="spinner"></span>Recounting keywords...</div>';
+    
+    try {
+        const response = await authFetch(`${window.location.origin}/api/admin/keywords/recount`, {
+            method: 'POST'
+        });
+        
+        if (!response.ok) {
+            const data = await response.json();
+            throw new Error(data.detail || 'Failed to recount keywords');
+        }
+        
+        const data = await response.json();
+        alert(`Successfully recounted ${Object.keys(data.counts).length} keywords!`);
+        loadKeywords();
+        
+    } catch (error) {
+        console.error('Error recounting keywords:', error);
+        alert('Error: ' + error.message);
+        loadKeywords();
+    }
+}
+
+async function seedKeywords() {
+    try {
+        const response = await authFetch(`${window.location.origin}/api/admin/keywords/seed`, {
+            method: 'POST'
+        });
+        
+        if (!response.ok) {
+            const data = await response.json();
+            throw new Error(data.detail || 'Failed to seed keywords');
+        }
+        
+        const data = await response.json();
+        if (data.keywords_added > 0) {
+            alert(`Successfully added ${data.keywords_added} default keywords!`);
+        } else {
+            alert('Keywords already exist. No new keywords added.');
+        }
+        loadKeywords();
+        
+    } catch (error) {
+        console.error('Error seeding keywords:', error);
+        alert('Error: ' + error.message);
+    }
+}
+
 // Global refresh function
 window.refreshAll = refreshAll;
 window.clearLogs = clearLogs;
@@ -1930,4 +2197,12 @@ window.unpinDocument = unpinDocument;
 window.editPinnedDocument = editPinnedDocument;
 window.closeEditPinnedModal = closeEditPinnedModal;
 window.submitEditPinned = submitEditPinned;
+window.loadKeywords = loadKeywords;
+window.openAddKeywordModal = openAddKeywordModal;
+window.editKeyword = editKeyword;
+window.closeKeywordModal = closeKeywordModal;
+window.submitKeyword = submitKeyword;
+window.deleteKeyword = deleteKeyword;
+window.recountKeywords = recountKeywords;
+window.seedKeywords = seedKeywords;
 

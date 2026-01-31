@@ -127,6 +127,23 @@ class Database:
                 )
             """)
             conn.commit()
+            
+            # Keywords table for dynamic topic/keyword filtering
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS keywords (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL UNIQUE,
+                    search_term TEXT NOT NULL,
+                    category TEXT NOT NULL,
+                    document_count INTEGER DEFAULT 0,
+                    display_order INTEGER DEFAULT 0,
+                    is_active INTEGER DEFAULT 1,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_keywords_category ON keywords(category)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_keywords_active ON keywords(is_active)")
+            conn.commit()
     
     def rebuild_fts(self):
         """Rebuild the FTS5 index to fix sync issues"""
@@ -714,6 +731,220 @@ class Database:
                 (document_id,)
             )
             return cursor.fetchone() is not None
+    
+    # =========================================================================
+    # Keywords Methods
+    # =========================================================================
+    
+    def get_keywords(self, active_only: bool = True) -> List[Dict[str, Any]]:
+        """Get all keywords, optionally filtered to active only
+        
+        Args:
+            active_only: If True, only return keywords with is_active=1
+        
+        Returns:
+            List of keyword dictionaries
+        """
+        with self.get_connection() as conn:
+            if active_only:
+                cursor = conn.execute("""
+                    SELECT id, name, search_term, category, document_count, display_order, is_active, created_at
+                    FROM keywords
+                    WHERE is_active = 1
+                    ORDER BY category, display_order, name
+                """)
+            else:
+                cursor = conn.execute("""
+                    SELECT id, name, search_term, category, document_count, display_order, is_active, created_at
+                    FROM keywords
+                    ORDER BY category, display_order, name
+                """)
+            return [dict(row) for row in cursor.fetchall()]
+    
+    def get_keyword(self, keyword_id: int) -> Optional[Dict[str, Any]]:
+        """Get a single keyword by ID"""
+        with self.get_connection() as conn:
+            cursor = conn.execute(
+                "SELECT * FROM keywords WHERE id = ?", (keyword_id,)
+            )
+            row = cursor.fetchone()
+            return dict(row) if row else None
+    
+    def add_keyword(self, name: str, search_term: str, category: str, 
+                    display_order: int = 0, is_active: bool = True) -> Optional[int]:
+        """Add a new keyword
+        
+        Args:
+            name: Display name (e.g., "Ghislaine Maxwell")
+            search_term: Search term (e.g., "Maxwell")
+            category: Category (e.g., "People", "Locations", "Topics")
+            display_order: Order in dropdown
+            is_active: Whether to show in public dropdown
+        
+        Returns:
+            ID of the new keyword, or None if failed (duplicate name)
+        """
+        with self.get_connection() as conn:
+            try:
+                cursor = conn.execute("""
+                    INSERT INTO keywords (name, search_term, category, display_order, is_active)
+                    VALUES (?, ?, ?, ?, ?)
+                """, (name, search_term, category, display_order, 1 if is_active else 0))
+                conn.commit()
+                return cursor.lastrowid
+            except sqlite3.IntegrityError:
+                # Duplicate name
+                return None
+    
+    def update_keyword(self, keyword_id: int, name: str = None, search_term: str = None,
+                       category: str = None, display_order: int = None, 
+                       is_active: bool = None) -> bool:
+        """Update an existing keyword
+        
+        Returns:
+            True if updated, False if keyword not found
+        """
+        with self.get_connection() as conn:
+            updates = []
+            params = []
+            
+            if name is not None:
+                updates.append("name = ?")
+                params.append(name)
+            
+            if search_term is not None:
+                updates.append("search_term = ?")
+                params.append(search_term)
+            
+            if category is not None:
+                updates.append("category = ?")
+                params.append(category)
+            
+            if display_order is not None:
+                updates.append("display_order = ?")
+                params.append(display_order)
+            
+            if is_active is not None:
+                updates.append("is_active = ?")
+                params.append(1 if is_active else 0)
+            
+            if not updates:
+                return False
+            
+            params.append(keyword_id)
+            try:
+                cursor = conn.execute(
+                    f"UPDATE keywords SET {', '.join(updates)} WHERE id = ?",
+                    params
+                )
+                conn.commit()
+                return cursor.rowcount > 0
+            except sqlite3.IntegrityError:
+                # Duplicate name
+                return False
+    
+    def delete_keyword(self, keyword_id: int) -> bool:
+        """Delete a keyword
+        
+        Returns:
+            True if deleted, False if not found
+        """
+        with self.get_connection() as conn:
+            cursor = conn.execute(
+                "DELETE FROM keywords WHERE id = ?", (keyword_id,)
+            )
+            conn.commit()
+            return cursor.rowcount > 0
+    
+    def update_keyword_counts(self) -> Dict[str, int]:
+        """Recount document matches for all keywords
+        
+        Scans the documents table full_text for each keyword's search_term.
+        
+        Returns:
+            Dictionary mapping keyword names to their new counts
+        """
+        with self.get_connection() as conn:
+            # Get all keywords
+            cursor = conn.execute("SELECT id, name, search_term FROM keywords")
+            keywords = cursor.fetchall()
+            
+            results = {}
+            for kw in keywords:
+                keyword_id = kw[0]
+                name = kw[1]
+                search_term = kw[2]
+                
+                # Count documents containing this search term (case-insensitive)
+                cursor = conn.execute("""
+                    SELECT COUNT(*) FROM documents 
+                    WHERE LOWER(full_text) LIKE LOWER(?)
+                """, (f"%{search_term}%",))
+                count = cursor.fetchone()[0]
+                
+                # Update the keyword's document_count
+                conn.execute(
+                    "UPDATE keywords SET document_count = ? WHERE id = ?",
+                    (count, keyword_id)
+                )
+                results[name] = count
+            
+            conn.commit()
+            return results
+    
+    def seed_default_keywords(self) -> int:
+        """Seed the database with default keywords if empty
+        
+        Returns:
+            Number of keywords added
+        """
+        with self.get_connection() as conn:
+            # Check if keywords already exist
+            cursor = conn.execute("SELECT COUNT(*) FROM keywords")
+            if cursor.fetchone()[0] > 0:
+                return 0
+            
+            # Default keywords matching the existing hardcoded ones
+            default_keywords = [
+                # People
+                ("Ghislaine Maxwell", "Maxwell", "People", 1),
+                ("Bill Clinton", "Clinton", "People", 2),
+                ("Donald Trump", "Trump", "People", 3),
+                ("Prince Andrew", "Andrew", "People", 4),
+                ("Alan Dershowitz", "Dershowitz", "People", 5),
+                ("Jean-Luc Brunel", "Brunel", "People", 6),
+                ("Virginia Giuffre", "Giuffre", "People", 7),
+                ("Sarah Kellen", "Kellen", "People", 8),
+                ("Les Wexner", "Wexner", "People", 9),
+                ("Leon Black", "Black", "People", 10),
+                
+                # Locations
+                ("Palm Beach", "Palm Beach", "Locations", 1),
+                ("Manhattan / New York", "Manhattan", "Locations", 2),
+                ("Little St. James Island", "Little St. James", "Locations", 3),
+                ("Zorro Ranch", "Zorro Ranch", "Locations", 4),
+                ("Paris", "Paris", "Locations", 5),
+                
+                # Topics
+                ("Flight Logs", "flight", "Topics", 1),
+                ("Massage", "massage", "Topics", 2),
+                ("Trafficking", "trafficking", "Topics", 3),
+                ("Minors / Underage", "minor", "Topics", 4),
+                ("Victims", "victim", "Topics", 5),
+                ("Settlement", "settlement", "Topics", 6),
+                ("Deposition", "deposition", "Topics", 7),
+                ("Interview", "interview", "Topics", 8),
+                ("FBI", "FBI", "Topics", 9),
+                ("DOJ", "DOJ", "Topics", 10),
+            ]
+            
+            conn.executemany("""
+                INSERT INTO keywords (name, search_term, category, display_order, is_active)
+                VALUES (?, ?, ?, ?, 1)
+            """, default_keywords)
+            conn.commit()
+            
+            return len(default_keywords)
 
 
 class VectorStore:

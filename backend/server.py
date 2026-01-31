@@ -209,6 +209,15 @@ async def lifespan(app: FastAPI):
             f"Database loaded with {doc_count} documents",
             document_count=doc_count
         )
+        
+        # Auto-seed default keywords if none exist
+        keywords_added = db.seed_default_keywords()
+        if keywords_added > 0:
+            security_logger.log_system_event(
+                "keywords_seeded",
+                f"Seeded {keywords_added} default keywords",
+                keywords_added=keywords_added
+            )
     else:
         security_logger.log_system_event(
             "database_missing",
@@ -2670,6 +2679,225 @@ async def get_admin_pinned_documents(request: Request, x_api_key: str = Header(N
         raise HTTPException(status_code=503, detail="Database not initialized")
     
     return {"pinned_documents": db.get_pinned_documents()}
+
+
+# =============================================================================
+# Keywords Endpoints
+# =============================================================================
+
+@app.get("/api/keywords")
+async def get_keywords():
+    """Get all active keywords grouped by category (public endpoint)"""
+    if not db:
+        raise HTTPException(status_code=503, detail="Database not initialized")
+    
+    keywords = db.get_keywords(active_only=True)
+    
+    # Group by category
+    grouped = {}
+    for kw in keywords:
+        category = kw["category"]
+        if category not in grouped:
+            grouped[category] = []
+        grouped[category].append({
+            "name": kw["name"],
+            "search_term": kw["search_term"],
+            "document_count": kw["document_count"]
+        })
+    
+    return {"keywords": grouped}
+
+
+@app.get("/api/admin/keywords")
+async def get_admin_keywords(request: Request, x_api_key: str = Header(None)):
+    """Get all keywords with admin details (requires admin authentication)"""
+    is_authorized, error = verify_admin_access(request, x_api_key)
+    if not is_authorized:
+        raise HTTPException(status_code=401, detail=error)
+    
+    if not db:
+        raise HTTPException(status_code=503, detail="Database not initialized")
+    
+    return {"keywords": db.get_keywords(active_only=False)}
+
+
+class AddKeywordRequest(BaseModel):
+    name: str
+    search_term: str
+    category: str
+    display_order: int = 0
+    is_active: bool = True
+
+
+@app.post("/api/admin/keywords")
+async def add_keyword(keyword_request: AddKeywordRequest, request: Request, x_api_key: str = Header(None)):
+    """Add a new keyword (requires admin authentication)"""
+    is_authorized, error = verify_admin_access(request, x_api_key)
+    if not is_authorized:
+        raise HTTPException(status_code=401, detail=error)
+    
+    if not db:
+        raise HTTPException(status_code=503, detail="Database not initialized")
+    
+    client_ip, request_id = get_client_info(request)
+    
+    keyword_id = db.add_keyword(
+        name=keyword_request.name,
+        search_term=keyword_request.search_term,
+        category=keyword_request.category,
+        display_order=keyword_request.display_order,
+        is_active=keyword_request.is_active
+    )
+    
+    if keyword_id is None:
+        raise HTTPException(status_code=400, detail="Keyword with this name already exists")
+    
+    # Log the action
+    security_logger.log_admin_action(
+        client_ip=client_ip,
+        request_id=request_id,
+        action="add_keyword",
+        target=keyword_request.name,
+        details=f"Added keyword: {keyword_request.name} ({keyword_request.category})"
+    )
+    
+    return {"success": True, "keyword_id": keyword_id}
+
+
+class UpdateKeywordRequest(BaseModel):
+    name: Optional[str] = None
+    search_term: Optional[str] = None
+    category: Optional[str] = None
+    display_order: Optional[int] = None
+    is_active: Optional[bool] = None
+
+
+@app.put("/api/admin/keywords/{keyword_id}")
+async def update_keyword(
+    keyword_id: int,
+    update_request: UpdateKeywordRequest,
+    request: Request,
+    x_api_key: str = Header(None)
+):
+    """Update a keyword (requires admin authentication)"""
+    is_authorized, error = verify_admin_access(request, x_api_key)
+    if not is_authorized:
+        raise HTTPException(status_code=401, detail=error)
+    
+    if not db:
+        raise HTTPException(status_code=503, detail="Database not initialized")
+    
+    client_ip, request_id = get_client_info(request)
+    
+    success = db.update_keyword(
+        keyword_id=keyword_id,
+        name=update_request.name,
+        search_term=update_request.search_term,
+        category=update_request.category,
+        display_order=update_request.display_order,
+        is_active=update_request.is_active
+    )
+    
+    if not success:
+        raise HTTPException(status_code=404, detail="Keyword not found or duplicate name")
+    
+    # Log the action
+    security_logger.log_admin_action(
+        client_ip=client_ip,
+        request_id=request_id,
+        action="update_keyword",
+        target=str(keyword_id),
+        details=f"Updated keyword ID {keyword_id}"
+    )
+    
+    return {"success": True, "keyword_id": keyword_id}
+
+
+@app.delete("/api/admin/keywords/{keyword_id}")
+async def delete_keyword(keyword_id: int, request: Request, x_api_key: str = Header(None)):
+    """Delete a keyword (requires admin authentication)"""
+    is_authorized, error = verify_admin_access(request, x_api_key)
+    if not is_authorized:
+        raise HTTPException(status_code=401, detail=error)
+    
+    if not db:
+        raise HTTPException(status_code=503, detail="Database not initialized")
+    
+    client_ip, request_id = get_client_info(request)
+    
+    # Get keyword name before deletion for logging
+    keyword = db.get_keyword(keyword_id)
+    keyword_name = keyword["name"] if keyword else f"ID {keyword_id}"
+    
+    success = db.delete_keyword(keyword_id)
+    
+    if not success:
+        raise HTTPException(status_code=404, detail="Keyword not found")
+    
+    # Log the action
+    security_logger.log_admin_action(
+        client_ip=client_ip,
+        request_id=request_id,
+        action="delete_keyword",
+        target=keyword_name,
+        details=f"Deleted keyword: {keyword_name}"
+    )
+    
+    return {"success": True, "keyword_id": keyword_id}
+
+
+@app.post("/api/admin/keywords/recount")
+async def recount_keywords(request: Request, x_api_key: str = Header(None)):
+    """Recount document matches for all keywords (requires admin authentication)"""
+    is_authorized, error = verify_admin_access(request, x_api_key)
+    if not is_authorized:
+        raise HTTPException(status_code=401, detail=error)
+    
+    if not db:
+        raise HTTPException(status_code=503, detail="Database not initialized")
+    
+    client_ip, request_id = get_client_info(request)
+    
+    # Perform the recount
+    counts = db.update_keyword_counts()
+    
+    # Log the action
+    security_logger.log_admin_action(
+        client_ip=client_ip,
+        request_id=request_id,
+        action="recount_keywords",
+        target="all",
+        details=f"Recounted {len(counts)} keywords"
+    )
+    
+    return {"success": True, "counts": counts}
+
+
+@app.post("/api/admin/keywords/seed")
+async def seed_keywords(request: Request, x_api_key: str = Header(None)):
+    """Seed default keywords if none exist (requires admin authentication)"""
+    is_authorized, error = verify_admin_access(request, x_api_key)
+    if not is_authorized:
+        raise HTTPException(status_code=401, detail=error)
+    
+    if not db:
+        raise HTTPException(status_code=503, detail="Database not initialized")
+    
+    client_ip, request_id = get_client_info(request)
+    
+    count = db.seed_default_keywords()
+    
+    if count > 0:
+        # Log the action
+        security_logger.log_admin_action(
+            client_ip=client_ip,
+            request_id=request_id,
+            action="seed_keywords",
+            target="default",
+            details=f"Seeded {count} default keywords"
+        )
+    
+    return {"success": True, "keywords_added": count}
 
 
 # Mount static files last (if frontend exists)

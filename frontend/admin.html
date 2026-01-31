@@ -1775,6 +1775,122 @@
                     </div>
                 </div>
             </div>
+
+            <!-- Keywords Management -->
+            <div class="card" style="margin-bottom: var(--space-lg);">
+                <div class="card-header">
+                    <span class="card-title">🏷️ Keyword/Topic Filters</span>
+                    <div style="display: flex; gap: var(--space-sm);">
+                        <button class="btn btn-sm" onclick="recountKeywords()">
+                            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M1 4v6h6M23 20v-6h-6"/>
+                                <path d="M20.49 9A9 9 0 005.64 5.64L1 10m22 4l-4.64 4.36A9 9 0 013.51 15"/>
+                            </svg>
+                            Recount All
+                        </button>
+                        <button class="btn btn-sm" onclick="seedKeywords()">
+                            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M12 2v20M2 12h20"/>
+                            </svg>
+                            Seed Defaults
+                        </button>
+                        <button class="btn btn-sm btn-primary" onclick="openAddKeywordModal()">
+                            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M12 5v14M5 12h14"/>
+                            </svg>
+                            Add Keyword
+                        </button>
+                    </div>
+                </div>
+                <div class="card-body">
+                    <p style="margin-bottom: var(--space-lg); font-size: 0.9rem; color: var(--text-muted);">
+                        Manage the keywords/topics that appear in the search filters on the homepage. These are used to filter documents by content.
+                    </p>
+                    <div id="keywords-list">
+                        <div class="loading"><span class="spinner"></span>Loading keywords...</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Add/Edit Keyword Modal -->
+            <div id="keyword-modal" class="modal-overlay" style="display: none;">
+                <div class="modal-content" style="max-width: 500px;">
+                    <div class="modal-header">
+                        <span class="modal-title" id="keyword-modal-title">Add Keyword</span>
+                        <button class="modal-close" onclick="closeKeywordModal()">&times;</button>
+                    </div>
+                    <div class="modal-body">
+                        <input type="hidden" id="keyword-edit-id">
+                        <div style="margin-bottom: var(--space-lg);">
+                            <label class="login-label" style="display: block; margin-bottom: var(--space-xs);">Display Name</label>
+                            <input 
+                                type="text" 
+                                id="keyword-name" 
+                                class="login-input" 
+                                placeholder="e.g., Ghislaine Maxwell"
+                                style="width: 100%;"
+                            >
+                            <p style="margin-top: var(--space-xs); font-size: 0.8rem; color: var(--text-muted);">
+                                The name shown in the dropdown menu
+                            </p>
+                        </div>
+                        <div style="margin-bottom: var(--space-lg);">
+                            <label class="login-label" style="display: block; margin-bottom: var(--space-xs);">Search Term</label>
+                            <input 
+                                type="text" 
+                                id="keyword-search-term" 
+                                class="login-input" 
+                                placeholder="e.g., Maxwell"
+                                style="width: 100%;"
+                            >
+                            <p style="margin-top: var(--space-xs); font-size: 0.8rem; color: var(--text-muted);">
+                                The term used to search document content
+                            </p>
+                        </div>
+                        <div style="margin-bottom: var(--space-lg);">
+                            <label class="login-label" style="display: block; margin-bottom: var(--space-xs);">Category</label>
+                            <select id="keyword-category" class="login-input" style="width: 100%;">
+                                <option value="People">People</option>
+                                <option value="Locations">Locations</option>
+                                <option value="Topics">Topics</option>
+                            </select>
+                        </div>
+                        <div style="display: flex; gap: var(--space-md); margin-bottom: var(--space-lg);">
+                            <div style="flex: 1;">
+                                <label class="login-label" style="display: block; margin-bottom: var(--space-xs);">Display Order</label>
+                                <input 
+                                    type="number" 
+                                    id="keyword-order" 
+                                    class="login-input" 
+                                    value="0"
+                                    min="0"
+                                    style="width: 100%;"
+                                >
+                            </div>
+                            <div style="flex: 1;">
+                                <label class="login-label" style="display: block; margin-bottom: var(--space-xs);">Status</label>
+                                <select id="keyword-active" class="login-input" style="width: 100%;">
+                                    <option value="1">Active</option>
+                                    <option value="0">Inactive</option>
+                                </select>
+                            </div>
+                        </div>
+                        <div style="display: flex; gap: var(--space-md);">
+                            <button class="btn" onclick="closeKeywordModal()" style="flex: 1;">
+                                Cancel
+                            </button>
+                            <button class="btn btn-primary" onclick="submitKeyword()" style="flex: 1;">
+                                <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
+                                    <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/>
+                                    <polyline points="17 21 17 13 7 13 7 21"/>
+                                    <polyline points="7 3 7 8 15 8"/>
+                                </svg>
+                                Save Keyword
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
         </div>
 
         <!-- System Tab -->

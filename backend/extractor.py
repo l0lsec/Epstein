@@ -132,9 +132,38 @@ class PDFExtractor:
         from urllib.parse import unquote
         return unquote(filename)
     
-    def _get_efta_dataset(self, filename: str) -> str:
-        """Determine which dataset an EFTA file belongs to based on file number"""
+    def _get_efta_dataset(self, filename: str, filepath: Path = None) -> str:
+        """Determine which dataset an EFTA file belongs to.
+        
+        Uses folder-based detection first (most reliable), then falls back
+        to EFTA number ranges.
+        
+        Data Set ranges (by EFTA number):
+        - Data Set 1: 1-3158
+        - Data Set 2: 3159-3857
+        - Data Set 3: 3858-5704
+        - Data Set 4: 5705-8408
+        - Data Set 5: 8409-8528
+        - Data Set 6: 8529-9015
+        - Data Set 7: 9016-9675
+        - Data Set 8: 9676-39024
+        - Data Set 9: 39025-1262781 (released January 2026)
+        - Data Set 10: 1262782-2212882 (released January 2026)
+        - Data Set 11: 2212883+ (released January 2026)
+        """
         import re
+        
+        # First, try folder-based detection (works for all data sets)
+        if filepath is not None:
+            try:
+                path_str = str(filepath)
+                folder_match = re.search(r'Data Set (\d+)', path_str)
+                if folder_match:
+                    return f"Data Set {folder_match.group(1)}"
+            except:
+                pass
+        
+        # Fall back to EFTA number-based detection
         match = re.search(r'EFTA(\d+)', filename)
         if not match:
             return "EFTA Documents"
@@ -156,8 +185,14 @@ class PDFExtractor:
             return "Data Set 6"
         elif file_num <= 9675:
             return "Data Set 7"
-        else:
+        elif file_num < 39025:
             return "Data Set 8"
+        elif file_num < 1262782:
+            return "Data Set 9"
+        elif file_num < 2212883:
+            return "Data Set 10"
+        else:
+            return "Data Set 11"
     
     def _categorize_file(self, filepath: Path) -> Dict[str, str]:
         """Categorize file based on path and filename"""
@@ -171,7 +206,7 @@ class PDFExtractor:
         # EFTA files always go to DOJ Disclosures regardless of folder location
         if filename.startswith("EFTA"):
             category = "DOJ Disclosures"
-            subcategory = self._get_efta_dataset(filename)
+            subcategory = self._get_efta_dataset(filename, filepath)
             return {"category": category, "subcategory": subcategory}
         
         if "DOJ Disclosures" in parts:
@@ -489,9 +524,38 @@ class ImageExtractor:
         from urllib.parse import unquote
         return unquote(filename)
     
-    def _get_efta_dataset(self, filename: str) -> str:
-        """Determine which dataset an EFTA file belongs to based on file number"""
+    def _get_efta_dataset(self, filename: str, filepath: Path = None) -> str:
+        """Determine which dataset an EFTA file belongs to.
+        
+        Uses folder-based detection first (most reliable), then falls back
+        to EFTA number ranges.
+        
+        Data Set ranges (by EFTA number):
+        - Data Set 1: 1-3158
+        - Data Set 2: 3159-3857
+        - Data Set 3: 3858-5704
+        - Data Set 4: 5705-8408
+        - Data Set 5: 8409-8528
+        - Data Set 6: 8529-9015
+        - Data Set 7: 9016-9675
+        - Data Set 8: 9676-39024
+        - Data Set 9: 39025-1262781 (released January 2026)
+        - Data Set 10: 1262782-2212882 (released January 2026)
+        - Data Set 11: 2212883+ (released January 2026)
+        """
         import re
+        
+        # First, try folder-based detection (works for all data sets)
+        if filepath is not None:
+            try:
+                path_str = str(filepath)
+                folder_match = re.search(r'Data Set (\d+)', path_str)
+                if folder_match:
+                    return f"Data Set {folder_match.group(1)}"
+            except:
+                pass
+        
+        # Fall back to EFTA number-based detection
         match = re.search(r'EFTA(\d+)', filename)
         if not match:
             return "EFTA Documents"
@@ -513,8 +577,14 @@ class ImageExtractor:
             return "Data Set 6"
         elif file_num <= 9675:
             return "Data Set 7"
-        else:
+        elif file_num < 39025:
             return "Data Set 8"
+        elif file_num < 1262782:
+            return "Data Set 9"
+        elif file_num < 2212883:
+            return "Data Set 10"
+        else:
+            return "Data Set 11"
     
     def _categorize_file(self, filepath: Path) -> Dict[str, str]:
         """Categorize file based on path and filename"""
@@ -528,7 +598,7 @@ class ImageExtractor:
         # EFTA files always go to DOJ Disclosures regardless of folder location
         if filename.startswith("EFTA"):
             category = "DOJ Disclosures"
-            subcategory = self._get_efta_dataset(filename)
+            subcategory = self._get_efta_dataset(filename, filepath)
             return {"category": category, "subcategory": subcategory}
         
         # Categorize based on folder structure
@@ -904,9 +974,38 @@ class AudioVideoExtractor:
         from urllib.parse import unquote
         return unquote(filename)
     
-    def _get_efta_dataset(self, filename: str) -> str:
-        """Determine which dataset an EFTA file belongs to based on file number"""
+    def _get_efta_dataset(self, filename: str, filepath: Path = None) -> str:
+        """Determine which dataset an EFTA file belongs to.
+        
+        Uses folder-based detection first (most reliable), then falls back
+        to EFTA number ranges.
+        
+        Data Set ranges (by EFTA number):
+        - Data Set 1: 1-3158
+        - Data Set 2: 3159-3857
+        - Data Set 3: 3858-5704
+        - Data Set 4: 5705-8408
+        - Data Set 5: 8409-8528
+        - Data Set 6: 8529-9015
+        - Data Set 7: 9016-9675
+        - Data Set 8: 9676-39024
+        - Data Set 9: 39025-1262781 (released January 2026)
+        - Data Set 10: 1262782-2212882 (released January 2026)
+        - Data Set 11: 2212883+ (released January 2026)
+        """
         import re
+        
+        # First, try folder-based detection (works for all data sets)
+        if filepath is not None:
+            try:
+                path_str = str(filepath)
+                folder_match = re.search(r'Data Set (\d+)', path_str)
+                if folder_match:
+                    return f"Data Set {folder_match.group(1)}"
+            except:
+                pass
+        
+        # Fall back to EFTA number-based detection
         match = re.search(r'EFTA(\d+)', filename)
         if not match:
             return "EFTA Documents"
@@ -928,8 +1027,14 @@ class AudioVideoExtractor:
             return "Data Set 6"
         elif file_num <= 9675:
             return "Data Set 7"
-        else:
+        elif file_num < 39025:
             return "Data Set 8"
+        elif file_num < 1262782:
+            return "Data Set 9"
+        elif file_num < 2212883:
+            return "Data Set 10"
+        else:
+            return "Data Set 11"
     
     def _categorize_file(self, filepath: Path) -> Dict[str, str]:
         """Categorize file based on path and filename"""
@@ -952,7 +1057,7 @@ class AudioVideoExtractor:
         # EFTA files always go to DOJ Disclosures regardless of folder location
         if filename.startswith("EFTA"):
             category = "DOJ Disclosures"
-            subcategory = self._get_efta_dataset(filename)
+            subcategory = self._get_efta_dataset(filename, filepath)
             return {"category": category, "subcategory": subcategory}
         
         # Categorize based on folder structure

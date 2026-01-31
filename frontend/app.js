@@ -40,6 +40,7 @@ async function init() {
     setupEventListeners();
     await loadStats();
     await loadCategories();
+    await loadKeywords();
     await loadPublicSettings();
     await loadPinnedDocuments();
     
@@ -528,6 +529,77 @@ async function loadCategories(keyword = null) {
         }
     } catch (error) {
         console.error('Error loading categories:', error);
+    }
+}
+
+// Load keywords for topic filtering
+async function loadKeywords() {
+    try {
+        const response = await fetch(`${API_BASE}/keywords`);
+        if (!response.ok) throw new Error('Failed to load keywords');
+        
+        const data = await response.json();
+        const keywords = data.keywords || {};
+        
+        // Category icons
+        const categoryIcons = {
+            'People': '👤',
+            'Locations': '📍',
+            'Topics': '📋'
+        };
+        
+        // Build options HTML grouped by category
+        let optionsHtml = '<option value="">All Topics</option>';
+        
+        // Order categories consistently
+        const categoryOrder = ['People', 'Locations', 'Topics'];
+        
+        for (const category of categoryOrder) {
+            const items = keywords[category];
+            if (items && items.length > 0) {
+                const icon = categoryIcons[category] || '🏷️';
+                optionsHtml += `<optgroup label="${icon} ${category}">`;
+                
+                for (const kw of items) {
+                    const countText = kw.document_count > 0 ? ` (${formatNumber(kw.document_count)})` : '';
+                    optionsHtml += `<option value="${escapeHtml(kw.search_term)}">${escapeHtml(kw.name)}${countText}</option>`;
+                }
+                
+                optionsHtml += '</optgroup>';
+            }
+        }
+        
+        // Handle any additional categories not in the standard order
+        for (const [category, items] of Object.entries(keywords)) {
+            if (!categoryOrder.includes(category) && items && items.length > 0) {
+                const icon = categoryIcons[category] || '🏷️';
+                optionsHtml += `<optgroup label="${icon} ${category}">`;
+                
+                for (const kw of items) {
+                    const countText = kw.document_count > 0 ? ` (${formatNumber(kw.document_count)})` : '';
+                    optionsHtml += `<option value="${escapeHtml(kw.search_term)}">${escapeHtml(kw.name)}${countText}</option>`;
+                }
+                
+                optionsHtml += '</optgroup>';
+            }
+        }
+        
+        // Update the browse keyword dropdown
+        if (elements.browseKeyword) {
+            const currentValue = elements.browseKeyword.value;
+            elements.browseKeyword.innerHTML = optionsHtml;
+            
+            // Restore selection if still valid
+            if (currentValue) {
+                elements.browseKeyword.value = currentValue;
+            }
+        }
+    } catch (error) {
+        console.error('Error loading keywords:', error);
+        // Fallback: keep the dropdown as-is or show basic option
+        if (elements.browseKeyword && elements.browseKeyword.options.length <= 1) {
+            elements.browseKeyword.innerHTML = '<option value="">All Topics</option>';
+        }
     }
 }
 

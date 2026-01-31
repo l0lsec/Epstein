@@ -126,6 +126,70 @@ def setup_court_records(force=False):
         return False
 
 
+def setup_doj_disclosures(force=False, datasets=None):
+    """Download DOJ Disclosures data sets if not already present
+    
+    Args:
+        force: Force re-download of all files
+        datasets: List of specific data set numbers to download (default: 9, 10, 11)
+    """
+    print("\n" + "="*60)
+    print("STEP 1b: CHECKING DOJ DISCLOSURES")
+    print("="*60)
+    
+    doj_dir = BASE_PATH / "DOJ Disclosures"
+    
+    # Default to new data sets (9, 10, 11) if not specified
+    if datasets is None:
+        datasets = [9, 10, 11]
+    
+    # Quick check - if we have the data set folders with files, skip
+    if not force and doj_dir.exists():
+        existing_datasets = []
+        total_files = 0
+        
+        for ds_num in datasets:
+            ds_dir = doj_dir / f"Data Set {ds_num}"
+            if ds_dir.exists():
+                count = len(list(ds_dir.glob("*.pdf")))
+                if count > 0:
+                    existing_datasets.append((ds_num, count))
+                    total_files += count
+        
+        if len(existing_datasets) == len(datasets) and total_files > 100:
+            print(f"✓ DOJ Disclosures present ({len(existing_datasets)} data sets, {total_files} files)")
+            
+            print("\n  Data Sets:")
+            for ds_num, count in existing_datasets:
+                print(f"    {count:5d}  Data Set {ds_num}")
+            
+            return True
+    
+    # Import and run the download script
+    sys.path.insert(0, str(SCRIPTS_PATH))
+    try:
+        from download_doj_disclosures import setup_doj_disclosures as download_doj_files
+        result = download_doj_files(
+            output_dir=doj_dir, 
+            datasets=datasets,
+            force=force, 
+            verbose=True
+        )
+        
+        if result['downloaded'] > 0:
+            print(f"\n✓ Downloaded {result['downloaded']} new files")
+        
+        return result['failed'] == 0
+    except ImportError as e:
+        print(f"⚠ Could not import DOJ Disclosures download script: {e}")
+        print("  Run manually: python scripts/download_doj_disclosures.py")
+        return False
+    except Exception as e:
+        print(f"⚠ Error downloading DOJ Disclosures: {e}")
+        print("  You can run manually: python scripts/download_doj_disclosures.py")
+        return False
+
+
 def cleanup_stale_documents():
     """Remove database entries for files that no longer exist"""
     import sqlite3
@@ -405,12 +469,17 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python run.py setup                    # Download court records, extract PDFs, build index
-  python run.py download                 # Only download court records from DOJ
+  python run.py setup                    # Download all sources, extract PDFs, build index
+  python run.py download                 # Only download files from DOJ (no extraction)
   python run.py server                   # Start the web server
   python run.py server --reindex         # Rebuild index then start server
   python run.py --full-setup             # Force re-download and rebuild everything
   python run.py                          # Run setup (if needed) then start server
+  
+DOJ Disclosures (Data Sets 9, 10, 11 released January 2026):
+  python run.py download                             # Download all sources including new data sets
+  python run.py download --doj-datasets 9,10,11     # Download only specific data sets
+  python scripts/download_doj_disclosures.py -d 9   # Download Data Set 9 only (standalone)
   
 Adding new files (PDFs, audio, video):
   python run.py add /path/to/file.pdf                    # Add single PDF
@@ -429,7 +498,8 @@ Supported formats:
   
 Data Sources:
   Court Records: https://www.justice.gov/epstein/court-records
-  DOJ Disclosures: https://www.justice.gov/epstein/doj-disclosures
+  DOJ Disclosures: https://www.justice.gov/epstein/doj-disclosures (Data Sets 1-11)
+  FOIA: https://www.justice.gov/epstein/foia
         """
     )
     
@@ -450,6 +520,8 @@ Data Sources:
                         help="Force complete setup (extract + index)")
     parser.add_argument("--reindex", action="store_true",
                         help="Rebuild the search index before starting server")
+    parser.add_argument("--doj-datasets", type=str, default=None,
+                        help="Comma-separated DOJ data sets to download (e.g., '9,10,11'). Default: 9,10,11")
     
     args = parser.parse_args()
     
@@ -579,6 +651,18 @@ Data Sources:
     # Step 1: Check/download court records
     if args.command in ["download", "setup", "all"] or args.full_setup:
         setup_court_records(force=force)
+    
+    # Step 1b: Check/download DOJ Disclosures (Data Sets 9, 10, 11)
+    if args.command in ["download", "setup", "all"] or args.full_setup:
+        # Parse --doj-datasets if provided
+        doj_datasets = None
+        if hasattr(args, 'doj_datasets') and args.doj_datasets:
+            try:
+                doj_datasets = [int(x.strip()) for x in args.doj_datasets.split(',')]
+            except ValueError:
+                print(f"⚠ Invalid --doj-datasets format: {args.doj_datasets}")
+        setup_doj_disclosures(force=force, datasets=doj_datasets)
+        
         if args.command == "download":
             print("\n✅ Download complete. Run 'python run.py setup' to index the files.")
             sys.exit(0)
