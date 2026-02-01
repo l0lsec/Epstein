@@ -2900,6 +2900,149 @@ async def seed_keywords(request: Request, x_api_key: str = Header(None)):
     return {"success": True, "keywords_added": count}
 
 
+# =============================================================================
+# DOJ Completeness & Missing Documents API (Admin Only)
+# =============================================================================
+
+@app.get("/api/admin/doj-completeness")
+async def get_doj_completeness(request: Request, x_api_key: str = Header(None)):
+    """Get DOJ download completeness statistics (requires admin authentication)"""
+    is_authorized, error = verify_admin_access(request, x_api_key)
+    if not is_authorized:
+        raise HTTPException(status_code=401, detail=error)
+    
+    if not db:
+        raise HTTPException(status_code=503, detail="Database not initialized")
+    
+    # Get manifest stats
+    manifest_stats = db.get_manifest_stats()
+    
+    # Get missing documents stats
+    missing_stats = db.get_missing_documents_stats()
+    
+    return {
+        "manifest": manifest_stats,
+        "missing": missing_stats
+    }
+
+
+@app.get("/api/admin/missing-documents")
+async def get_missing_documents(
+    request: Request,
+    x_api_key: str = Header(None),
+    dataset: int = None
+):
+    """Get all missing (404) documents (requires admin authentication)
+    
+    Query params:
+        dataset: Filter by dataset number (optional)
+    """
+    is_authorized, error = verify_admin_access(request, x_api_key)
+    if not is_authorized:
+        raise HTTPException(status_code=401, detail=error)
+    
+    if not db:
+        raise HTTPException(status_code=503, detail="Database not initialized")
+    
+    missing_docs = db.get_missing_documents(dataset_num=dataset)
+    
+    return {
+        "missing_documents": missing_docs,
+        "total": len(missing_docs)
+    }
+
+
+@app.get("/api/admin/doj-manifest")
+async def get_doj_manifest(
+    request: Request,
+    x_api_key: str = Header(None),
+    dataset: int = None,
+    status: str = None
+):
+    """Get DOJ manifest entries (requires admin authentication)
+    
+    Query params:
+        dataset: Filter by dataset number (optional)
+        status: Filter by status - 'found', 'downloaded', '404', 'failed' (optional)
+    """
+    is_authorized, error = verify_admin_access(request, x_api_key)
+    if not is_authorized:
+        raise HTTPException(status_code=401, detail=error)
+    
+    if not db:
+        raise HTTPException(status_code=503, detail="Database not initialized")
+    
+    manifest = db.get_manifest(dataset_num=dataset, status=status)
+    
+    return {
+        "manifest": manifest,
+        "total": len(manifest)
+    }
+
+
+@app.get("/api/admin/not-downloaded")
+async def get_not_downloaded(
+    request: Request,
+    x_api_key: str = Header(None),
+    dataset: int = None
+):
+    """Get files that are not successfully downloaded (requires admin authentication)
+    
+    Query params:
+        dataset: Filter by dataset number (optional)
+    """
+    is_authorized, error = verify_admin_access(request, x_api_key)
+    if not is_authorized:
+        raise HTTPException(status_code=401, detail=error)
+    
+    if not db:
+        raise HTTPException(status_code=503, detail="Database not initialized")
+    
+    not_downloaded = db.get_not_downloaded(dataset_num=dataset)
+    
+    return {
+        "not_downloaded": not_downloaded,
+        "total": len(not_downloaded)
+    }
+
+
+@app.delete("/api/admin/missing-documents/{filename}")
+async def remove_missing_document(
+    filename: str,
+    request: Request,
+    x_api_key: str = Header(None),
+    dataset: int = None
+):
+    """Remove a document from missing list (requires admin authentication)
+    
+    Use this if a file becomes available later.
+    """
+    is_authorized, error = verify_admin_access(request, x_api_key)
+    if not is_authorized:
+        raise HTTPException(status_code=401, detail=error)
+    
+    if not db:
+        raise HTTPException(status_code=503, detail="Database not initialized")
+    
+    if dataset is None:
+        raise HTTPException(status_code=400, detail="dataset query parameter required")
+    
+    client_ip, request_id = get_client_info(request)
+    
+    success = db.remove_missing_document(filename, dataset)
+    
+    if success:
+        security_logger.log_admin_action(
+            client_ip=client_ip,
+            request_id=request_id,
+            action="remove_missing_document",
+            target=filename,
+            details=f"Removed from dataset {dataset}"
+        )
+    
+    return {"success": success}
+
+
 # Mount static files last (if frontend exists)
 if STATIC_PATH.exists():
     app.mount("/static", StaticFiles(directory=str(STATIC_PATH)), name="static")

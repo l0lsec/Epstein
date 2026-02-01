@@ -131,7 +131,7 @@ def setup_doj_disclosures(force=False, datasets=None):
     
     Args:
         force: Force re-download of all files
-        datasets: List of specific data set numbers to download (default: 9, 10, 11)
+        datasets: List of specific data set numbers to download (default: 9, 10, 11, 12)
     """
     print("\n" + "="*60)
     print("STEP 1b: CHECKING DOJ DISCLOSURES")
@@ -139,9 +139,9 @@ def setup_doj_disclosures(force=False, datasets=None):
     
     doj_dir = BASE_PATH / "DOJ Disclosures"
     
-    # Default to new data sets (9, 10, 11) if not specified
+    # Default to new data sets (9, 10, 11, 12) if not specified
     if datasets is None:
-        datasets = [9, 10, 11]
+        datasets = [9, 10, 11, 12]
     
     # Quick check - if we have the data set folders with files, skip
     if not force and doj_dir.exists():
@@ -476,9 +476,9 @@ Examples:
   python run.py --full-setup             # Force re-download and rebuild everything
   python run.py                          # Run setup (if needed) then start server
   
-DOJ Disclosures (Data Sets 9, 10, 11 released January 2026):
+DOJ Disclosures (Data Sets 9, 10, 11, 12 released January 2026):
   python run.py download                             # Download all sources including new data sets
-  python run.py download --doj-datasets 9,10,11     # Download only specific data sets
+  python run.py download --doj-datasets 9,10,11,12     # Download only specific data sets
   python scripts/download_doj_disclosures.py -d 9   # Download Data Set 9 only (standalone)
   
 Adding new files (PDFs, audio, video):
@@ -498,7 +498,7 @@ Supported formats:
   
 Data Sources:
   Court Records: https://www.justice.gov/epstein/court-records
-  DOJ Disclosures: https://www.justice.gov/epstein/doj-disclosures (Data Sets 1-11)
+  DOJ Disclosures: https://www.justice.gov/epstein/doj-disclosures (Data Sets 1-12)
   FOIA: https://www.justice.gov/epstein/foia
         """
     )
@@ -521,7 +521,7 @@ Data Sources:
     parser.add_argument("--reindex", action="store_true",
                         help="Rebuild the search index before starting server")
     parser.add_argument("--doj-datasets", type=str, default=None,
-                        help="Comma-separated DOJ data sets to download (e.g., '9,10,11'). Default: 9,10,11")
+                        help="Comma-separated DOJ data sets to download (e.g., '9,10,11,12'). Default: 9,10,11,12")
     
     args = parser.parse_args()
     
@@ -652,7 +652,7 @@ Data Sources:
     if args.command in ["download", "setup", "all"] or args.full_setup:
         setup_court_records(force=force)
     
-    # Step 1b: Check/download DOJ Disclosures (Data Sets 9, 10, 11)
+    # Step 1b: Check/download DOJ Disclosures (Data Sets 9, 10, 11, 12)
     if args.command in ["download", "setup", "all"] or args.full_setup:
         # Parse --doj-datasets if provided
         doj_datasets = None

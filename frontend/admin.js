@@ -1613,7 +1613,8 @@ async function loadContentData() {
     await Promise.all([
         loadAskAIStatus(),
         loadPinnedDocuments(),
-        loadKeywords()
+        loadKeywords(),
+        loadDojCompleteness()
     ]);
 }
 
@@ -2205,4 +2206,214 @@ window.submitKeyword = submitKeyword;
 window.deleteKeyword = deleteKeyword;
 window.recountKeywords = recountKeywords;
 window.seedKeywords = seedKeywords;
+
+// =============================================================================
+// DOJ Download Completeness Functions
+// =============================================================================
+
+let dojCompletenessData = null;
+let missingDocumentsData = [];
+
+async function loadDojCompleteness() {
+    try {
+        const response = await authFetch(`${window.location.origin}/api/admin/doj-completeness`);
+        if (!response.ok) throw new Error('Failed to load completeness data');
+        dojCompletenessData = await response.json();
+        renderDojCompletenessStats();
+        await loadMissingDocuments();
+    } catch (error) {
+        console.error('Error loading DOJ completeness:', error);
+        const statsEl = document.getElementById('doj-completeness-stats');
+        if (statsEl) {
+            statsEl.innerHTML = '<div style="color: var(--danger);">Error loading completeness data. Make sure you have run the download script first.</div>';
+        }
+    }
+}
+
+function renderDojCompletenessStats() {
+    const statsEl = document.getElementById('doj-completeness-stats');
+    if (!statsEl || !dojCompletenessData) return;
+    
+    const manifest = dojCompletenessData.manifest || {};
+    const missing = dojCompletenessData.missing || {};
+    
+    // Build dataset cards
+    let html = '<div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: var(--space-md); margin-bottom: var(--space-lg);">';
+    
+    // Overall stats card
+    html += `
+        <div style="background: var(--bg-secondary); border: 1px solid var(--border); border-radius: 8px; padding: var(--space-md);">
+            <div style="font-size: 0.85rem; color: var(--text-muted); margin-bottom: var(--space-xs);">Total Files Tracked</div>
+            <div style="font-size: 1.5rem; font-weight: 600; color: var(--accent);">${formatNumber(manifest.total || 0)}</div>
+        </div>
+    `;
+    
+    // Missing count card
+    html += `
+        <div style="background: var(--danger-dim); border: 1px solid var(--danger); border-radius: 8px; padding: var(--space-md);">
+            <div style="font-size: 0.85rem; color: var(--text-muted); margin-bottom: var(--space-xs);">Missing (404)</div>
+            <div style="font-size: 1.5rem; font-weight: 600; color: var(--danger);">${formatNumber(missing.total || 0)}</div>
+        </div>
+    `;
+    
+    html += '</div>';
+    
+    // Per-dataset breakdown
+    if (manifest.by_dataset && Object.keys(manifest.by_dataset).length > 0) {
+        html += '<h4 style="margin-bottom: var(--space-md); color: var(--text-secondary);">Per-Dataset Status</h4>';
+        html += '<div style="overflow-x: auto;"><table style="width: 100%; border-collapse: collapse;">';
+        html += `<thead>
+            <tr style="border-bottom: 1px solid var(--border);">
+                <th style="text-align: left; padding: var(--space-sm); color: var(--text-muted);">Dataset</th>
+                <th style="text-align: right; padding: var(--space-sm); color: var(--text-muted);">Total Found</th>
+                <th style="text-align: right; padding: var(--space-sm); color: var(--success);">Downloaded</th>
+                <th style="text-align: right; padding: var(--space-sm); color: var(--danger);">404</th>
+                <th style="text-align: right; padding: var(--space-sm); color: var(--warning);">Failed</th>
+                <th style="text-align: right; padding: var(--space-sm); color: var(--text-muted);">Completion</th>
+            </tr>
+        </thead><tbody>`;
+        
+        for (const [dataset, stats] of Object.entries(manifest.by_dataset)) {
+            const total = stats.total || 0;
+            const downloaded = stats.downloaded || 0;
+            const notFound = stats['404'] || 0;
+            const failed = stats.failed || 0;
+            const completionPct = total > 0 ? ((downloaded / total) * 100).toFixed(1) : '0.0';
+            
+            html += `<tr style="border-bottom: 1px solid var(--border);">
+                <td style="padding: var(--space-sm);">Data Set ${dataset}</td>
+                <td style="text-align: right; padding: var(--space-sm);">${formatNumber(total)}</td>
+                <td style="text-align: right; padding: var(--space-sm); color: var(--success);">${formatNumber(downloaded)}</td>
+                <td style="text-align: right; padding: var(--space-sm); color: var(--danger);">${formatNumber(notFound)}</td>
+                <td style="text-align: right; padding: var(--space-sm); color: var(--warning);">${formatNumber(failed)}</td>
+                <td style="text-align: right; padding: var(--space-sm);">
+                    <span style="color: ${parseFloat(completionPct) > 95 ? 'var(--success)' : 'var(--warning)'};">${completionPct}%</span>
+                </td>
+            </tr>`;
+        }
+        
+        html += '</tbody></table></div>';
+    } else {
+        html += '<p style="color: var(--text-muted);">No manifest data available. Run the download script to start tracking files.</p>';
+    }
+    
+    statsEl.innerHTML = html;
+}
+
+async function loadMissingDocuments() {
+    const datasetFilter = document.getElementById('doj-dataset-filter');
+    const dataset = datasetFilter ? datasetFilter.value : '';
+    
+    try {
+        let url = `${window.location.origin}/api/admin/missing-documents`;
+        if (dataset) {
+            url += `?dataset=${dataset}`;
+        }
+        
+        const response = await authFetch(url);
+        if (!response.ok) throw new Error('Failed to load missing documents');
+        const data = await response.json();
+        missingDocumentsData = data.missing_documents || [];
+        renderMissingDocuments();
+    } catch (error) {
+        console.error('Error loading missing documents:', error);
+        const listEl = document.getElementById('missing-docs-list');
+        if (listEl) {
+            listEl.innerHTML = '<div style="color: var(--text-muted);">No missing documents found.</div>';
+        }
+    }
+}
+
+function renderMissingDocuments() {
+    const listEl = document.getElementById('missing-docs-list');
+    if (!listEl) return;
+    
+    if (!missingDocumentsData || missingDocumentsData.length === 0) {
+        listEl.innerHTML = '<div style="text-align: center; padding: var(--space-lg); color: var(--text-muted);">No missing documents (404s) found.</div>';
+        return;
+    }
+    
+    let html = '<table style="width: 100%; border-collapse: collapse;">';
+    html += `<thead>
+        <tr style="border-bottom: 1px solid var(--border);">
+            <th style="text-align: left; padding: var(--space-sm); color: var(--text-muted);">Filename</th>
+            <th style="text-align: left; padding: var(--space-sm); color: var(--text-muted);">Dataset</th>
+            <th style="text-align: left; padding: var(--space-sm); color: var(--text-muted);">Page</th>
+            <th style="text-align: left; padding: var(--space-sm); color: var(--text-muted);">First Seen</th>
+            <th style="text-align: right; padding: var(--space-sm); color: var(--text-muted);">Checks</th>
+            <th style="text-align: center; padding: var(--space-sm); color: var(--text-muted);">Link</th>
+        </tr>
+    </thead><tbody>`;
+    
+    for (const doc of missingDocumentsData) {
+        const firstSeen = doc.first_seen ? new Date(doc.first_seen).toLocaleDateString() : 'Unknown';
+        
+        html += `<tr style="border-bottom: 1px solid var(--border);">
+            <td style="padding: var(--space-sm); font-family: var(--font-mono); font-size: 0.85rem;">${escapeHtml(doc.filename)}</td>
+            <td style="padding: var(--space-sm);">Set ${doc.dataset_num}</td>
+            <td style="padding: var(--space-sm);">${doc.page_found_on !== null ? doc.page_found_on + 1 : '-'}</td>
+            <td style="padding: var(--space-sm);">${firstSeen}</td>
+            <td style="text-align: right; padding: var(--space-sm);">${doc.check_count || 1}</td>
+            <td style="text-align: center; padding: var(--space-sm);">
+                <a href="${escapeHtml(doc.url)}" target="_blank" rel="noopener" style="color: var(--accent);" title="Open on DOJ">
+                    <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>
+                        <polyline points="15 3 21 3 21 9"/>
+                        <line x1="10" y1="14" x2="21" y2="3"/>
+                    </svg>
+                </a>
+            </td>
+        </tr>`;
+    }
+    
+    html += '</tbody></table>';
+    listEl.innerHTML = html;
+}
+
+function filterDojData() {
+    loadMissingDocuments();
+}
+
+async function refreshDojCompleteness() {
+    await loadDojCompleteness();
+}
+
+function exportMissingDocs() {
+    if (!missingDocumentsData || missingDocumentsData.length === 0) {
+        alert('No missing documents to export.');
+        return;
+    }
+    
+    // Create CSV content
+    let csv = 'Filename,URL,Dataset,Page Found,First Seen,Last Checked,Check Count\n';
+    for (const doc of missingDocumentsData) {
+        csv += `"${doc.filename}","${doc.url}",${doc.dataset_num},${doc.page_found_on || ''},"${doc.first_seen || ''}","${doc.last_checked || ''}",${doc.check_count || 1}\n`;
+    }
+    
+    // Download
+    const blob = new Blob([csv], { type: 'text/csv' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `missing_documents_${new Date().toISOString().split('T')[0]}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+}
+
+function escapeHtml(str) {
+    if (!str) return '';
+    return str.replace(/&/g, '&amp;')
+              .replace(/</g, '&lt;')
+              .replace(/>/g, '&gt;')
+              .replace(/"/g, '&quot;')
+              .replace(/'/g, '&#039;');
+}
+
+// Export DOJ functions
+window.loadDojCompleteness = loadDojCompleteness;
+window.refreshDojCompleteness = refreshDojCompleteness;
+window.filterDojData = filterDojData;
+window.exportMissingDocs = exportMissingDocs;
 

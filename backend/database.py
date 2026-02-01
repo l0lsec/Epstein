@@ -144,6 +144,41 @@ class Database:
             conn.execute("CREATE INDEX IF NOT EXISTS idx_keywords_category ON keywords(category)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_keywords_active ON keywords(is_active)")
             conn.commit()
+            
+            # Missing documents table for tracking 404s from DOJ website
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS missing_documents (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    filename TEXT NOT NULL,
+                    url TEXT NOT NULL,
+                    dataset_num INTEGER NOT NULL,
+                    page_found_on INTEGER,
+                    first_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    last_checked TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    check_count INTEGER DEFAULT 1,
+                    UNIQUE(filename, dataset_num)
+                )
+            """)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_missing_dataset ON missing_documents(dataset_num)")
+            conn.commit()
+            
+            # DOJ manifest table for tracking all files found on website (completeness tracking)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS doj_manifest (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    filename TEXT NOT NULL,
+                    url TEXT NOT NULL,
+                    dataset_num INTEGER NOT NULL,
+                    page_found_on INTEGER,
+                    status TEXT DEFAULT 'found',
+                    first_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(filename, dataset_num)
+                )
+            """)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_manifest_dataset ON doj_manifest(dataset_num)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_manifest_status ON doj_manifest(status)")
+            conn.commit()
     
     def rebuild_fts(self):
         """Rebuild the FTS5 index to fix sync issues"""
@@ -945,6 +980,309 @@ class Database:
             conn.commit()
             
             return len(default_keywords)
+    
+    # =========================================================================
+    # Missing Documents Methods (404 Tracking)
+    # =========================================================================
+    
+    def add_missing_document(self, filename: str, url: str, dataset_num: int, 
+                             page_found_on: int = None) -> bool:
+        """Add or update a missing (404) document
+        
+        Args:
+            filename: The filename (e.g., "EFTA00123456.pdf")
+            url: Full URL to the file
+            dataset_num: Dataset number (9, 10, 11, etc.)
+            page_found_on: Page number where the link was found
+        
+        Returns:
+            True if added/updated successfully
+        """
+        with self.get_connection() as conn:
+            try:
+                # Try to insert, or update if exists
+                cursor = conn.execute("""
+                    INSERT INTO missing_documents (filename, url, dataset_num, page_found_on)
+                    VALUES (?, ?, ?, ?)
+                    ON CONFLICT(filename, dataset_num) DO UPDATE SET
+                        last_checked = CURRENT_TIMESTAMP,
+                        check_count = check_count + 1
+                """, (filename, url, dataset_num, page_found_on))
+                conn.commit()
+                return True
+            except Exception as e:
+                print(f"Error adding missing document: {e}")
+                return False
+    
+    def get_missing_documents(self, dataset_num: int = None) -> List[Dict[str, Any]]:
+        """Get all missing documents, optionally filtered by dataset
+        
+        Args:
+            dataset_num: If provided, filter to this dataset only
+        
+        Returns:
+            List of missing document dictionaries
+        """
+        with self.get_connection() as conn:
+            if dataset_num is not None:
+                cursor = conn.execute("""
+                    SELECT id, filename, url, dataset_num, page_found_on, 
+                           first_seen, last_checked, check_count
+                    FROM missing_documents
+                    WHERE dataset_num = ?
+                    ORDER BY filename
+                """, (dataset_num,))
+            else:
+                cursor = conn.execute("""
+                    SELECT id, filename, url, dataset_num, page_found_on,
+                           first_seen, last_checked, check_count
+                    FROM missing_documents
+                    ORDER BY dataset_num, filename
+                """)
+            return [dict(row) for row in cursor.fetchall()]
+    
+    def remove_missing_document(self, filename: str, dataset_num: int) -> bool:
+        """Remove a document from missing list (e.g., if it becomes available)
+        
+        Returns:
+            True if removed, False if not found
+        """
+        with self.get_connection() as conn:
+            cursor = conn.execute(
+                "DELETE FROM missing_documents WHERE filename = ? AND dataset_num = ?",
+                (filename, dataset_num)
+            )
+            conn.commit()
+            return cursor.rowcount > 0
+    
+    def get_missing_documents_stats(self) -> Dict[str, Any]:
+        """Get statistics on missing documents
+        
+        Returns:
+            Dictionary with total count and counts by dataset
+        """
+        with self.get_connection() as conn:
+            # Total count
+            cursor = conn.execute("SELECT COUNT(*) FROM missing_documents")
+            total = cursor.fetchone()[0]
+            
+            # By dataset
+            cursor = conn.execute("""
+                SELECT dataset_num, COUNT(*) as count
+                FROM missing_documents
+                GROUP BY dataset_num
+                ORDER BY dataset_num
+            """)
+            by_dataset = [{"dataset_num": row[0], "count": row[1]} for row in cursor.fetchall()]
+            
+            return {
+                "total": total,
+                "by_dataset": by_dataset
+            }
+    
+    # =========================================================================
+    # DOJ Manifest Methods (Completeness Tracking)
+    # =========================================================================
+    
+    def add_to_manifest(self, filename: str, url: str, dataset_num: int,
+                        page_found_on: int = None, status: str = 'found') -> bool:
+        """Add a file to the DOJ manifest
+        
+        Args:
+            filename: The filename (e.g., "EFTA00123456.pdf")
+            url: Full URL to the file
+            dataset_num: Dataset number
+            page_found_on: Page number where the link was found
+            status: Status - 'found', 'downloaded', '404', 'failed'
+        
+        Returns:
+            True if added successfully
+        """
+        with self.get_connection() as conn:
+            try:
+                cursor = conn.execute("""
+                    INSERT INTO doj_manifest (filename, url, dataset_num, page_found_on, status)
+                    VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT(filename, dataset_num) DO UPDATE SET
+                        last_updated = CURRENT_TIMESTAMP
+                """, (filename, url, dataset_num, page_found_on, status))
+                conn.commit()
+                return True
+            except Exception as e:
+                print(f"Error adding to manifest: {e}")
+                return False
+    
+    def update_manifest_status(self, filename: str, dataset_num: int, status: str) -> bool:
+        """Update the status of a file in the manifest
+        
+        Args:
+            filename: The filename
+            dataset_num: Dataset number
+            status: New status - 'found', 'downloaded', '404', 'failed'
+        
+        Returns:
+            True if updated, False if not found
+        """
+        with self.get_connection() as conn:
+            cursor = conn.execute("""
+                UPDATE doj_manifest 
+                SET status = ?, last_updated = CURRENT_TIMESTAMP
+                WHERE filename = ? AND dataset_num = ?
+            """, (status, filename, dataset_num))
+            conn.commit()
+            return cursor.rowcount > 0
+    
+    def get_manifest(self, dataset_num: int = None, status: str = None) -> List[Dict[str, Any]]:
+        """Get manifest entries
+        
+        Args:
+            dataset_num: Filter by dataset number
+            status: Filter by status
+        
+        Returns:
+            List of manifest entries
+        """
+        with self.get_connection() as conn:
+            conditions = []
+            params = []
+            
+            if dataset_num is not None:
+                conditions.append("dataset_num = ?")
+                params.append(dataset_num)
+            
+            if status is not None:
+                conditions.append("status = ?")
+                params.append(status)
+            
+            sql = """
+                SELECT id, filename, url, dataset_num, page_found_on, status,
+                       first_seen, last_updated
+                FROM doj_manifest
+            """
+            
+            if conditions:
+                sql += " WHERE " + " AND ".join(conditions)
+            
+            sql += " ORDER BY dataset_num, filename"
+            
+            cursor = conn.execute(sql, params)
+            return [dict(row) for row in cursor.fetchall()]
+    
+    def get_manifest_stats(self) -> Dict[str, Any]:
+        """Get completeness statistics from manifest
+        
+        Returns:
+            Dictionary with total and per-dataset status counts
+        """
+        with self.get_connection() as conn:
+            # Overall counts by status
+            cursor = conn.execute("""
+                SELECT status, COUNT(*) as count
+                FROM doj_manifest
+                GROUP BY status
+            """)
+            overall = {row[0]: row[1] for row in cursor.fetchall()}
+            
+            # Per-dataset counts
+            cursor = conn.execute("""
+                SELECT dataset_num, status, COUNT(*) as count
+                FROM doj_manifest
+                GROUP BY dataset_num, status
+                ORDER BY dataset_num
+            """)
+            
+            by_dataset = {}
+            for row in cursor.fetchall():
+                dataset = row[0]
+                status = row[1]
+                count = row[2]
+                
+                if dataset not in by_dataset:
+                    by_dataset[dataset] = {'total': 0, 'downloaded': 0, '404': 0, 'failed': 0, 'found': 0}
+                
+                by_dataset[dataset][status] = count
+                by_dataset[dataset]['total'] += count
+            
+            # Total across all
+            cursor = conn.execute("SELECT COUNT(*) FROM doj_manifest")
+            total = cursor.fetchone()[0]
+            
+            return {
+                "total": total,
+                "overall": overall,
+                "by_dataset": by_dataset
+            }
+    
+    def get_not_downloaded(self, dataset_num: int = None) -> List[Dict[str, Any]]:
+        """Get files that are in manifest but not successfully downloaded
+        
+        Args:
+            dataset_num: Filter by dataset number
+        
+        Returns:
+            List of files with status != 'downloaded'
+        """
+        with self.get_connection() as conn:
+            if dataset_num is not None:
+                cursor = conn.execute("""
+                    SELECT id, filename, url, dataset_num, page_found_on, status,
+                           first_seen, last_updated
+                    FROM doj_manifest
+                    WHERE dataset_num = ? AND status != 'downloaded'
+                    ORDER BY filename
+                """, (dataset_num,))
+            else:
+                cursor = conn.execute("""
+                    SELECT id, filename, url, dataset_num, page_found_on, status,
+                           first_seen, last_updated
+                    FROM doj_manifest
+                    WHERE status != 'downloaded'
+                    ORDER BY dataset_num, filename
+                """)
+            return [dict(row) for row in cursor.fetchall()]
+    
+    def bulk_add_to_manifest(self, entries: List[Dict[str, Any]]) -> int:
+        """Bulk add entries to the manifest (more efficient for batch operations)
+        
+        Args:
+            entries: List of dicts with keys: filename, url, dataset_num, page_found_on, status
+        
+        Returns:
+            Number of entries added
+        """
+        if not entries:
+            return 0
+        
+        with self.get_connection() as conn:
+            cursor = conn.executemany("""
+                INSERT INTO doj_manifest (filename, url, dataset_num, page_found_on, status)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(filename, dataset_num) DO UPDATE SET
+                    last_updated = CURRENT_TIMESTAMP
+            """, [(e['filename'], e['url'], e['dataset_num'], 
+                   e.get('page_found_on'), e.get('status', 'found')) for e in entries])
+            conn.commit()
+            return len(entries)
+    
+    def clear_manifest(self, dataset_num: int = None) -> int:
+        """Clear manifest entries (use with caution)
+        
+        Args:
+            dataset_num: If provided, only clear this dataset
+        
+        Returns:
+            Number of entries deleted
+        """
+        with self.get_connection() as conn:
+            if dataset_num is not None:
+                cursor = conn.execute(
+                    "DELETE FROM doj_manifest WHERE dataset_num = ?",
+                    (dataset_num,)
+                )
+            else:
+                cursor = conn.execute("DELETE FROM doj_manifest")
+            conn.commit()
+            return cursor.rowcount
 
 
 class VectorStore:

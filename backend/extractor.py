@@ -149,7 +149,8 @@ class PDFExtractor:
         - Data Set 8: 9676-39024
         - Data Set 9: 39025-1262781 (released January 2026)
         - Data Set 10: 1262782-2212882 (released January 2026)
-        - Data Set 11: 2212883+ (released January 2026)
+        - Data Set 11: 2212883-2730264 (released January 2026)
+        - Data Set 12: 2730265+ (released January 2026)
         """
         import re
         
@@ -191,8 +192,10 @@ class PDFExtractor:
             return "Data Set 9"
         elif file_num < 2212883:
             return "Data Set 10"
-        else:
+        elif file_num < 2730265:
             return "Data Set 11"
+        else:
+            return "Data Set 12"
     
     def _categorize_file(self, filepath: Path) -> Dict[str, str]:
         """Categorize file based on path and filename"""
@@ -541,7 +544,8 @@ class ImageExtractor:
         - Data Set 8: 9676-39024
         - Data Set 9: 39025-1262781 (released January 2026)
         - Data Set 10: 1262782-2212882 (released January 2026)
-        - Data Set 11: 2212883+ (released January 2026)
+        - Data Set 11: 2212883-2730264 (released January 2026)
+        - Data Set 12: 2730265+ (released January 2026)
         """
         import re
         
@@ -583,8 +587,10 @@ class ImageExtractor:
             return "Data Set 9"
         elif file_num < 2212883:
             return "Data Set 10"
-        else:
+        elif file_num < 2730265:
             return "Data Set 11"
+        else:
+            return "Data Set 12"
     
     def _categorize_file(self, filepath: Path) -> Dict[str, str]:
         """Categorize file based on path and filename"""
@@ -991,7 +997,8 @@ class AudioVideoExtractor:
         - Data Set 8: 9676-39024
         - Data Set 9: 39025-1262781 (released January 2026)
         - Data Set 10: 1262782-2212882 (released January 2026)
-        - Data Set 11: 2212883+ (released January 2026)
+        - Data Set 11: 2212883-2730264 (released January 2026)
+        - Data Set 12: 2730265+ (released January 2026)
         """
         import re
         
@@ -1033,8 +1040,10 @@ class AudioVideoExtractor:
             return "Data Set 9"
         elif file_num < 2212883:
             return "Data Set 10"
-        else:
+        elif file_num < 2730265:
             return "Data Set 11"
+        else:
+            return "Data Set 12"
     
     def _categorize_file(self, filepath: Path) -> Dict[str, str]:
         """Categorize file based on path and filename"""

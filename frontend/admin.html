@@ -1812,6 +1812,62 @@
                 </div>
             </div>
 
+            <!-- DOJ Download Completeness -->
+            <div class="card" style="margin-bottom: var(--space-lg);">
+                <div class="card-header">
+                    <span class="card-title">📊 DOJ Download Completeness</span>
+                    <div style="display: flex; gap: var(--space-sm);">
+                        <button class="btn btn-sm" onclick="refreshDojCompleteness()">
+                            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M1 4v6h6M23 20v-6h-6"/>
+                                <path d="M20.49 9A9 9 0 005.64 5.64L1 10m22 4l-4.64 4.36A9 9 0 013.51 15"/>
+                            </svg>
+                            Refresh
+                        </button>
+                        <button class="btn btn-sm" onclick="exportMissingDocs()">
+                            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                                <polyline points="7 10 12 15 17 10"/>
+                                <line x1="12" y1="15" x2="12" y2="3"/>
+                            </svg>
+                            Export CSV
+                        </button>
+                    </div>
+                </div>
+                <div class="card-body">
+                    <p style="margin-bottom: var(--space-lg); font-size: 0.9rem; color: var(--text-muted);">
+                        Track download completeness from DOJ website. This shows all files found during scraping and their download status.
+                    </p>
+                    
+                    <!-- Completeness Stats -->
+                    <div id="doj-completeness-stats" style="margin-bottom: var(--space-lg);">
+                        <div class="loading"><span class="spinner"></span>Loading completeness data...</div>
+                    </div>
+                    
+                    <!-- Dataset Filter -->
+                    <div style="margin-bottom: var(--space-md);">
+                        <label style="margin-right: var(--space-sm); color: var(--text-secondary);">Filter by Dataset:</label>
+                        <select id="doj-dataset-filter" class="login-input" style="width: auto; display: inline-block; min-width: 150px;" onchange="filterDojData()">
+                            <option value="">All Datasets</option>
+                            <option value="9">Data Set 9</option>
+                            <option value="10">Data Set 10</option>
+                            <option value="11">Data Set 11</option>
+                        </select>
+                    </div>
+                    
+                    <!-- Missing Documents Table -->
+                    <div style="margin-bottom: var(--space-md);">
+                        <h4 style="margin-bottom: var(--space-sm); color: var(--danger);">Missing Documents (404s)</h4>
+                        <p style="margin-bottom: var(--space-md); font-size: 0.85rem; color: var(--text-muted);">
+                            Files linked on DOJ website but returning 404 (Not Found). These may have been removed.
+                        </p>
+                    </div>
+                    <div id="missing-docs-list" style="max-height: 400px; overflow-y: auto;">
+                        <div class="loading"><span class="spinner"></span>Loading...</div>
+                    </div>
+                </div>
+            </div>
+
             <!-- Add/Edit Keyword Modal -->
             <div id="keyword-modal" class="modal-overlay" style="display: none;">
                 <div class="modal-content" style="max-width: 500px;">
