@@ -9,7 +9,9 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 import sys
 import subprocess
 import shutil
+import json
 from pathlib import Path
+from datetime import datetime
 from dotenv import load_dotenv
 
 # Load environment variables from .env file
@@ -18,6 +20,64 @@ load_dotenv()
 BASE_PATH = Path(__file__).parent
 BACKEND_PATH = BASE_PATH / "backend"
 SCRIPTS_PATH = BASE_PATH / "scripts"
+MAINTENANCE_LOCK = BASE_PATH / ".maintenance"
+
+
+def enable_maintenance(message: str = "Indexing new documents..."):
+    """Create maintenance lock file to trigger maintenance mode in server"""
+    try:
+        MAINTENANCE_LOCK.write_text(json.dumps({
+            "started": datetime.now().isoformat(),
+            "message": message
+        }))
+        print("🔧 Maintenance mode ENABLED - users will see maintenance page")
+    except Exception as e:
+        print(f"⚠ Could not enable maintenance mode: {e}")
+
+
+def disable_maintenance():
+    """Remove maintenance lock file to restore normal site operation"""
+    try:
+        if MAINTENANCE_LOCK.exists():
+            MAINTENANCE_LOCK.unlink()
+            print("✅ Maintenance mode DISABLED - site is back online")
+    except Exception as e:
+        print(f"⚠ Could not disable maintenance mode: {e}")
+
+
+def update_maintenance_progress(step: int, step_name: str, current: int, total: int, message: str = ""):
+    """Update maintenance progress for real-time display on maintenance page
+    
+    Args:
+        step: Current step number (1-5)
+        step_name: Name of current step (e.g., "Extracting PDFs")
+        current: Current item being processed
+        total: Total items to process
+        message: Optional status message
+    """
+    if not MAINTENANCE_LOCK.exists():
+        return
+    
+    try:
+        # Read existing data to preserve started time
+        existing = json.loads(MAINTENANCE_LOCK.read_text())
+        started = existing.get("started", datetime.now().isoformat())
+    except:
+        started = datetime.now().isoformat()
+    
+    try:
+        progress = {
+            "started": started,
+            "step": step,
+            "step_name": step_name,
+            "current": current,
+            "total": total,
+            "percent": int((current / total) * 100) if total > 0 else 0,
+            "message": message
+        }
+        MAINTENANCE_LOCK.write_text(json.dumps(progress))
+    except Exception as e:
+        pass  # Don't interrupt processing for progress update failures
 
 
 def check_dependencies():
@@ -298,7 +358,24 @@ def extract_all_media(force=False):
     
     print("\n  Starting extraction (this may take a while)...")
     extractor = MediaExtractor(str(BASE_PATH))
-    results = extractor.extract_all(max_workers=8, force=force)
+    
+    # Create progress callbacks for each extraction type
+    def pdf_progress(current, total):
+        update_maintenance_progress(1, "Extracting PDFs", current, total, f"Processing PDF {current} of {total}")
+    
+    def image_progress(current, total):
+        update_maintenance_progress(2, "Extracting Images (OCR)", current, total, f"Processing image {current} of {total}")
+    
+    def media_progress(current, total):
+        update_maintenance_progress(3, "Transcribing Media", current, total, f"Transcribing file {current} of {total}")
+    
+    results = extractor.extract_all(
+        max_workers=8, 
+        force=force,
+        pdf_progress_callback=pdf_progress,
+        image_progress_callback=image_progress,
+        media_progress_callback=media_progress
+    )
     
     print(f"\n✓ Extraction complete:")
     print(f"  📄 PDFs   - Success: {results['pdf']['success']}, Failed: {results['pdf']['failed']}, Skipped: {results['pdf']['skipped']}")
@@ -355,7 +432,19 @@ def build_index(force: bool = False):
     sys.path.insert(0, str(BACKEND_PATH))
     from database import build_index as db_build_index
     
-    db_build_index(str(BASE_PATH), force=force)
+    # Create progress callbacks for indexing steps
+    def index_progress(current, total):
+        update_maintenance_progress(4, "Building Search Index", current, total, f"Indexing document {current} of {total}")
+    
+    def embedding_progress(current, total):
+        update_maintenance_progress(5, "Generating AI Embeddings", current, total, f"Embedding {current} of {total}")
+    
+    db_build_index(
+        str(BASE_PATH), 
+        force=force,
+        index_progress_callback=index_progress,
+        embedding_progress_callback=embedding_progress
+    )
     print("✓ Index built successfully")
 
 
@@ -678,12 +767,23 @@ Data Sources:
             sys.exit(0)
     
     # Step 2: Extract text from PDFs and transcribe media
-    if args.command in ["extract", "setup", "all"] or args.full_setup:
-        extract_all_media(force=force)
+    # Enable maintenance mode for extraction and indexing operations
+    maintenance_enabled = False
+    if args.command in ["extract", "setup", "all"] or args.full_setup or args.reindex:
+        enable_maintenance("Processing and indexing documents...")
+        maintenance_enabled = True
     
-    # Step 3: Build search index
-    if args.command in ["index", "setup", "all"] or args.full_setup or args.reindex:
-        build_index(force=force)
+    try:
+        if args.command in ["extract", "setup", "all"] or args.full_setup:
+            extract_all_media(force=force)
+        
+        # Step 3: Build search index
+        if args.command in ["index", "setup", "all"] or args.full_setup or args.reindex:
+            build_index(force=force)
+    finally:
+        # Always disable maintenance mode when done (or on error)
+        if maintenance_enabled:
+            disable_maintenance()
     
     # Step 4: Start server
     if args.command in ["server", "all"]:

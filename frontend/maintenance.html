@@ -1,0 +1,433 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Indexing in Progress | Epstein Library Files Public Archive</title>
+    <meta name="description" content="The Epstein Files Archive is currently indexing new documents. Please check back shortly.">
+    
+    <!-- Favicon -->
+    <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+    
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Crimson+Pro:wght@400;500;600&family=Source+Sans+3:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        :root {
+            --bg-primary: #0d0d14;
+            --bg-secondary: #12121a;
+            --bg-tertiary: #1a1a24;
+            --text-primary: #e8e6e3;
+            --text-secondary: #a8a5a0;
+            --accent-gold: #c9a227;
+            --accent-gold-dim: rgba(201, 162, 39, 0.3);
+            --border-color: rgba(201, 162, 39, 0.2);
+            --success-green: #4ade80;
+        }
+        
+        body {
+            font-family: 'Source Sans 3', -apple-system, BlinkMacSystemFont, sans-serif;
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            padding: 2rem;
+            text-align: center;
+        }
+        
+        .container {
+            max-width: 600px;
+            width: 100%;
+        }
+        
+        .logo {
+            font-family: 'Crimson Pro', serif;
+            font-size: 1.8rem;
+            font-weight: 600;
+            color: var(--accent-gold);
+            margin-bottom: 0.5rem;
+            letter-spacing: 0.05em;
+        }
+        
+        .logo-sub {
+            font-size: 0.85rem;
+            color: var(--text-secondary);
+            text-transform: uppercase;
+            letter-spacing: 0.15em;
+            margin-bottom: 3rem;
+        }
+        
+        .status-card {
+            background: var(--bg-secondary);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            padding: 2.5rem 2rem;
+            margin-bottom: 2rem;
+        }
+        
+        .status-icon {
+            width: 80px;
+            height: 80px;
+            margin: 0 auto 1.5rem;
+            position: relative;
+        }
+        
+        .spinner {
+            width: 80px;
+            height: 80px;
+            border: 3px solid var(--bg-tertiary);
+            border-top-color: var(--accent-gold);
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+        
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+        
+        .doc-icon {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            font-size: 1.8rem;
+        }
+        
+        h1 {
+            font-family: 'Crimson Pro', serif;
+            font-size: 1.8rem;
+            font-weight: 500;
+            color: var(--text-primary);
+            margin-bottom: 0.5rem;
+        }
+        
+        .step-indicator {
+            font-size: 0.95rem;
+            color: var(--accent-gold);
+            margin-bottom: 1.5rem;
+            font-weight: 500;
+        }
+        
+        .description {
+            color: var(--text-secondary);
+            font-size: 1rem;
+            line-height: 1.6;
+            margin-bottom: 1.5rem;
+        }
+        
+        .highlight {
+            color: var(--accent-gold);
+            font-weight: 500;
+        }
+        
+        .progress-container {
+            margin-bottom: 1rem;
+        }
+        
+        .progress-bar {
+            width: 100%;
+            height: 8px;
+            background: var(--bg-tertiary);
+            border-radius: 4px;
+            overflow: hidden;
+            margin-bottom: 0.75rem;
+        }
+        
+        .progress-bar-fill {
+            height: 100%;
+            background: var(--accent-gold);
+            border-radius: 4px;
+            transition: width 0.5s ease-out;
+            width: 0%;
+        }
+        
+        .progress-bar-fill.indeterminate {
+            background: linear-gradient(90deg, var(--accent-gold), var(--accent-gold-dim), var(--accent-gold));
+            background-size: 200% 100%;
+            animation: shimmer 2s ease-in-out infinite;
+            width: 100%;
+        }
+        
+        @keyframes shimmer {
+            0% { background-position: 200% 0; }
+            100% { background-position: -200% 0; }
+        }
+        
+        .progress-stats {
+            display: flex;
+            justify-content: space-between;
+            font-size: 0.9rem;
+            color: var(--text-secondary);
+        }
+        
+        .progress-percent {
+            color: var(--accent-gold);
+            font-weight: 600;
+        }
+        
+        .status-message {
+            font-size: 0.9rem;
+            color: var(--text-secondary);
+            margin-top: 1rem;
+            font-style: italic;
+        }
+        
+        .steps-list {
+            background: var(--bg-secondary);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            padding: 1.5rem 2rem;
+            margin-bottom: 2rem;
+        }
+        
+        .steps-title {
+            font-size: 0.85rem;
+            text-transform: uppercase;
+            letter-spacing: 0.1em;
+            color: var(--accent-gold);
+            margin-bottom: 1rem;
+            text-align: left;
+        }
+        
+        .step-item {
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+            padding: 0.5rem 0;
+            color: var(--text-secondary);
+            font-size: 0.95rem;
+            text-align: left;
+        }
+        
+        .step-item.active {
+            color: var(--text-primary);
+        }
+        
+        .step-item.completed {
+            color: var(--success-green);
+        }
+        
+        .step-icon {
+            width: 20px;
+            text-align: center;
+            font-family: monospace;
+        }
+        
+        .step-item.pending .step-icon::before {
+            content: "○";
+            color: var(--text-secondary);
+        }
+        
+        .step-item.active .step-icon::before {
+            content: "●";
+            color: var(--accent-gold);
+        }
+        
+        .step-item.completed .step-icon::before {
+            content: "✓";
+            color: var(--success-green);
+        }
+        
+        .refresh-note {
+            font-size: 0.85rem;
+            color: var(--text-secondary);
+        }
+        
+        .refresh-note span {
+            color: var(--accent-gold);
+        }
+        
+        .error-note {
+            color: #ef4444;
+            font-size: 0.85rem;
+            margin-top: 1rem;
+            display: none;
+        }
+        
+        @media (max-width: 480px) {
+            .status-card {
+                padding: 2rem 1.5rem;
+            }
+            
+            h1 {
+                font-size: 1.5rem;
+            }
+            
+            .description {
+                font-size: 0.95rem;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="logo">EPSTEIN FILES</div>
+        <div class="logo-sub">Public Archive</div>
+        
+        <div class="status-card">
+            <div class="status-icon">
+                <div class="spinner"></div>
+                <div class="doc-icon">&#128196;</div>
+            </div>
+            
+            <h1>Indexing New Documents</h1>
+            <div class="step-indicator" id="step-indicator">Step 1 of 5: Initializing...</div>
+            
+            <p class="description">
+                We're currently processing and indexing <span class="highlight">newly released DOJ documents</span> 
+                to make them searchable.
+            </p>
+            
+            <div class="progress-container">
+                <div class="progress-bar">
+                    <div class="progress-bar-fill indeterminate" id="progress-fill"></div>
+                </div>
+                <div class="progress-stats">
+                    <span id="progress-detail">Starting...</span>
+                    <span class="progress-percent" id="progress-percent">0%</span>
+                </div>
+            </div>
+            
+            <p class="status-message" id="status-message">Preparing to process documents...</p>
+        </div>
+        
+        <div class="steps-list">
+            <div class="steps-title">Processing Steps</div>
+            <div class="step-item pending" id="step-1">
+                <span class="step-icon"></span>
+                <span>Extracting text from PDFs</span>
+            </div>
+            <div class="step-item pending" id="step-2">
+                <span class="step-icon"></span>
+                <span>Extracting text from images (OCR)</span>
+            </div>
+            <div class="step-item pending" id="step-3">
+                <span class="step-icon"></span>
+                <span>Transcribing audio/video files</span>
+            </div>
+            <div class="step-item pending" id="step-4">
+                <span class="step-icon"></span>
+                <span>Building search index</span>
+            </div>
+            <div class="step-item pending" id="step-5">
+                <span class="step-icon"></span>
+                <span>Generating AI embeddings</span>
+            </div>
+        </div>
+        
+        <p class="refresh-note">
+            Progress updates <span>every 3 seconds</span>.
+            <br>The archive will be back online once indexing completes.
+        </p>
+        <p class="error-note" id="error-note">Connection lost. Retrying...</p>
+    </div>
+    
+    <script>
+        const STEP_NAMES = {
+            1: "Extracting PDFs",
+            2: "Extracting Images (OCR)",
+            3: "Transcribing Media",
+            4: "Building Search Index",
+            5: "Generating AI Embeddings"
+        };
+        
+        let lastStep = 0;
+        let errorCount = 0;
+        
+        async function updateProgress() {
+            try {
+                const response = await fetch('/api/maintenance-status');
+                const data = await response.json();
+                
+                // Hide error note on success
+                document.getElementById('error-note').style.display = 'none';
+                errorCount = 0;
+                
+                // If maintenance mode is off, reload the page
+                if (!data.active) {
+                    window.location.reload();
+                    return;
+                }
+                
+                const step = data.step || 0;
+                const stepName = data.step_name || STEP_NAMES[step] || "Processing...";
+                const current = data.current || 0;
+                const total = data.total || 0;
+                const percent = data.percent || 0;
+                const message = data.message || "Processing...";
+                
+                // Update step indicator
+                document.getElementById('step-indicator').textContent = 
+                    `Step ${step} of 5: ${stepName}`;
+                
+                // Update progress bar
+                const progressFill = document.getElementById('progress-fill');
+                if (total > 0 && percent > 0) {
+                    progressFill.classList.remove('indeterminate');
+                    progressFill.style.width = percent + '%';
+                } else {
+                    progressFill.classList.add('indeterminate');
+                }
+                
+                // Update progress details
+                if (total > 0) {
+                    document.getElementById('progress-detail').textContent = 
+                        `${current.toLocaleString()} / ${total.toLocaleString()} files`;
+                } else {
+                    document.getElementById('progress-detail').textContent = 'Scanning files...';
+                }
+                document.getElementById('progress-percent').textContent = percent + '%';
+                
+                // Update status message
+                document.getElementById('status-message').textContent = message;
+                
+                // Update step list
+                for (let i = 1; i <= 5; i++) {
+                    const stepEl = document.getElementById('step-' + i);
+                    stepEl.classList.remove('pending', 'active', 'completed');
+                    
+                    if (i < step) {
+                        stepEl.classList.add('completed');
+                    } else if (i === step) {
+                        stepEl.classList.add('active');
+                    } else {
+                        stepEl.classList.add('pending');
+                    }
+                }
+                
+                lastStep = step;
+                
+            } catch (error) {
+                console.error('Failed to fetch progress:', error);
+                errorCount++;
+                
+                if (errorCount >= 3) {
+                    document.getElementById('error-note').style.display = 'block';
+                }
+                
+                // If we can't reach the API multiple times, try reloading
+                // (maintenance might be done and server restarting)
+                if (errorCount >= 10) {
+                    window.location.reload();
+                }
+            }
+        }
+        
+        // Initial update
+        updateProgress();
+        
+        // Update every 3 seconds
+        setInterval(updateProgress, 3000);
+    </script>
+</body>
+</html>

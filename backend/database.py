@@ -1437,12 +1437,15 @@ class VectorStore:
         return len(self.embeddings)
 
 
-def build_index(base_path: str, force: bool = False):
+def build_index(base_path: str, force: bool = False, 
+                index_progress_callback=None, embedding_progress_callback=None):
     """Build database and vector store from extracted documents
     
     Args:
         base_path: Path to the project root
         force: If True, re-index all documents. If False, only index new documents.
+        index_progress_callback: Optional callback(current, total) for indexing progress
+        embedding_progress_callback: Optional callback(current, total) for embedding progress
     """
     from tqdm import tqdm
     
@@ -1512,6 +1515,10 @@ def build_index(base_path: str, force: bool = False):
     vector_batch = []
     db_batch = []
     batch_size = 256  # Increased from 100 for better GPU utilization
+    total_docs = len(to_index)
+    processed_count = 0
+    embedding_batches_total = (total_docs // batch_size) + (1 if total_docs % batch_size else 0)
+    embedding_batches_done = 0
     
     for file_id, file_info in tqdm(to_index.items(), desc="Indexing"):
         # Load full document data
@@ -1535,6 +1542,15 @@ def build_index(base_path: str, force: bool = False):
                 "category": doc.get("category", "Unknown")
             })
         
+        processed_count += 1
+        
+        # Call index progress callback
+        if index_progress_callback:
+            try:
+                index_progress_callback(processed_count, total_docs)
+            except:
+                pass
+        
         # Process batches
         if len(db_batch) >= batch_size:
             db.insert_documents_batch(db_batch)
@@ -1542,13 +1558,29 @@ def build_index(base_path: str, force: bool = False):
         
         if len(vector_batch) >= batch_size:
             vector_store.add_batch(vector_batch)
+            embedding_batches_done += 1
             vector_batch = []
+            
+            # Call embedding progress callback
+            if embedding_progress_callback:
+                try:
+                    embedding_progress_callback(embedding_batches_done * batch_size, total_docs)
+                except:
+                    pass
     
     # Process remaining batches
     if db_batch:
         db.insert_documents_batch(db_batch)
     if vector_batch:
         vector_store.add_batch(vector_batch)
+        embedding_batches_done += 1
+        
+        # Final embedding progress callback
+        if embedding_progress_callback:
+            try:
+                embedding_progress_callback(total_docs, total_docs)
+            except:
+                pass
     
     print(f"\nIndexing complete!")
     print(f"  SQLite documents: {db.get_stats()['total_documents']}")

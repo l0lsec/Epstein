@@ -425,8 +425,14 @@ class PDFExtractor:
                 if file.lower().endswith('.pdf'):
                     yield Path(root) / file
     
-    def extract_all(self, max_workers: int = 4, force: bool = False) -> Dict[str, Any]:
-        """Extract text from all PDFs"""
+    def extract_all(self, max_workers: int = 4, force: bool = False, progress_callback=None) -> Dict[str, Any]:
+        """Extract text from all PDFs
+        
+        Args:
+            max_workers: Number of parallel workers
+            force: Force re-extraction of all files
+            progress_callback: Optional callback(current, total) for progress updates
+        """
         pdfs = list(self.find_all_pdfs())
         print(f"Found {len(pdfs)} PDF files")
         
@@ -443,11 +449,21 @@ class PDFExtractor:
         
         print(f"Processing {len(to_process)} new files ({results['skipped']} already processed)")
         
+        processed_count = 0
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = {executor.submit(self.extract_pdf, pdf): pdf for pdf in to_process}
             
             for future in tqdm(as_completed(futures), total=len(to_process), desc="Extracting"):
                 pdf = futures[future]
+                processed_count += 1
+                
+                # Call progress callback if provided
+                if progress_callback:
+                    try:
+                        progress_callback(processed_count, len(to_process))
+                    except:
+                        pass
+                
                 try:
                     result = future.result()
                     if result and result.get("has_content"):
@@ -747,8 +763,14 @@ class ImageExtractor:
                 if ext in IMAGE_EXTENSIONS:
                     yield Path(root) / file
     
-    def extract_all(self, max_workers: int = 4, force: bool = False) -> Dict[str, Any]:
-        """Extract text from all images using OCR"""
+    def extract_all(self, max_workers: int = 4, force: bool = False, progress_callback=None) -> Dict[str, Any]:
+        """Extract text from all images using OCR
+        
+        Args:
+            max_workers: Number of parallel workers
+            force: Force re-extraction of all files
+            progress_callback: Optional callback(current, total) for progress updates
+        """
         # Check if Tesseract is available
         if not self._check_tesseract():
             print("⚠ Tesseract OCR not available. Install with:")
@@ -779,11 +801,21 @@ class ImageExtractor:
         print(f"Processing {len(to_process)} new files ({results['skipped']} already processed)")
         
         # Process with thread pool
+        processed_count = 0
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = {executor.submit(self.extract_image, img): img for img in to_process}
             
             for future in tqdm(as_completed(futures), total=len(to_process), desc="OCR Processing"):
                 img = futures[future]
+                processed_count += 1
+                
+                # Call progress callback if provided
+                if progress_callback:
+                    try:
+                        progress_callback(processed_count, len(to_process))
+                    except:
+                        pass
+                
                 try:
                     result = future.result()
                     if result and result.get("has_content"):
@@ -1484,8 +1516,14 @@ class AudioVideoExtractor:
             print(f"  ✗ Failed: {error}")
             results["failed"] += 1
     
-    def extract_all(self, force: bool = False, max_workers: int = 8) -> Dict[str, Any]:
-        """Transcribe all audio/video files with parallel processing support"""
+    def extract_all(self, force: bool = False, max_workers: int = 8, progress_callback=None) -> Dict[str, Any]:
+        """Transcribe all audio/video files with parallel processing support
+        
+        Args:
+            force: Force re-transcription of all files
+            max_workers: Number of parallel workers
+            progress_callback: Optional callback(current, total) for progress updates
+        """
         media_files = list(self.find_all_media())
         
         if not media_files:
@@ -1524,6 +1562,7 @@ class AudioVideoExtractor:
         
         # Timeout per file (5 minutes max)
         file_timeout = 300
+        processed_count = 0
         
         if use_mlx:
             # Pre-load MLX model to catch errors early
@@ -1536,6 +1575,14 @@ class AudioVideoExtractor:
             # Sequential for MLX (GPU already provides parallelism)
             for media in tqdm(to_process, desc="Transcribing"):
                 _reset_skip_flag()
+                processed_count += 1
+                
+                # Call progress callback if provided
+                if progress_callback:
+                    try:
+                        progress_callback(processed_count, len(to_process))
+                    except:
+                        pass
                 
                 try:
                     # Run transcription with timeout using a thread
@@ -1585,6 +1632,15 @@ class AudioVideoExtractor:
                 futures = {executor.submit(self.transcribe_file, m): m for m in to_process}
                 for future in tqdm(as_completed(futures), total=len(to_process), desc="Transcribing"):
                     media = futures[future]
+                    processed_count += 1
+                    
+                    # Call progress callback if provided
+                    if progress_callback:
+                        try:
+                            progress_callback(processed_count, len(to_process))
+                        except:
+                            pass
+                    
                     try:
                         result = future.result(timeout=file_timeout)
                         self._process_result(result, results)
@@ -1618,16 +1674,32 @@ class MediaExtractor:
         self.image_extractor = ImageExtractor(base_path)
         self.av_extractor = AudioVideoExtractor(base_path, api_key)
     
-    def extract_all(self, max_workers: int = 4, force: bool = False) -> Dict[str, Any]:
-        """Extract/transcribe all supported files"""
+    def extract_all(self, max_workers: int = 4, force: bool = False,
+                    pdf_progress_callback=None, image_progress_callback=None, 
+                    media_progress_callback=None) -> Dict[str, Any]:
+        """Extract/transcribe all supported files
+        
+        Args:
+            max_workers: Number of parallel workers
+            force: Force re-extraction of all files
+            pdf_progress_callback: Optional callback(current, total) for PDF progress
+            image_progress_callback: Optional callback(current, total) for image OCR progress
+            media_progress_callback: Optional callback(current, total) for media transcription progress
+        """
         print("\n📄 Processing PDF files...")
-        pdf_results = self.pdf_extractor.extract_all(max_workers=max_workers, force=force)
+        pdf_results = self.pdf_extractor.extract_all(
+            max_workers=max_workers, force=force, progress_callback=pdf_progress_callback
+        )
         
         print("\n🖼️  Processing image files (OCR)...")
-        image_results = self.image_extractor.extract_all(max_workers=max_workers, force=force)
+        image_results = self.image_extractor.extract_all(
+            max_workers=max_workers, force=force, progress_callback=image_progress_callback
+        )
         
         print("\n🎤 Processing audio/video files...")
-        av_results = self.av_extractor.extract_all(force=force, max_workers=max_workers)
+        av_results = self.av_extractor.extract_all(
+            force=force, max_workers=max_workers, progress_callback=media_progress_callback
+        )
         
         # Combine results
         return {

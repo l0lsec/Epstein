@@ -111,6 +111,7 @@ DB_PATH = BASE_PATH / "epstein.db"
 VECTOR_PATH = BASE_PATH / "vector_store"
 STATIC_PATH = BASE_PATH / "frontend"
 THUMBNAILS_PATH = BASE_PATH / "thumbnails"
+MAINTENANCE_LOCK = BASE_PATH / ".maintenance"
 
 # Thumbnail settings
 THUMBNAIL_WIDTH = 200
@@ -310,6 +311,31 @@ app.add_middleware(
 app.add_middleware(RequestLoggingMiddleware, security_logger=security_logger)
 
 
+# Maintenance mode middleware - serves maintenance page when .maintenance file exists
+@app.middleware("http")
+async def maintenance_check(request: Request, call_next):
+    """Check if site is in maintenance mode and serve maintenance page if so"""
+    path = request.url.path
+    
+    # Always allow health checks and static assets needed for maintenance page
+    if (path.startswith("/api/health") or 
+        path.startswith("/static/favicon") or
+        path == "/static/favicon.svg"):
+        return await call_next(request)
+    
+    # Check for maintenance mode
+    if MAINTENANCE_LOCK.exists():
+        maintenance_page = STATIC_PATH / "maintenance.html"
+        if maintenance_page.exists():
+            return FileResponse(
+                maintenance_page,
+                media_type="text/html",
+                headers={"Cache-Control": "no-cache, no-store, must-revalidate"}
+            )
+    
+    return await call_next(request)
+
+
 # Security headers middleware
 @app.middleware("http")
 async def add_security_headers(request: Request, call_next):
@@ -470,6 +496,32 @@ async def sitemap_xml():
     if sitemap_path.exists():
         return FileResponse(sitemap_path, media_type="application/xml")
     return FileResponse(sitemap_path, status_code=404)
+
+
+@app.get("/api/maintenance-status")
+async def get_maintenance_status():
+    """Get current maintenance mode status and progress
+    
+    Returns progress information when site is in maintenance mode for indexing.
+    Used by maintenance.html to show real-time progress to users.
+    """
+    if not MAINTENANCE_LOCK.exists():
+        return {"active": False}
+    
+    try:
+        data = json.loads(MAINTENANCE_LOCK.read_text())
+        return {
+            "active": True,
+            "started": data.get("started"),
+            "step": data.get("step", 0),
+            "step_name": data.get("step_name", "Initializing..."),
+            "current": data.get("current", 0),
+            "total": data.get("total", 0),
+            "percent": data.get("percent", 0),
+            "message": data.get("message", "Processing...")
+        }
+    except Exception:
+        return {"active": True, "step": 0, "step_name": "Processing...", "percent": 0}
 
 
 @app.get("/api/stats")
