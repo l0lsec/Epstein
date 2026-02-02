@@ -131,7 +131,7 @@ def setup_doj_disclosures(force=False, datasets=None):
     
     Args:
         force: Force re-download of all files
-        datasets: List of specific data set numbers to download (default: 9, 10, 11, 12)
+        datasets: List of specific data set numbers to download (default: auto-detect existing folders)
     """
     print("\n" + "="*60)
     print("STEP 1b: CHECKING DOJ DISCLOSURES")
@@ -139,9 +139,19 @@ def setup_doj_disclosures(force=False, datasets=None):
     
     doj_dir = BASE_PATH / "DOJ Disclosures"
     
-    # Default to new data sets (9, 10, 11, 12) if not specified
+    # Dynamically detect existing Data Set folders if not specified
     if datasets is None:
-        datasets = [9, 10, 11, 12]
+        if doj_dir.exists():
+            import re
+            detected = []
+            for folder in doj_dir.iterdir():
+                if folder.is_dir():
+                    match = re.match(r'^Data Set (\d+)$', folder.name)
+                    if match:
+                        detected.append(int(match.group(1)))
+            datasets = sorted(detected) if detected else [9, 10, 11, 12]  # Fallback to new sets
+        else:
+            datasets = [9, 10, 11, 12]  # Default for fresh install
     
     # Quick check - if we have the data set folders with files, skip
     if not force and doj_dir.exists():
@@ -156,7 +166,7 @@ def setup_doj_disclosures(force=False, datasets=None):
                     existing_datasets.append((ds_num, count))
                     total_files += count
         
-        if len(existing_datasets) == len(datasets) and total_files > 100:
+        if existing_datasets and total_files > 100:
             print(f"✓ DOJ Disclosures present ({len(existing_datasets)} data sets, {total_files} files)")
             
             print("\n  Data Sets:")
@@ -476,10 +486,10 @@ Examples:
   python run.py --full-setup             # Force re-download and rebuild everything
   python run.py                          # Run setup (if needed) then start server
   
-DOJ Disclosures (Data Sets 9, 10, 11, 12 released January 2026):
-  python run.py download                             # Download all sources including new data sets
-  python run.py download --doj-datasets 9,10,11,12     # Download only specific data sets
-  python scripts/download_doj_disclosures.py -d 9   # Download Data Set 9 only (standalone)
+DOJ Disclosures (Data Sets 1-12, auto-detects existing folders):
+  python run.py download                             # Download all sources (auto-detects data sets)
+  python run.py download --doj-datasets 9,10,11,12   # Download only specific data sets
+  python scripts/download_doj_disclosures.py -d 9    # Download Data Set 9 only (standalone)
   
 Adding new files (PDFs, audio, video):
   python run.py add /path/to/file.pdf                    # Add single PDF
@@ -652,7 +662,7 @@ Data Sources:
     if args.command in ["download", "setup", "all"] or args.full_setup:
         setup_court_records(force=force)
     
-    # Step 1b: Check/download DOJ Disclosures (Data Sets 9, 10, 11, 12)
+    # Step 1b: Check/download DOJ Disclosures (auto-detects existing Data Set folders)
     if args.command in ["download", "setup", "all"] or args.full_setup:
         # Parse --doj-datasets if provided
         doj_datasets = None

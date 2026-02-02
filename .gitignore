@@ -34,15 +34,16 @@ FOIA Files/
 Court Records/
 DOJ Disclosures/
 FBI Vault/
+extracted_text/
 
 *.db
+*.mdc
 *.pdf
 *.txt
 *.jpg
 *.tif
 *.mp4
 *.wav
-*.json
 *.part
 *.zip
 *.backup
