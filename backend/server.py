@@ -317,10 +317,14 @@ async def maintenance_check(request: Request, call_next):
     """Check if site is in maintenance mode and serve maintenance page if so"""
     path = request.url.path
     
-    # Always allow health checks and static assets needed for maintenance page
-    if (path.startswith("/api/health") or 
-        path.startswith("/static/favicon") or
-        path == "/static/favicon.svg"):
+    # Always allow these endpoints through (needed for maintenance page to work)
+    allowed_paths = (
+        "/api/health",
+        "/api/maintenance-status",  # Progress API for maintenance page
+        "/static/favicon",
+        "/static/favicon.svg"
+    )
+    if any(path.startswith(p) or path == p for p in allowed_paths):
         return await call_next(request)
     
     # Check for maintenance mode

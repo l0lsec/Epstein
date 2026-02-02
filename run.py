@@ -340,11 +340,17 @@ def show_extraction_status():
     conn.close()
 
 
-def extract_all_media(force=False):
-    """Extract text from PDFs and transcribe audio/video files"""
+def extract_all_media(force=False, max_workers=8):
+    """Extract text from PDFs and transcribe audio/video files
+    
+    Args:
+        force: Force re-extraction of all files
+        max_workers: Number of parallel workers (default: 8)
+    """
     print("\n" + "="*60)
     print("STEP 2: EXTRACTING TEXT & TRANSCRIBING MEDIA")
     print("="*60)
+    print(f"  Using {max_workers} parallel workers")
     
     # Show current status
     show_extraction_status()
@@ -370,7 +376,7 @@ def extract_all_media(force=False):
         update_maintenance_progress(3, "Transcribing Media", current, total, f"Transcribing file {current} of {total}")
     
     results = extractor.extract_all(
-        max_workers=8, 
+        max_workers=max_workers, 
         force=force,
         pdf_progress_callback=pdf_progress,
         image_progress_callback=image_progress,
@@ -621,6 +627,8 @@ Data Sources:
                         help="Rebuild the search index before starting server")
     parser.add_argument("--doj-datasets", type=str, default=None,
                         help="Comma-separated DOJ data sets to download (e.g., '9,10,11,12'). Default: 9,10,11,12")
+    parser.add_argument("--workers", "-w", type=int, default=8,
+                        help="Number of parallel workers for extraction (default: 8, max recommended: 16)")
     
     args = parser.parse_args()
     
@@ -775,7 +783,7 @@ Data Sources:
     
     try:
         if args.command in ["extract", "setup", "all"] or args.full_setup:
-            extract_all_media(force=force)
+            extract_all_media(force=force, max_workers=args.workers)
         
         # Step 3: Build search index
         if args.command in ["index", "setup", "all"] or args.full_setup or args.reindex:

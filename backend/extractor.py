@@ -450,6 +450,9 @@ class PDFExtractor:
         print(f"Processing {len(to_process)} new files ({results['skipped']} already processed)")
         
         processed_count = 0
+        save_interval = 1000  # Save index every 1000 files to prevent progress loss
+        last_save_count = 0
+        
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = {executor.submit(self.extract_pdf, pdf): pdf for pdf in to_process}
             
@@ -486,8 +489,17 @@ class PDFExtractor:
                 except Exception as e:
                     print(f"Error processing {pdf}: {e}")
                     results["failed"] += 1
+                
+                # Periodically save index to prevent progress loss on crash
+                if processed_count - last_save_count >= save_interval:
+                    self.index["stats"]["total"] = len(pdfs)
+                    self.index["stats"]["processed"] = results["success"] + results["skipped"]
+                    self.index["stats"]["failed"] = results["failed"]
+                    self._save_index()
+                    last_save_count = processed_count
+                    print(f"\n  💾 Checkpoint saved ({processed_count:,} files processed)")
         
-        # Update stats
+        # Final save
         self.index["stats"]["total"] = len(pdfs)
         self.index["stats"]["processed"] = results["success"] + results["skipped"]
         self.index["stats"]["failed"] = results["failed"]
