@@ -32,6 +32,34 @@ import httpx
 # IP Geolocation cache and helper
 _ip_geo_cache = {}
 
+# Response cache for expensive endpoints (stats, categories)
+# Simple time-based cache to reduce database load under heavy traffic
+class ResponseCache:
+    def __init__(self, ttl_seconds: int = 60):
+        self._cache = {}
+        self._ttl = ttl_seconds
+    
+    def get(self, key: str):
+        if key in self._cache:
+            data, timestamp = self._cache[key]
+            if datetime.now().timestamp() - timestamp < self._ttl:
+                return data
+            del self._cache[key]
+        return None
+    
+    def set(self, key: str, data):
+        self._cache[key] = (data, datetime.now().timestamp())
+    
+    def invalidate(self, key: str = None):
+        if key:
+            self._cache.pop(key, None)
+        else:
+            self._cache.clear()
+
+# Cache instances with different TTLs
+_stats_cache = ResponseCache(ttl_seconds=30)  # Stats cached for 30 seconds
+_categories_cache = ResponseCache(ttl_seconds=60)  # Categories cached for 60 seconds
+
 async def lookup_ip_geo(ip: str) -> dict:
     """Look up geolocation for an IP address using ip-api.com"""
     # Check cache first
@@ -340,12 +368,13 @@ async def maintenance_check(request: Request, call_next):
     return await call_next(request)
 
 
-# Security headers middleware
+# Security headers and caching middleware
 @app.middleware("http")
 async def add_security_headers(request: Request, call_next):
     response = await call_next(request)
     path = request.url.path
     
+    # Security headers
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["X-XSS-Protection"] = "1; mode=block"
     response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
@@ -356,6 +385,22 @@ async def add_security_headers(request: Request, call_next):
         response.headers["X-Frame-Options"] = "SAMEORIGIN"
     else:
         response.headers["X-Frame-Options"] = "SAMEORIGIN"
+    
+    # Cache headers for static files (enables Cloudflare caching)
+    if path.startswith("/static/"):
+        # Long cache for versioned assets and fonts/images
+        if "?v=" in str(request.url) or path.endswith(('.svg', '.png', '.ico', '.woff2', '.woff', '.jpg', '.jpeg', '.gif')):
+            response.headers["Cache-Control"] = "public, max-age=31536000, immutable"  # 1 year
+        # Shorter cache for HTML
+        elif path.endswith(('.html', '.htm')):
+            response.headers["Cache-Control"] = "public, max-age=300"  # 5 minutes
+        # Medium cache for CSS/JS
+        else:
+            response.headers["Cache-Control"] = "public, max-age=86400"  # 24 hours
+    
+    # Aggressive caching for thumbnails (they never change once generated)
+    elif "/thumbnail" in path and response.status_code == 200:
+        response.headers["Cache-Control"] = "public, max-age=2592000, immutable"  # 30 days
     
     return response
 
@@ -529,13 +574,20 @@ async def get_maintenance_status():
 
 
 @app.get("/api/stats")
-async def get_stats() -> StatsResponse:
-    """Get platform statistics"""
+async def get_stats(response: Response) -> StatsResponse:
+    """Get platform statistics (cached for 30 seconds)"""
     if not db:
         raise HTTPException(status_code=503, detail="Database not initialized")
     
+    # Check cache first
+    cached = _stats_cache.get("stats")
+    if cached:
+        response.headers["X-Cache"] = "HIT"
+        response.headers["Cache-Control"] = "public, max-age=30, s-maxage=30"
+        return cached
+    
     stats = db.get_stats()
-    return StatsResponse(
+    result = StatsResponse(
         total_documents=stats["total_documents"],
         total_pages=stats["total_pages"],
         by_category=stats["by_category"],
@@ -544,6 +596,12 @@ async def get_stats() -> StatsResponse:
         vector_chunks=vector_store.get_count() if vector_store else 0,
         llm_available=llm.is_available() if llm else False
     )
+    
+    # Cache the result
+    _stats_cache.set("stats", result)
+    response.headers["X-Cache"] = "MISS"
+    response.headers["Cache-Control"] = "public, max-age=30, s-maxage=30"
+    return result
 
 
 @app.get("/api/index/status")
@@ -679,13 +737,32 @@ async def rebuild_fts_index(request: Request, x_api_key: str = Header(None)):
 
 
 @app.get("/api/categories")
-async def get_categories(keyword: Optional[str] = None):
-    """Get all document categories, optionally filtered by keyword"""
+async def get_categories(keyword: Optional[str] = None, response: Response = None):
+    """Get all document categories, optionally filtered by keyword (cached for 60 seconds)"""
     if not db:
         raise HTTPException(status_code=503, detail="Database not initialized")
     
+    # Use cache only for unfiltered requests (most common)
+    cache_key = f"categories:{keyword or 'all'}"
+    if not keyword:
+        cached = _categories_cache.get(cache_key)
+        if cached:
+            if response:
+                response.headers["X-Cache"] = "HIT"
+                response.headers["Cache-Control"] = "public, max-age=60, s-maxage=60"
+            return cached
+    
     categories = db.get_category_counts(keyword=keyword)
-    return {"categories": categories}
+    result = {"categories": categories}
+    
+    # Cache unfiltered results
+    if not keyword:
+        _categories_cache.set(cache_key, result)
+    
+    if response:
+        response.headers["X-Cache"] = "MISS" if not keyword else "BYPASS"
+        response.headers["Cache-Control"] = "public, max-age=60, s-maxage=60"
+    return result
 
 
 @app.get("/api/subcategories")
@@ -991,6 +1068,7 @@ async def search(search_request: SearchRequest, request: Request) -> dict:
 
 @app.get("/api/documents")
 async def list_documents(
+    response: Response,
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
     category: Optional[str] = None,
@@ -1000,7 +1078,7 @@ async def list_documents(
     keyword: Optional[str] = None,
     search: Optional[str] = None
 ):
-    """List all documents with pagination
+    """List all documents with pagination (cached for common queries)
     
     Args:
         search: Searches both filename AND subcategory (for admin document search)
@@ -1008,15 +1086,37 @@ async def list_documents(
     if not db:
         raise HTTPException(status_code=503, detail="Database not initialized")
     
+    # Create cache key for filtered queries
+    cache_key = f"docs:{limit}:{offset}:{category}:{subcategory}:{file_type}:{keyword}"
+    
+    # Only cache simple queries (no filename search, no text search)
+    can_cache = not filename and not search
+    
+    if can_cache:
+        cached = _categories_cache.get(cache_key)  # Reuse categories cache (60s TTL)
+        if cached:
+            response.headers["X-Cache"] = "HIT"
+            response.headers["Cache-Control"] = "public, max-age=30, s-maxage=30"
+            return cached
+    
     docs = db.get_all_documents(limit=limit, offset=offset, category=category, subcategory=subcategory, file_type=file_type, filename=filename, keyword=keyword, search=search)
     total = db.count_documents(category=category, subcategory=subcategory, file_type=file_type, filename=filename, keyword=keyword)
     
-    return {
+    result = {
         "total": total,
         "limit": limit,
         "offset": offset,
         "documents": docs
     }
+    
+    if can_cache:
+        _categories_cache.set(cache_key, result)
+        response.headers["X-Cache"] = "MISS"
+    else:
+        response.headers["X-Cache"] = "BYPASS"
+    
+    response.headers["Cache-Control"] = "public, max-age=30, s-maxage=30"
+    return result
 
 
 @app.get("/api/documents/{doc_id}")

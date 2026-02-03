@@ -454,6 +454,154 @@ def build_index(force: bool = False):
     print("✓ Index built successfully")
 
 
+def generate_all_thumbnails(max_workers=4):
+    """Pre-generate thumbnails for all documents to reduce disk I/O during requests
+    
+    This significantly improves performance by eliminating PDF reads during thumbnail requests.
+    """
+    print("\n" + "="*60)
+    print("GENERATING THUMBNAILS")
+    print("="*60)
+    
+    import sqlite3
+    from pathlib import Path
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    from tqdm import tqdm
+    
+    # Thumbnail settings (must match server.py)
+    THUMBNAIL_WIDTH = 200
+    THUMBNAIL_HEIGHT = 280
+    THUMBNAILS_PATH = BASE_PATH / "thumbnails"
+    THUMBNAILS_PATH.mkdir(exist_ok=True)
+    
+    db_path = BASE_PATH / "epstein.db"
+    if not db_path.exists():
+        print("ERROR: Database not found. Run 'python run.py index' first.")
+        return
+    
+    conn = sqlite3.connect(str(db_path))
+    cursor = conn.cursor()
+    
+    # Get all documents
+    cursor.execute("SELECT id, path, file_type FROM documents")
+    documents = cursor.fetchall()
+    conn.close()
+    
+    print(f"Found {len(documents):,} documents")
+    
+    # Filter documents that need thumbnails
+    to_generate = []
+    already_exists = 0
+    
+    for doc_id, doc_path, file_type in documents:
+        thumbnail_path = THUMBNAILS_PATH / f"{doc_id}.jpg"
+        if thumbnail_path.exists():
+            already_exists += 1
+        else:
+            to_generate.append((doc_id, doc_path, file_type or "pdf"))
+    
+    print(f"  {already_exists:,} thumbnails already exist")
+    print(f"  {len(to_generate):,} thumbnails to generate")
+    
+    if not to_generate:
+        print("\n✓ All thumbnails already generated!")
+        return
+    
+    # Import thumbnail generation functions
+    def generate_pdf_thumbnail(pdf_path: Path, output_path: Path) -> bool:
+        try:
+            import fitz  # PyMuPDF
+            doc = fitz.open(str(pdf_path))
+            if doc.page_count == 0:
+                doc.close()
+                return False
+            page = doc[0]
+            page_rect = page.rect
+            zoom_x = THUMBNAIL_WIDTH / page_rect.width
+            zoom_y = THUMBNAIL_HEIGHT / page_rect.height
+            zoom = min(zoom_x, zoom_y)
+            mat = fitz.Matrix(zoom, zoom)
+            pix = page.get_pixmap(matrix=mat, alpha=False)
+            pix.save(str(output_path))
+            doc.close()
+            return True
+        except:
+            return False
+    
+    def generate_image_thumbnail(image_path: Path, output_path: Path) -> bool:
+        try:
+            from PIL import Image
+            with Image.open(str(image_path)) as img:
+                if img.mode in ('RGBA', 'P', 'LA'):
+                    img = img.convert('RGB')
+                img.thumbnail((THUMBNAIL_WIDTH, THUMBNAIL_HEIGHT), Image.Resampling.LANCZOS)
+                img.save(str(output_path), 'JPEG', quality=85)
+            return True
+        except:
+            return False
+    
+    def create_placeholder(file_type: str, output_path: Path) -> bool:
+        try:
+            from PIL import Image, ImageDraw
+            colors = {'audio': '#4a5568', 'video': '#2d3748', 'document': '#2a2a40'}
+            img = Image.new('RGB', (THUMBNAIL_WIDTH, THUMBNAIL_HEIGHT), color=colors.get(file_type, '#2a2a40'))
+            draw = ImageDraw.Draw(img)
+            icons = {'audio': '🎵', 'video': '🎬', 'document': '📄'}
+            icon = icons.get(file_type, '📄')
+            draw.text((THUMBNAIL_WIDTH//2 - 20, THUMBNAIL_HEIGHT//2 - 30), icon, fill='white')
+            img.save(str(output_path), 'JPEG', quality=85)
+            return True
+        except:
+            return False
+    
+    def process_thumbnail(args):
+        doc_id, doc_path, file_type = args
+        thumbnail_path = THUMBNAILS_PATH / f"{doc_id}.jpg"
+        file_path = BASE_PATH / doc_path
+        
+        if not file_path.exists():
+            create_placeholder("document", thumbnail_path)
+            return "placeholder"
+        
+        if file_type == "pdf":
+            if generate_pdf_thumbnail(file_path, thumbnail_path):
+                return "success"
+            else:
+                create_placeholder("document", thumbnail_path)
+                return "placeholder"
+        elif file_type == "image":
+            if generate_image_thumbnail(file_path, thumbnail_path):
+                return "success"
+            else:
+                create_placeholder("image", thumbnail_path)
+                return "placeholder"
+        elif file_type in ("audio", "video"):
+            create_placeholder(file_type, thumbnail_path)
+            return "placeholder"
+        else:
+            create_placeholder("document", thumbnail_path)
+            return "placeholder"
+    
+    # Process thumbnails in parallel
+    print(f"\nGenerating thumbnails with {max_workers} workers...")
+    results = {"success": 0, "placeholder": 0, "failed": 0}
+    
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {executor.submit(process_thumbnail, args): args for args in to_generate}
+        
+        for future in tqdm(as_completed(futures), total=len(to_generate), desc="Generating"):
+            try:
+                result = future.result()
+                results[result] = results.get(result, 0) + 1
+            except Exception as e:
+                results["failed"] += 1
+    
+    print(f"\n✓ Thumbnail generation complete:")
+    print(f"  Success: {results['success']:,}")
+    print(f"  Placeholders: {results['placeholder']:,}")
+    print(f"  Failed: {results['failed']:,}")
+
+
 def run_server(host="0.0.0.0", port=8000):
     """Start the FastAPI server"""
     print("\n" + "="*60)
@@ -609,7 +757,7 @@ Data Sources:
     )
     
     parser.add_argument("command", nargs="?", default="all",
-                        choices=["setup", "extract", "index", "server", "all", "add", "download", "fix-fts", "cleanup-db"],
+                        choices=["setup", "extract", "index", "server", "all", "add", "download", "fix-fts", "cleanup-db", "generate-thumbnails"],
                         help="Command to run")
     parser.add_argument("source", nargs="?", default=None,
                         help="Source path for 'add' command (file or directory)")
@@ -749,6 +897,11 @@ Data Sources:
         
         conn.close()
         print("\n✅ Database cleanup complete!")
+        sys.exit(0)
+    
+    # Handle generate-thumbnails command
+    if args.command == "generate-thumbnails":
+        generate_all_thumbnails(max_workers=args.workers)
         sys.exit(0)
     
     # Step 0: Check/download FOIA files
