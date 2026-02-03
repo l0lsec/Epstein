@@ -628,6 +628,18 @@ async function loadPublicSettings() {
 // Load and display pinned documents on homepage
 async function loadPinnedDocuments() {
     try {
+        // Check if pinned documents feature is enabled
+        const settingsResponse = await fetch(`${API_BASE}/settings`);
+        if (settingsResponse.ok) {
+            const settings = await settingsResponse.json();
+            if (settings.pinned_documents_enabled === false) {
+                // Remove existing pinned documents bar if it exists
+                const existingBar = document.getElementById('pinned-documents-bar');
+                if (existingBar) existingBar.remove();
+                return; // Don't show pinned documents bar
+            }
+        }
+        
         const response = await fetch(`${API_BASE}/pinned-documents`);
         if (!response.ok) return;
         

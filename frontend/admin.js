@@ -1612,6 +1612,7 @@ async function deleteFeedback(feedbackId) {
 async function loadContentData() {
     await Promise.all([
         loadAskAIStatus(),
+        loadPinnedDocsStatus(),
         loadPinnedDocuments(),
         loadKeywords(),
         loadDojCompleteness()
@@ -1662,6 +1663,54 @@ async function toggleAskAI(enabled) {
         alert('Error updating setting: ' + error.message);
         // Revert toggle
         const toggle = document.getElementById('ask-ai-toggle');
+        if (toggle) toggle.checked = !enabled;
+    }
+}
+
+async function loadPinnedDocsStatus() {
+    try {
+        const response = await authFetch(`${window.location.origin}/api/admin/settings`);
+        if (!response.ok) throw new Error('Failed to load settings');
+        const settings = await response.json();
+        
+        const isEnabled = settings.pinned_documents_enabled !== 'false';
+        const toggle = document.getElementById('pinned-docs-toggle');
+        const statusEl = document.getElementById('pinned-docs-status');
+        
+        if (toggle) toggle.checked = isEnabled;
+        if (statusEl) {
+            statusEl.innerHTML = isEnabled 
+                ? '<span style="color: var(--success);">✓ Featured Documents bar is currently <strong>visible</strong> on the frontend</span>'
+                : '<span style="color: var(--warning);">⚠️ Featured Documents bar is currently <strong>hidden</strong> from the frontend</span>';
+        }
+    } catch (error) {
+        console.error('Error loading Pinned Docs status:', error);
+        const statusEl = document.getElementById('pinned-docs-status');
+        if (statusEl) statusEl.innerHTML = '<span style="color: var(--danger);">Error loading status</span>';
+    }
+}
+
+async function togglePinnedDocs(enabled) {
+    try {
+        const response = await authFetch(`${window.location.origin}/api/admin/settings`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ key: 'pinned_documents_enabled', value: enabled ? 'true' : 'false' })
+        });
+        
+        if (!response.ok) throw new Error('Failed to update setting');
+        
+        const statusEl = document.getElementById('pinned-docs-status');
+        if (statusEl) {
+            statusEl.innerHTML = enabled 
+                ? '<span style="color: var(--success);">✓ Featured Documents bar is now <strong>visible</strong> on the frontend</span>'
+                : '<span style="color: var(--warning);">⚠️ Featured Documents bar is now <strong>hidden</strong> from the frontend</span>';
+        }
+    } catch (error) {
+        console.error('Error toggling Pinned Docs:', error);
+        alert('Error updating setting: ' + error.message);
+        // Revert toggle
+        const toggle = document.getElementById('pinned-docs-toggle');
         if (toggle) toggle.checked = !enabled;
     }
 }
@@ -2189,6 +2238,7 @@ window.openFeedbackModal = openFeedbackModal;
 window.closeFeedbackModal = closeFeedbackModal;
 window.deleteFeedback = deleteFeedback;
 window.toggleAskAI = toggleAskAI;
+window.togglePinnedDocs = togglePinnedDocs;
 window.openPinDocumentModal = openPinDocumentModal;
 window.closePinDocumentModal = closePinDocumentModal;
 window.searchDocumentsForPin = searchDocumentsForPin;

@@ -1641,6 +1641,30 @@
                 </div>
             </div>
 
+            <!-- Pinned Documents Toggle -->
+            <div class="card" style="margin-bottom: var(--space-lg);">
+                <div class="card-header">
+                    <span class="card-title">📌 Featured Documents Visibility</span>
+                </div>
+                <div class="card-body">
+                    <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: var(--space-md);">
+                        <div>
+                            <p style="margin-bottom: var(--space-xs); font-weight: 500;">Enable "Featured Documents" Bar</p>
+                            <p style="font-size: 0.85rem; color: var(--text-muted);">
+                                Toggle visibility of the pinned documents scrolling bar on the homepage.
+                            </p>
+                        </div>
+                        <label class="toggle-switch">
+                            <input type="checkbox" id="pinned-docs-toggle" onchange="togglePinnedDocs(this.checked)">
+                            <span class="toggle-slider"></span>
+                        </label>
+                    </div>
+                    <div id="pinned-docs-status" style="padding: var(--space-sm) var(--space-md); background: var(--bg-tertiary); border-radius: 6px; font-size: 0.85rem;">
+                        Loading status...
+                    </div>
+                </div>
+            </div>
+
             <!-- Pinned Documents Management -->
             <div class="card" style="margin-bottom: var(--space-lg);">
                 <div class="card-header">
@@ -2064,7 +2088,7 @@
         </div>
     </main>
 
-    <script src="/static/admin.js?v=4"></script>
+    <script src="/static/admin.js?v=5"></script>
 </body>
 </html>
 

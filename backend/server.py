@@ -2661,7 +2661,8 @@ async def get_public_settings():
     
     # Only expose certain settings to the public
     public_settings = {
-        "ask_ai_enabled": settings.get("ask_ai_enabled", "true") == "true"
+        "ask_ai_enabled": settings.get("ask_ai_enabled", "true") == "true",
+        "pinned_documents_enabled": settings.get("pinned_documents_enabled", "true") == "true"
     }
     
     return public_settings
