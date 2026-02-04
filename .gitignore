@@ -36,7 +36,7 @@ DOJ Disclosures/
 FBI Vault/
 extracted_text/
 
-*.db
+*.db*
 *.mdc
 *.pdf
 *.txt

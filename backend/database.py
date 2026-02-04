@@ -22,8 +22,17 @@ class Database:
     
     @contextmanager
     def get_connection(self):
-        conn = sqlite3.connect(self.db_path)
+        # Connection with 30 second timeout to handle high concurrency
+        conn = sqlite3.connect(self.db_path, timeout=30.0)
         conn.row_factory = sqlite3.Row
+        
+        # SQLite optimizations for high-concurrency workloads
+        conn.execute("PRAGMA journal_mode=WAL")      # Write-ahead logging: concurrent reads during writes
+        conn.execute("PRAGMA busy_timeout=5000")     # Wait 5 seconds if locked instead of failing
+        conn.execute("PRAGMA synchronous=NORMAL")    # Faster commits, safe with WAL
+        conn.execute("PRAGMA cache_size=-64000")     # 64MB cache (negative = KB)
+        conn.execute("PRAGMA temp_store=MEMORY")     # Temp tables in memory
+        
         try:
             yield conn
         finally:
