@@ -328,7 +328,7 @@
             </div>
             
             <p class="refresh-note">
-                Progress updates <span>every 3 seconds</span>.
+                Progress updates <span>in real-time</span>.
                 <br>The archive will be back online once indexing completes.
             </p>
         </div>
@@ -385,6 +385,8 @@
         let lastStep = 0;
         let errorCount = 0;
         let currentMode = null;
+        let eventSource = null;
+        let reconnectTimeout = null;
         
         function showView(mode) {
             document.getElementById('loading-view').style.display = 'none';
@@ -393,48 +395,94 @@
             currentMode = mode;
         }
         
-        async function updateStatus() {
-            try {
-                const response = await fetch('/api/maintenance-status');
-                const data = await response.json();
-                
-                // Hide error note on success
-                document.getElementById('error-note').style.display = 'none';
-                errorCount = 0;
-                
-                // If maintenance mode is off, reload the page
-                if (!data.active) {
-                    window.location.reload();
-                    return;
+        function handleStatusUpdate(data) {
+            // Hide error note on success
+            document.getElementById('error-note').style.display = 'none';
+            errorCount = 0;
+            
+            // If maintenance mode is off, reload the page
+            if (!data.active) {
+                window.location.reload();
+                return;
+            }
+            
+            // Handle different modes
+            if (data.mode === 'indexing') {
+                showView('indexing');
+                updateIndexingProgress(data);
+            } else if (data.mode === 'maintenance') {
+                showView('maintenance');
+                updateMaintenanceMessage(data);
+            } else {
+                // Default to indexing mode for backwards compatibility
+                showView('indexing');
+                updateIndexingProgress(data);
+            }
+        }
+        
+        function connectSSE() {
+            // Clear any existing reconnect timeout
+            if (reconnectTimeout) {
+                clearTimeout(reconnectTimeout);
+                reconnectTimeout = null;
+            }
+            
+            // Close existing connection if any
+            if (eventSource) {
+                eventSource.close();
+            }
+            
+            // Create new SSE connection
+            eventSource = new EventSource('/api/maintenance-stream');
+            
+            // Handle status updates from the server
+            eventSource.addEventListener('status', (e) => {
+                try {
+                    const data = JSON.parse(e.data);
+                    handleStatusUpdate(data);
+                } catch (err) {
+                    console.error('Failed to parse status:', err);
                 }
-                
-                // Handle different modes
-                if (data.mode === 'indexing') {
-                    showView('indexing');
-                    updateIndexingProgress(data);
-                } else if (data.mode === 'maintenance') {
-                    showView('maintenance');
-                    updateMaintenanceMessage(data);
-                } else {
-                    // Default to indexing mode for backwards compatibility
-                    showView('indexing');
-                    updateIndexingProgress(data);
-                }
-                
-            } catch (error) {
-                console.error('Failed to fetch status:', error);
+            });
+            
+            // Handle online event (maintenance ended)
+            eventSource.addEventListener('online', () => {
+                window.location.reload();
+            });
+            
+            // Handle connection errors
+            eventSource.onerror = (e) => {
+                console.error('SSE connection error:', e);
                 errorCount++;
                 
+                // Show error after multiple failures
                 if (errorCount >= 3) {
                     document.getElementById('error-note').style.display = 'block';
                 }
                 
-                // If we can't reach the API multiple times, try reloading
-                // (maintenance might be done and server restarting)
+                // Close the errored connection
+                eventSource.close();
+                eventSource = null;
+                
+                // If we've had many errors, try a full page reload
+                // (server might have restarted and maintenance is off)
                 if (errorCount >= 10) {
                     window.location.reload();
+                    return;
                 }
-            }
+                
+                // Reconnect with exponential backoff (max 30 seconds)
+                const delay = Math.min(5000 * Math.pow(1.5, errorCount - 1), 30000);
+                console.log(`Reconnecting in ${delay/1000}s...`);
+                reconnectTimeout = setTimeout(connectSSE, delay);
+            };
+            
+            // Handle successful connection
+            eventSource.onopen = () => {
+                console.log('SSE connection established');
+                errorCount = 0;
+                document.getElementById('error-note').style.display = 'none';
+            };
         }
         
         function updateIndexingProgress(data) {
@@ -511,11 +559,8 @@
             }
         }
         
-        // Initial update
-        updateStatus();
-        
-        // Update every 3 seconds
-        setInterval(updateStatus, 3000);
+        // Start SSE connection
+        connectSSE();
     </script>
 </body>
 </html>

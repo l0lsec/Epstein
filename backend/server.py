@@ -17,6 +17,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, StreamingResponse, Response, HTMLResponse, RedirectResponse
 from pydantic import BaseModel
 from io import BytesIO
+from sse_starlette.sse import EventSourceResponse
 
 from database import Database, VectorStore, build_index
 from llm import LLMAssistant
@@ -379,7 +380,8 @@ async def maintenance_check(request: Request, call_next):
     # Always allow these endpoints through (needed for maintenance page to work)
     allowed_paths = (
         "/api/health",
-        "/api/maintenance-status",  # Progress API for maintenance page
+        "/api/maintenance-status",  # Progress API for maintenance page (legacy)
+        "/api/maintenance-stream",  # SSE stream for maintenance page
         "/api/admin/",  # Admin API endpoints (for managing status page)
         "/admin",       # Admin console page
         "/static/favicon",
@@ -822,16 +824,11 @@ async def sitemap_xml():
     return FileResponse(sitemap_path, status_code=404)
 
 
-@app.get("/api/maintenance-status")
-async def get_maintenance_status():
-    """Get current maintenance mode status and progress
+def get_maintenance_status_data() -> dict:
+    """Helper function to get current maintenance status data.
     
-    Returns progress information when site is in maintenance mode.
-    Supports two modes:
-    - "indexing": Shows progress when .maintenance file exists (document indexing)
-    - "maintenance": Shows custom message when status_page_enabled is true
-    
-    Used by maintenance.html to show appropriate content to users.
+    Used by both the REST endpoint and SSE stream.
+    Returns a dict with maintenance status information.
     """
     # Check for .maintenance file first (indexing mode takes priority)
     if MAINTENANCE_LOCK.exists():
@@ -865,6 +862,66 @@ async def get_maintenance_status():
             }
     
     return {"active": False}
+
+
+@app.get("/api/maintenance-status")
+async def get_maintenance_status():
+    """Get current maintenance mode status and progress
+    
+    Returns progress information when site is in maintenance mode.
+    Supports two modes:
+    - "indexing": Shows progress when .maintenance file exists (document indexing)
+    - "maintenance": Shows custom message when status_page_enabled is true
+    
+    Used by maintenance.html to show appropriate content to users.
+    """
+    return get_maintenance_status_data()
+
+
+@app.get("/api/maintenance-stream")
+async def maintenance_stream(request: Request):
+    """SSE stream for maintenance status updates.
+    
+    Provides real-time updates for the maintenance page without constant polling.
+    - Sends status immediately on connection
+    - For indexing mode: sends updates every 5 seconds when progress changes
+    - For maintenance mode: sends heartbeat every 30 seconds
+    - Automatically closes and signals reload when maintenance ends
+    """
+    async def event_generator():
+        last_status_json = None
+        
+        while True:
+            # Check if client disconnected
+            if await request.is_disconnected():
+                break
+            
+            # Get current status
+            current_status = get_maintenance_status_data()
+            current_status_json = json.dumps(current_status, sort_keys=True)
+            
+            # Send update if status changed or first connection
+            if current_status_json != last_status_json:
+                yield {
+                    "event": "status",
+                    "data": json.dumps(current_status)
+                }
+                last_status_json = current_status_json
+                
+                # If maintenance is off, send final message and close
+                if not current_status.get("active"):
+                    yield {
+                        "event": "online",
+                        "data": "{}"
+                    }
+                    break
+            
+            # For indexing mode, check more frequently for progress updates
+            # For maintenance mode, just heartbeat less frequently
+            wait_time = 5 if current_status.get("mode") == "indexing" else 30
+            await asyncio.sleep(wait_time)
+    
+    return EventSourceResponse(event_generator())
 
 
 @app.get("/api/stats")
