@@ -380,7 +380,8 @@ async def maintenance_check(request: Request, call_next):
     allowed_paths = (
         "/api/health",
         "/api/maintenance-status",  # Progress API for maintenance page
-        "/api/admin/",  # Admin endpoints (for managing status page)
+        "/api/admin/",  # Admin API endpoints (for managing status page)
+        "/admin",       # Admin console page
         "/static/favicon",
         "/static/favicon.svg",
         "/static/admin",  # Admin panel assets

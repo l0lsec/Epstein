@@ -384,10 +384,8 @@ RATE_LIMITS: Dict[str, RateLimitConfig] = {
     # Search endpoints - moderate limits
     "/api/search": RateLimitConfig(requests=30, window_seconds=60, burst=50),
     
-    # Document access - allow reasonable browsing
-    "/api/documents/*/file": RateLimitConfig(requests=60, window_seconds=60, burst=100),
-    "/api/documents/*/thumbnail": RateLimitConfig(requests=200, window_seconds=60, burst=300),  # Thumbnails load in grids
-    "/api/documents/*": RateLimitConfig(requests=120, window_seconds=60, burst=200),
+    # Document file downloads - tightened to prevent scraping
+    "/api/documents/*/file": RateLimitConfig(requests=50, window_seconds=60, burst=60),
     
     # Index trigger - very restricted (admin action)
     "/api/index/trigger": RateLimitConfig(requests=2, window_seconds=300, burst=3),
