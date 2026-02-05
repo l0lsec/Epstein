@@ -829,7 +829,7 @@ Data Sources:
     # Handle cleanup-db command
     if args.command == "cleanup-db":
         print("\n" + "="*60)
-        print("DATABASE CLEANUP - Removing orphaned entries")
+        print("DATABASE CLEANUP - Removing orphaned entries & artifacts")
         print("="*60)
         
         import sqlite3
@@ -841,6 +841,11 @@ Data Sources:
         conn = sqlite3.connect(str(db_path))
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
+        
+        # Define artifact paths
+        THUMBNAILS_PATH = BASE_PATH / "thumbnails"
+        EXTRACTED_PATH = BASE_PATH / "extracted_text"
+        VECTOR_STORE_PATH = BASE_PATH / "vector_store"
         
         # Find documents with non-existent files
         print("\n🔍 Checking for orphaned database entries...")
@@ -858,12 +863,77 @@ Data Sources:
             if len(orphaned) > 10:
                 print(f"    ... and {len(orphaned) - 10} more")
             
-            confirm = input("\n  Delete these entries? [y/N]: ")
+            confirm = input("\n  Delete these entries and associated artifacts? [y/N]: ")
             if confirm.lower() == 'y':
+                deleted_thumbnails = 0
+                deleted_extracted = 0
+                deleted_summaries = 0
+                deleted_pinned = 0
+                
                 for doc_id, path, filename in orphaned:
+                    # Delete from documents table
                     cursor.execute("DELETE FROM documents WHERE id = ?", (doc_id,))
+                    
+                    # Delete from summaries table
+                    cursor.execute("DELETE FROM summaries WHERE document_id = ?", (doc_id,))
+                    if cursor.rowcount > 0:
+                        deleted_summaries += 1
+                    
+                    # Delete from pinned_documents table
+                    cursor.execute("DELETE FROM pinned_documents WHERE document_id = ?", (doc_id,))
+                    if cursor.rowcount > 0:
+                        deleted_pinned += 1
+                    
+                    # Delete thumbnail file
+                    thumbnail_path = THUMBNAILS_PATH / f"{doc_id}.jpg"
+                    if thumbnail_path.exists():
+                        try:
+                            thumbnail_path.unlink()
+                            deleted_thumbnails += 1
+                        except Exception as e:
+                            print(f"    ⚠ Could not delete thumbnail {doc_id}.jpg: {e}")
+                    
+                    # Delete extracted text JSON file
+                    extracted_json = EXTRACTED_PATH / f"{doc_id}.json"
+                    if extracted_json.exists():
+                        try:
+                            extracted_json.unlink()
+                            deleted_extracted += 1
+                        except Exception as e:
+                            print(f"    ⚠ Could not delete extracted text {doc_id}.json: {e}")
+                
                 conn.commit()
-                print(f"  ✓ Deleted {len(orphaned)} orphaned entries")
+                print(f"\n  ✓ Deleted {len(orphaned)} orphaned database entries")
+                print(f"  ✓ Deleted {deleted_thumbnails} thumbnail files")
+                print(f"  ✓ Deleted {deleted_extracted} extracted text files")
+                if deleted_summaries > 0:
+                    print(f"  ✓ Deleted {deleted_summaries} cached summaries")
+                if deleted_pinned > 0:
+                    print(f"  ✓ Deleted {deleted_pinned} pinned document entries")
+                
+                # Update extracted text index files
+                print("\n  🔄 Updating extracted text indexes...")
+                orphaned_ids = {doc_id for doc_id, _, _ in orphaned}
+                for index_name in ["index.json", "image_index.json", "media_index.json"]:
+                    index_file = EXTRACTED_PATH / index_name
+                    if index_file.exists():
+                        try:
+                            with open(index_file, 'r') as f:
+                                index_data = json.load(f)
+                            
+                            original_count = len(index_data.get("files", {}))
+                            index_data["files"] = {
+                                k: v for k, v in index_data.get("files", {}).items()
+                                if k not in orphaned_ids
+                            }
+                            new_count = len(index_data.get("files", {}))
+                            
+                            if new_count < original_count:
+                                with open(index_file, 'w') as f:
+                                    json.dump(index_data, f, indent=2)
+                                print(f"    - Updated {index_name}: removed {original_count - new_count} entries")
+                        except Exception as e:
+                            print(f"    ⚠ Could not update {index_name}: {e}")
                 
                 # Rebuild FTS index
                 print("\n  🔄 Rebuilding FTS index...")
@@ -871,10 +941,66 @@ Data Sources:
                 db = Database(str(db_path))
                 db.rebuild_fts()
                 print("  ✓ FTS index rebuilt")
+                
+                # Note about vector store
+                print("\n  ⚠ Note: Vector store may contain stale embeddings.")
+                print("    Run 'python run.py index --force' to rebuild vector embeddings.")
             else:
                 print("  ⚠ Skipped deletion")
         else:
-            print("  ✓ No orphaned entries found")
+            print("  ✓ No orphaned database entries found")
+        
+        # Check for orphaned artifacts (artifacts without database entries)
+        print("\n🔍 Checking for orphaned artifacts (files without database entries)...")
+        
+        # Get all document IDs in database
+        cursor.execute("SELECT id FROM documents")
+        valid_ids = {row['id'] for row in cursor.fetchall()}
+        
+        orphaned_thumbnails = []
+        orphaned_extracted = []
+        
+        # Check thumbnails directory
+        if THUMBNAILS_PATH.exists():
+            for thumb_file in THUMBNAILS_PATH.glob("*.jpg"):
+                doc_id = thumb_file.stem
+                if doc_id not in valid_ids:
+                    orphaned_thumbnails.append(thumb_file)
+        
+        # Check extracted text directory
+        if EXTRACTED_PATH.exists():
+            for json_file in EXTRACTED_PATH.glob("*.json"):
+                if json_file.name in ["index.json", "image_index.json", "media_index.json"]:
+                    continue  # Skip index files
+                doc_id = json_file.stem
+                if doc_id not in valid_ids:
+                    orphaned_extracted.append(json_file)
+        
+        if orphaned_thumbnails or orphaned_extracted:
+            print(f"  Found {len(orphaned_thumbnails)} orphaned thumbnails")
+            print(f"  Found {len(orphaned_extracted)} orphaned extracted text files")
+            
+            if orphaned_thumbnails:
+                print("\n  Orphaned thumbnails (first 10):")
+                for f in orphaned_thumbnails[:10]:
+                    print(f"    - {f.name}")
+                if len(orphaned_thumbnails) > 10:
+                    print(f"    ... and {len(orphaned_thumbnails) - 10} more")
+            
+            confirm = input("\n  Delete these orphaned artifact files? [y/N]: ")
+            if confirm.lower() == 'y':
+                deleted_count = 0
+                for f in orphaned_thumbnails + orphaned_extracted:
+                    try:
+                        f.unlink()
+                        deleted_count += 1
+                    except Exception as e:
+                        print(f"    ⚠ Could not delete {f.name}: {e}")
+                print(f"  ✓ Deleted {deleted_count} orphaned artifact files")
+            else:
+                print("  ⚠ Skipped artifact deletion")
+        else:
+            print("  ✓ No orphaned artifacts found")
         
         # Find and report duplicates
         print("\n🔍 Checking for duplicate entries (same filename)...")

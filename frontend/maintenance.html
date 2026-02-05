@@ -274,61 +274,102 @@
         <div class="logo">EPSTEIN FILES</div>
         <div class="logo-sub">Public Archive</div>
         
-        <div class="status-card">
-            <div class="status-icon">
-                <div class="spinner"></div>
-                <div class="doc-icon">&#128196;</div>
+        <!-- Indexing Mode View (Progress-based) -->
+        <div id="indexing-view" style="display: none;">
+            <div class="status-card">
+                <div class="status-icon">
+                    <div class="spinner"></div>
+                    <div class="doc-icon">&#128196;</div>
+                </div>
+                
+                <h1>Indexing New Documents</h1>
+                <div class="step-indicator" id="step-indicator">Step 1 of 5: Initializing...</div>
+                
+                <p class="description">
+                    We're currently processing and indexing <span class="highlight">newly released DOJ documents</span> 
+                    to make them searchable.
+                </p>
+                
+                <div class="progress-container">
+                    <div class="progress-bar">
+                        <div class="progress-bar-fill indeterminate" id="progress-fill"></div>
+                    </div>
+                    <div class="progress-stats">
+                        <span id="progress-detail">Starting...</span>
+                        <span class="progress-percent" id="progress-percent">0%</span>
+                    </div>
+                </div>
+                
+                <p class="status-message" id="status-message">Preparing to process documents...</p>
             </div>
             
-            <h1>Indexing New Documents</h1>
-            <div class="step-indicator" id="step-indicator">Step 1 of 5: Initializing...</div>
+            <div class="steps-list">
+                <div class="steps-title">Processing Steps</div>
+                <div class="step-item pending" id="step-1">
+                    <span class="step-icon"></span>
+                    <span>Extracting text from PDFs</span>
+                </div>
+                <div class="step-item pending" id="step-2">
+                    <span class="step-icon"></span>
+                    <span>Extracting text from images (OCR)</span>
+                </div>
+                <div class="step-item pending" id="step-3">
+                    <span class="step-icon"></span>
+                    <span>Transcribing audio/video files</span>
+                </div>
+                <div class="step-item pending" id="step-4">
+                    <span class="step-icon"></span>
+                    <span>Building search index</span>
+                </div>
+                <div class="step-item pending" id="step-5">
+                    <span class="step-icon"></span>
+                    <span>Generating AI embeddings</span>
+                </div>
+            </div>
             
-            <p class="description">
-                We're currently processing and indexing <span class="highlight">newly released DOJ documents</span> 
-                to make them searchable.
+            <p class="refresh-note">
+                Progress updates <span>every 3 seconds</span>.
+                <br>The archive will be back online once indexing completes.
             </p>
-            
-            <div class="progress-container">
-                <div class="progress-bar">
-                    <div class="progress-bar-fill indeterminate" id="progress-fill"></div>
-                </div>
-                <div class="progress-stats">
-                    <span id="progress-detail">Starting...</span>
-                    <span class="progress-percent" id="progress-percent">0%</span>
-                </div>
-            </div>
-            
-            <p class="status-message" id="status-message">Preparing to process documents...</p>
         </div>
         
-        <div class="steps-list">
-            <div class="steps-title">Processing Steps</div>
-            <div class="step-item pending" id="step-1">
-                <span class="step-icon"></span>
-                <span>Extracting text from PDFs</span>
+        <!-- Maintenance Mode View (Custom message) -->
+        <div id="maintenance-view" style="display: none;">
+            <div class="status-card">
+                <div class="status-icon">
+                    <div class="spinner" style="border-top-color: var(--accent-gold);"></div>
+                    <div class="doc-icon">🔧</div>
+                </div>
+                
+                <h1 id="maintenance-title">Under Maintenance</h1>
+                
+                <p class="description" id="maintenance-message" style="white-space: pre-wrap;">
+                    We're performing scheduled maintenance. Please check back soon.
+                </p>
+                
+                <div id="maintenance-timeline" class="timeline-info" style="display: none;">
+                    <div style="margin-top: 1.5rem; padding: 1rem; background: var(--bg-tertiary); border-radius: 8px; border: 1px solid var(--border-color);">
+                        <div style="font-size: 0.85rem; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.1em; margin-bottom: 0.5rem;">Expected Return</div>
+                        <div id="timeline-text" style="font-size: 1.1rem; color: var(--accent-gold); font-weight: 500;"></div>
+                    </div>
+                </div>
             </div>
-            <div class="step-item pending" id="step-2">
-                <span class="step-icon"></span>
-                <span>Extracting text from images (OCR)</span>
-            </div>
-            <div class="step-item pending" id="step-3">
-                <span class="step-icon"></span>
-                <span>Transcribing audio/video files</span>
-            </div>
-            <div class="step-item pending" id="step-4">
-                <span class="step-icon"></span>
-                <span>Building search index</span>
-            </div>
-            <div class="step-item pending" id="step-5">
-                <span class="step-icon"></span>
-                <span>Generating AI embeddings</span>
+            
+            <div class="refresh-note" style="margin-top: 2rem;">
+                <span style="color: var(--text-secondary);">This page will automatically refresh when the archive is back online.</span>
             </div>
         </div>
         
-        <p class="refresh-note">
-            Progress updates <span>every 3 seconds</span>.
-            <br>The archive will be back online once indexing completes.
-        </p>
+        <!-- Loading state (shown briefly on page load) -->
+        <div id="loading-view">
+            <div class="status-card">
+                <div class="status-icon">
+                    <div class="spinner"></div>
+                </div>
+                <p class="description">Loading status...</p>
+            </div>
+        </div>
+        
         <p class="error-note" id="error-note">Connection lost. Retrying...</p>
     </div>
     
@@ -343,8 +384,16 @@
         
         let lastStep = 0;
         let errorCount = 0;
+        let currentMode = null;
         
-        async function updateProgress() {
+        function showView(mode) {
+            document.getElementById('loading-view').style.display = 'none';
+            document.getElementById('indexing-view').style.display = mode === 'indexing' ? 'block' : 'none';
+            document.getElementById('maintenance-view').style.display = mode === 'maintenance' ? 'block' : 'none';
+            currentMode = mode;
+        }
+        
+        async function updateStatus() {
             try {
                 const response = await fetch('/api/maintenance-status');
                 const data = await response.json();
@@ -359,56 +408,21 @@
                     return;
                 }
                 
-                const step = data.step || 0;
-                const stepName = data.step_name || STEP_NAMES[step] || "Processing...";
-                const current = data.current || 0;
-                const total = data.total || 0;
-                const percent = data.percent || 0;
-                const message = data.message || "Processing...";
-                
-                // Update step indicator
-                document.getElementById('step-indicator').textContent = 
-                    `Step ${step} of 5: ${stepName}`;
-                
-                // Update progress bar
-                const progressFill = document.getElementById('progress-fill');
-                if (total > 0 && percent > 0) {
-                    progressFill.classList.remove('indeterminate');
-                    progressFill.style.width = percent + '%';
+                // Handle different modes
+                if (data.mode === 'indexing') {
+                    showView('indexing');
+                    updateIndexingProgress(data);
+                } else if (data.mode === 'maintenance') {
+                    showView('maintenance');
+                    updateMaintenanceMessage(data);
                 } else {
-                    progressFill.classList.add('indeterminate');
+                    // Default to indexing mode for backwards compatibility
+                    showView('indexing');
+                    updateIndexingProgress(data);
                 }
-                
-                // Update progress details
-                if (total > 0) {
-                    document.getElementById('progress-detail').textContent = 
-                        `${current.toLocaleString()} / ${total.toLocaleString()} files`;
-                } else {
-                    document.getElementById('progress-detail').textContent = 'Scanning files...';
-                }
-                document.getElementById('progress-percent').textContent = percent + '%';
-                
-                // Update status message
-                document.getElementById('status-message').textContent = message;
-                
-                // Update step list
-                for (let i = 1; i <= 5; i++) {
-                    const stepEl = document.getElementById('step-' + i);
-                    stepEl.classList.remove('pending', 'active', 'completed');
-                    
-                    if (i < step) {
-                        stepEl.classList.add('completed');
-                    } else if (i === step) {
-                        stepEl.classList.add('active');
-                    } else {
-                        stepEl.classList.add('pending');
-                    }
-                }
-                
-                lastStep = step;
                 
             } catch (error) {
-                console.error('Failed to fetch progress:', error);
+                console.error('Failed to fetch status:', error);
                 errorCount++;
                 
                 if (errorCount >= 3) {
@@ -423,11 +437,85 @@
             }
         }
         
+        function updateIndexingProgress(data) {
+            const step = data.step || 0;
+            const stepName = data.step_name || STEP_NAMES[step] || "Processing...";
+            const current = data.current || 0;
+            const total = data.total || 0;
+            const percent = data.percent || 0;
+            const message = data.message || "Processing...";
+            
+            // Update step indicator
+            document.getElementById('step-indicator').textContent = 
+                `Step ${step} of 5: ${stepName}`;
+            
+            // Update progress bar
+            const progressFill = document.getElementById('progress-fill');
+            if (total > 0 && percent > 0) {
+                progressFill.classList.remove('indeterminate');
+                progressFill.style.width = percent + '%';
+            } else {
+                progressFill.classList.add('indeterminate');
+            }
+            
+            // Update progress details
+            if (total > 0) {
+                document.getElementById('progress-detail').textContent = 
+                    `${current.toLocaleString()} / ${total.toLocaleString()} files`;
+            } else {
+                document.getElementById('progress-detail').textContent = 'Scanning files...';
+            }
+            document.getElementById('progress-percent').textContent = percent + '%';
+            
+            // Update status message
+            document.getElementById('status-message').textContent = message;
+            
+            // Update step list
+            for (let i = 1; i <= 5; i++) {
+                const stepEl = document.getElementById('step-' + i);
+                stepEl.classList.remove('pending', 'active', 'completed');
+                
+                if (i < step) {
+                    stepEl.classList.add('completed');
+                } else if (i === step) {
+                    stepEl.classList.add('active');
+                } else {
+                    stepEl.classList.add('pending');
+                }
+            }
+            
+            lastStep = step;
+        }
+        
+        function updateMaintenanceMessage(data) {
+            // Update title
+            const titleEl = document.getElementById('maintenance-title');
+            if (titleEl && data.title) {
+                titleEl.textContent = data.title;
+            }
+            
+            // Update message
+            const messageEl = document.getElementById('maintenance-message');
+            if (messageEl && data.message) {
+                messageEl.textContent = data.message;
+            }
+            
+            // Update timeline if provided
+            const timelineContainer = document.getElementById('maintenance-timeline');
+            const timelineText = document.getElementById('timeline-text');
+            if (data.timeline && data.timeline.trim()) {
+                timelineContainer.style.display = 'block';
+                timelineText.textContent = data.timeline;
+            } else {
+                timelineContainer.style.display = 'none';
+            }
+        }
+        
         // Initial update
-        updateProgress();
+        updateStatus();
         
         // Update every 3 seconds
-        setInterval(updateProgress, 3000);
+        setInterval(updateStatus, 3000);
     </script>
 </body>
 </html>

@@ -14,7 +14,7 @@ from datetime import datetime, timedelta
 from fastapi import FastAPI, HTTPException, Query, Request, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, StreamingResponse, Response
+from fastapi.responses import FileResponse, StreamingResponse, Response, HTMLResponse
 from pydantic import BaseModel
 from io import BytesIO
 
@@ -340,6 +340,7 @@ app.add_middleware(RequestLoggingMiddleware, security_logger=security_logger)
 
 
 # Maintenance mode middleware - serves maintenance page when .maintenance file exists
+# or when custom status page is enabled via admin panel
 @app.middleware("http")
 async def maintenance_check(request: Request, call_next):
     """Check if site is in maintenance mode and serve maintenance page if so"""
@@ -349,14 +350,27 @@ async def maintenance_check(request: Request, call_next):
     allowed_paths = (
         "/api/health",
         "/api/maintenance-status",  # Progress API for maintenance page
+        "/api/admin/",  # Admin endpoints (for managing status page)
         "/static/favicon",
-        "/static/favicon.svg"
+        "/static/favicon.svg",
+        "/static/admin",  # Admin panel assets
     )
     if any(path.startswith(p) or path == p for p in allowed_paths):
         return await call_next(request)
     
-    # Check for maintenance mode
+    # Check for maintenance mode - either .maintenance file OR custom status page enabled
+    show_maintenance = False
+    
+    # First check: .maintenance file exists (indexing in progress)
     if MAINTENANCE_LOCK.exists():
+        show_maintenance = True
+    # Second check: custom status page enabled in database settings
+    elif db:
+        status_enabled = db.get_setting("status_page_enabled", "false")
+        if status_enabled == "true":
+            show_maintenance = True
+    
+    if show_maintenance:
         maintenance_page = STATIC_PATH / "maintenance.html"
         if maintenance_page.exists():
             return FileResponse(
@@ -521,12 +535,43 @@ FEEDBACK_RATE_LIMIT_SECONDS = 60  # One submission per minute per IP
 # API Routes
 
 @app.get("/")
-async def root():
-    """Serve the frontend"""
+async def root(doc: str = None):
+    """Serve the frontend with dynamic OG tags for document shares"""
     index_path = STATIC_PATH / "index.html"
-    if index_path.exists():
-        return FileResponse(index_path)
-    return {"message": "Epstein Files Search Platform API", "docs": "/docs"}
+    if not index_path.exists():
+        return {"message": "Epstein Files Search Platform API", "docs": "/docs"}
+    
+    # If doc param present, serve modified HTML with document's thumbnail for social sharing
+    if doc and db:
+        document = db.get_document(doc)
+        if document:
+            try:
+                html = index_path.read_text()
+                thumbnail_url = f"https://epsteinfta.com/api/documents/{doc}/thumbnail"
+                filename = document.get("filename", "Document")
+                
+                # Replace og:image tags with document thumbnail
+                html = html.replace(
+                    'content="https://epsteinfta.com/static/og-image.png"',
+                    f'content="{thumbnail_url}"'
+                )
+                # Replace og:title with document name
+                html = html.replace(
+                    'content="Epstein Files Library Archive | Public Document Search"',
+                    f'content="{filename} | Epstein Files Archive"'
+                )
+                # Replace twitter:title as well
+                html = html.replace(
+                    'content="Epstein Files Library Archive | Public Document Search">',
+                    f'content="{filename} | Epstein Files Archive">'
+                )
+                
+                return HTMLResponse(content=html)
+            except Exception:
+                # Fall through to default on any error
+                pass
+    
+    return FileResponse(index_path)
 
 
 @app.get("/robots.txt")
@@ -551,26 +596,45 @@ async def sitemap_xml():
 async def get_maintenance_status():
     """Get current maintenance mode status and progress
     
-    Returns progress information when site is in maintenance mode for indexing.
-    Used by maintenance.html to show real-time progress to users.
-    """
-    if not MAINTENANCE_LOCK.exists():
-        return {"active": False}
+    Returns progress information when site is in maintenance mode.
+    Supports two modes:
+    - "indexing": Shows progress when .maintenance file exists (document indexing)
+    - "maintenance": Shows custom message when status_page_enabled is true
     
-    try:
-        data = json.loads(MAINTENANCE_LOCK.read_text())
-        return {
-            "active": True,
-            "started": data.get("started"),
-            "step": data.get("step", 0),
-            "step_name": data.get("step_name", "Initializing..."),
-            "current": data.get("current", 0),
-            "total": data.get("total", 0),
-            "percent": data.get("percent", 0),
-            "message": data.get("message", "Processing...")
-        }
-    except Exception:
-        return {"active": True, "step": 0, "step_name": "Processing...", "percent": 0}
+    Used by maintenance.html to show appropriate content to users.
+    """
+    # Check for .maintenance file first (indexing mode takes priority)
+    if MAINTENANCE_LOCK.exists():
+        try:
+            data = json.loads(MAINTENANCE_LOCK.read_text())
+            return {
+                "active": True,
+                "mode": "indexing",
+                "started": data.get("started"),
+                "step": data.get("step", 0),
+                "step_name": data.get("step_name", "Initializing..."),
+                "current": data.get("current", 0),
+                "total": data.get("total", 0),
+                "percent": data.get("percent", 0),
+                "message": data.get("message", "Processing...")
+            }
+        except Exception:
+            return {"active": True, "mode": "indexing", "step": 0, "step_name": "Processing...", "percent": 0}
+    
+    # Check for custom status page mode
+    if db:
+        status_enabled = db.get_setting("status_page_enabled", "false")
+        if status_enabled == "true":
+            return {
+                "active": True,
+                "mode": "maintenance",
+                "title": db.get_setting("status_page_title", "Under Maintenance"),
+                "message": db.get_setting("status_page_message", "We're performing scheduled maintenance. Please check back soon."),
+                "timeline": db.get_setting("status_page_timeline", ""),
+                "started": db.get_setting("status_page_started", "")
+            }
+    
+    return {"active": False}
 
 
 @app.get("/api/stats")
@@ -2710,6 +2774,109 @@ async def update_setting(setting: SettingUpdate, request: Request, x_api_key: st
     db.set_setting(setting.key, setting.value)
     
     return {"success": True, "key": setting.key, "value": setting.value}
+
+
+# =============================================================================
+# STATUS PAGE API ENDPOINTS
+# =============================================================================
+
+class StatusPageUpdate(BaseModel):
+    enabled: bool
+    title: Optional[str] = "Under Maintenance"
+    message: Optional[str] = "We're performing scheduled maintenance. Please check back soon."
+    timeline: Optional[str] = ""
+
+
+@app.get("/api/admin/status-page")
+async def get_status_page(request: Request, x_api_key: str = Header(None)):
+    """Get current status page settings (requires admin authentication)"""
+    is_authorized, error = verify_admin_access(request, x_api_key)
+    if not is_authorized:
+        raise HTTPException(status_code=401, detail=error)
+    
+    if not db:
+        raise HTTPException(status_code=503, detail="Database not initialized")
+    
+    return {
+        "enabled": db.get_setting("status_page_enabled", "false") == "true",
+        "title": db.get_setting("status_page_title", "Under Maintenance"),
+        "message": db.get_setting("status_page_message", "We're performing scheduled maintenance. Please check back soon."),
+        "timeline": db.get_setting("status_page_timeline", ""),
+        "started": db.get_setting("status_page_started", ""),
+        "indexing_active": MAINTENANCE_LOCK.exists()  # Whether .maintenance file exists
+    }
+
+
+@app.post("/api/admin/status-page")
+async def update_status_page(status: StatusPageUpdate, request: Request, x_api_key: str = Header(None)):
+    """Update status page settings (requires admin authentication)"""
+    is_authorized, error = verify_admin_access(request, x_api_key)
+    if not is_authorized:
+        raise HTTPException(status_code=401, detail=error)
+    
+    if not db:
+        raise HTTPException(status_code=503, detail="Database not initialized")
+    
+    client_ip, request_id = get_client_info(request)
+    
+    # Update settings
+    db.set_setting("status_page_enabled", "true" if status.enabled else "false")
+    db.set_setting("status_page_title", status.title or "Under Maintenance")
+    db.set_setting("status_page_message", status.message or "")
+    db.set_setting("status_page_timeline", status.timeline or "")
+    
+    # Set started timestamp when enabling
+    if status.enabled:
+        current_started = db.get_setting("status_page_started", "")
+        if not current_started:
+            db.set_setting("status_page_started", datetime.now().isoformat())
+    else:
+        # Clear started time when disabling
+        db.set_setting("status_page_started", "")
+    
+    # Log the change
+    action = "enabled" if status.enabled else "disabled"
+    security_logger.log_security_event(
+        event_type="status_page_changed",
+        severity="info",
+        client_ip=client_ip,
+        message=f"Status page {action}: {status.title}",
+        request_id=request_id
+    )
+    
+    return {
+        "success": True,
+        "enabled": status.enabled,
+        "title": status.title,
+        "message": status.message,
+        "timeline": status.timeline
+    }
+
+
+@app.post("/api/admin/status-page/disable")
+async def disable_status_page(request: Request, x_api_key: str = Header(None)):
+    """Quick disable status page (requires admin authentication)"""
+    is_authorized, error = verify_admin_access(request, x_api_key)
+    if not is_authorized:
+        raise HTTPException(status_code=401, detail=error)
+    
+    if not db:
+        raise HTTPException(status_code=503, detail="Database not initialized")
+    
+    client_ip, request_id = get_client_info(request)
+    
+    db.set_setting("status_page_enabled", "false")
+    db.set_setting("status_page_started", "")
+    
+    security_logger.log_security_event(
+        event_type="status_page_disabled",
+        severity="info",
+        client_ip=client_ip,
+        message="Status page disabled",
+        request_id=request_id
+    )
+    
+    return {"success": True, "enabled": False}
 
 
 # =============================================================================

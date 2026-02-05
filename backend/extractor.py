@@ -14,9 +14,10 @@ import signal
 import time
 from pathlib import Path
 from typing import Generator, Dict, Any, Optional, List
-from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FuturesTimeoutError
+from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed, TimeoutError as FuturesTimeoutError
 from tqdm import tqdm
 import pdfplumber
+import multiprocessing
 
 # Global flag for skipping current file
 _skip_current_file = False
@@ -50,6 +51,215 @@ def _should_skip():
         return _skip_current_file
 
 
+def _extract_pdf_subprocess(args: tuple) -> Optional[Dict[str, Any]]:
+    """
+    Standalone function for PDF extraction that runs in a subprocess.
+    This isolates segfaults from corrupted PDFs to the worker process only.
+    
+    Args:
+        args: Tuple of (filepath_str, base_path_str, use_ocr)
+    
+    Returns:
+        Extraction result dict or None on failure
+    """
+    filepath_str, base_path_str, use_ocr = args
+    filepath = Path(filepath_str)
+    base_path = Path(base_path_str)
+    
+    try:
+        pages = []
+        full_text = []
+        used_ocr = False
+        
+        with pdfplumber.open(str(filepath)) as pdf:
+            for page_num, page in enumerate(pdf.pages):
+                text = page.extract_text() or ""
+                
+                # If no text but page has images, try OCR
+                if not text.strip() and use_ocr:
+                    try:
+                        import pytesseract
+                        pytesseract.get_tesseract_version()
+                        if page.images:  # Page has images (likely scanned)
+                            try:
+                                from PIL import Image
+                                import io
+                                page_image = page.to_image(resolution=150)
+                                pil_image = page_image.original
+                                text = pytesseract.image_to_string(pil_image, lang='eng')
+                                text = text.strip()
+                                if text:
+                                    used_ocr = True
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass  # Tesseract not available
+                
+                if text.strip():
+                    pages.append({
+                        "page": page_num + 1,
+                        "text": text.strip()
+                    })
+                    full_text.append(text.strip())
+        
+        # Get metadata
+        relative_path = filepath.relative_to(base_path)
+        
+        # Decode URL-encoded filename
+        from urllib.parse import unquote
+        clean_name = unquote(filepath.name)
+        
+        # Generate file hash
+        file_hash = hashlib.md5(f"{filepath}_{filepath.stat().st_size}".encode()).hexdigest()
+        
+        # Categorize file (simplified version for subprocess)
+        category, subcategory = _categorize_file_simple(filepath, base_path)
+        
+        result = {
+            "id": file_hash,
+            "filename": clean_name,
+            "original_filename": filepath.name,
+            "path": str(relative_path),
+            "full_path": str(filepath),
+            "category": category,
+            "subcategory": subcategory,
+            "file_type": "pdf",
+            "page_count": len(pages),
+            "pages": pages,
+            "full_text": "\n\n".join(full_text),
+            "char_count": sum(len(p["text"]) for p in pages),
+            "has_content": len(full_text) > 0
+        }
+        
+        if used_ocr:
+            result["extraction_method"] = "ocr"
+        
+        return result
+        
+    except Exception as e:
+        # Generate file hash for error result
+        try:
+            file_hash = hashlib.md5(f"{filepath}_{filepath.stat().st_size}".encode()).hexdigest()
+            relative_path = filepath.relative_to(base_path)
+            from urllib.parse import unquote
+            clean_name = unquote(filepath.name)
+        except:
+            file_hash = hashlib.md5(str(filepath).encode()).hexdigest()
+            relative_path = filepath
+            clean_name = filepath.name
+            
+        return {
+            "id": file_hash,
+            "filename": clean_name,
+            "path": str(relative_path),
+            "error": str(e),
+            "has_content": False
+        }
+
+
+def _categorize_file_simple(filepath: Path, base_path: Path) -> tuple:
+    """
+    Simplified file categorization for subprocess use.
+    Returns (category, subcategory) tuple.
+    """
+    import re
+    from urllib.parse import unquote
+    
+    relative_path = filepath.relative_to(base_path)
+    parts = relative_path.parts
+    filename = unquote(filepath.name)
+    
+    category = "Unknown"
+    subcategory = ""
+    
+    # EFTA files always go to DOJ Disclosures
+    if filename.startswith("EFTA"):
+        category = "DOJ Disclosures"
+        # Try folder-based detection first
+        path_str = str(filepath)
+        folder_match = re.search(r'Data Set (\d+)', path_str)
+        if folder_match:
+            subcategory = f"Data Set {folder_match.group(1)}"
+        else:
+            # Fall back to EFTA number ranges
+            match = re.search(r'EFTA(\d+)', filename)
+            if match:
+                file_num = int(match.group(1))
+                if file_num <= 3158:
+                    subcategory = "Data Set 1"
+                elif file_num <= 3857:
+                    subcategory = "Data Set 2"
+                elif file_num <= 5704:
+                    subcategory = "Data Set 3"
+                elif file_num <= 8408:
+                    subcategory = "Data Set 4"
+                elif file_num <= 8528:
+                    subcategory = "Data Set 5"
+                elif file_num <= 9015:
+                    subcategory = "Data Set 6"
+                elif file_num <= 9675:
+                    subcategory = "Data Set 7"
+                elif file_num < 39025:
+                    subcategory = "Data Set 8"
+                elif file_num < 1262782:
+                    subcategory = "Data Set 9"
+                elif file_num < 2212883:
+                    subcategory = "Data Set 10"
+                elif file_num < 2730265:
+                    subcategory = "Data Set 11"
+                else:
+                    subcategory = "Data Set 12"
+            else:
+                subcategory = "EFTA Documents"
+        return category, subcategory
+    
+    if "DOJ Disclosures" in parts:
+        category = "DOJ Disclosures"
+        if "Flight" in filename:
+            subcategory = "Flight Logs"
+        elif "Contact" in filename:
+            subcategory = "Contact Books"
+        else:
+            subcategory = "Other Documents"
+    elif "FBI Vault" in parts:
+        category = "FBI Vault"
+        match = re.search(r'Part (\d+) of (\d+)', filename)
+        if match:
+            subcategory = f"Part {int(match.group(1)):02d} of {int(match.group(2)):02d}"
+        else:
+            subcategory = "FBI Records"
+    elif "House Disclosures" in parts:
+        category = "House Disclosures"
+        try:
+            hd_idx = parts.index("House Disclosures")
+            if hd_idx + 1 < len(parts):
+                folder_name = parts[hd_idx + 1]
+                if not folder_name.endswith(('.pdf', '.wav', '.mp3', '.mp4', '.jpg', '.tif')):
+                    subcategory = folder_name
+        except:
+            subcategory = "Other Documents"
+    elif "CourtRecords" in parts:
+        category = "Court Records"
+        try:
+            court_idx = parts.index("CourtRecords")
+            if court_idx + 1 < len(parts) - 1:
+                subcategory = parts[court_idx + 1]
+        except:
+            subcategory = "Legal_Filings"
+    elif "FOIA" in parts:
+        category = "FOIA"
+        try:
+            foia_idx = parts.index("FOIA")
+            if foia_idx + 1 < len(parts):
+                folder_name = parts[foia_idx + 1]
+                if not folder_name.endswith(('.pdf', '.wav', '.mp3', '.mp4')):
+                    subcategory = folder_name
+        except:
+            subcategory = "Other FOIA Documents"
+    
+    return category, subcategory
+
+
 # Supported file types
 PDF_EXTENSIONS = {'.pdf'}
 IMAGE_EXTENSIONS = {'.jpg', '.jpeg', '.tif', '.tiff', '.png', '.bmp', '.gif'}
@@ -76,8 +286,44 @@ class PDFExtractor:
         self.extracted_dir = self.base_path / "extracted_text"
         self.extracted_dir.mkdir(exist_ok=True)
         self.index_file = self.extracted_dir / "index.json"
+        self.failed_files_log = self.extracted_dir / "failed_pdf_files.json"
         self.index = self._load_index()
+        self.failed_files = self._load_failed_files()
         self._tesseract_available = None
+    
+    def _load_failed_files(self) -> Dict[str, Any]:
+        """Load log of previously failed files"""
+        if self.failed_files_log.exists():
+            with open(self.failed_files_log, 'r') as f:
+                return json.load(f)
+        return {"files": [], "count": 0}
+    
+    def _save_failed_file(self, filepath: Path, error: str):
+        """Log a failed file for later review"""
+        from datetime import datetime
+        # Check if already logged
+        existing_paths = [f["path"] for f in self.failed_files["files"]]
+        try:
+            rel_path = str(filepath.relative_to(self.base_path))
+        except:
+            rel_path = str(filepath)
+        
+        if rel_path not in existing_paths:
+            try:
+                size_mb = round(filepath.stat().st_size / 1024 / 1024, 2)
+            except:
+                size_mb = 0
+            
+            self.failed_files["files"].append({
+                "path": rel_path,
+                "filename": filepath.name,
+                "error": error[:200],  # Truncate long errors
+                "size_mb": size_mb,
+                "timestamp": datetime.now().isoformat()
+            })
+            self.failed_files["count"] = len(self.failed_files["files"])
+            with open(self.failed_files_log, 'w') as f:
+                json.dump(self.failed_files, f, indent=2)
     
     def _check_tesseract(self) -> bool:
         """Check if Tesseract OCR is available"""
@@ -112,11 +358,88 @@ class PDFExtractor:
             return ""
     
     def _load_index(self) -> Dict[str, Any]:
-        """Load existing extraction index"""
+        """Load existing extraction index, rebuilding from files if corrupted"""
         if self.index_file.exists():
-            with open(self.index_file, 'r') as f:
-                return json.load(f)
+            try:
+                with open(self.index_file, 'r') as f:
+                    return json.load(f)
+            except json.JSONDecodeError as e:
+                print(f"  ⚠ Index file corrupted: {e}")
+                print(f"  🔄 Rebuilding index from extracted files...")
+                return self._rebuild_index_from_files()
         return {"files": {}, "stats": {"total": 0, "processed": 0, "failed": 0}}
+    
+    def _rebuild_index_from_files(self) -> Dict[str, Any]:
+        """Rebuild index by scanning all extracted JSON files"""
+        index = {"files": {}, "stats": {"total": 0, "processed": 0, "failed": 0}}
+        
+        # Find all extracted JSON files (excluding index files)
+        # Use os.scandir for better performance with large directories
+        print(f"  📂 Scanning extracted files directory...")
+        excluded_files = {"index.json", "image_index.json", "media_index.json", 
+                          "failed_pdf_files.json", "failed_media_files.json",
+                          "index.json.corrupted"}
+        
+        json_files = []
+        try:
+            with os.scandir(self.extracted_dir) as entries:
+                for entry in entries:
+                    if entry.is_file() and entry.name.endswith('.json') and entry.name not in excluded_files:
+                        json_files.append(entry.path)
+        except Exception as e:
+            print(f"  ⚠ Error scanning directory: {e}")
+            return index
+        
+        total_files = len(json_files)
+        print(f"  📂 Found {total_files:,} extracted files to rebuild index from...")
+        
+        rebuilt_count = 0
+        errors = 0
+        last_progress = 0
+        
+        for i, json_path in enumerate(json_files):
+            try:
+                with open(json_path, 'r') as f:
+                    data = json.load(f)
+                
+                if data.get("id") and data.get("has_content"):
+                    index["files"][data["id"]] = {
+                        "filename": data.get("filename", ""),
+                        "path": data.get("path", ""),
+                        "category": data.get("category", "Unknown"),
+                        "subcategory": data.get("subcategory", ""),
+                        "page_count": data.get("page_count", 0),
+                        "char_count": data.get("char_count", 0)
+                    }
+                    rebuilt_count += 1
+            except Exception:
+                errors += 1
+                continue  # Skip corrupted individual files
+            
+            # Show progress every 10%
+            progress = int((i + 1) / total_files * 100)
+            if progress >= last_progress + 10:
+                print(f"  📊 Rebuilding: {progress}% ({i+1:,}/{total_files:,})")
+                last_progress = progress
+        
+        index["stats"]["processed"] = rebuilt_count
+        print(f"  ✓ Rebuilt index with {rebuilt_count:,} files ({errors} errors)")
+        
+        # Backup the corrupted file first
+        corrupted_backup = self.index_file.with_suffix('.json.corrupted')
+        if self.index_file.exists():
+            try:
+                import shutil
+                shutil.move(str(self.index_file), str(corrupted_backup))
+                print(f"  📦 Corrupted index backed up to: {corrupted_backup.name}")
+            except:
+                pass
+        
+        # Save the rebuilt index directly (can't use _save_index as self.index isn't set yet)
+        with open(self.index_file, 'w') as f:
+            json.dump(index, f, indent=2)
+        
+        return index
     
     def _save_index(self):
         """Save extraction index"""
@@ -124,8 +447,13 @@ class PDFExtractor:
             json.dump(self.index, f, indent=2)
     
     def _file_hash(self, filepath: Path) -> str:
-        """Generate hash for file to detect changes"""
-        return hashlib.md5(f"{filepath}_{filepath.stat().st_size}".encode()).hexdigest()
+        """Generate hash for file to detect changes
+        
+        Uses relative path from base_path to ensure consistent hashes
+        across different environments (local vs server).
+        """
+        relative_path = filepath.relative_to(self.base_path)
+        return hashlib.md5(f"{relative_path}_{filepath.stat().st_size}".encode()).hexdigest()
     
     def _clean_filename(self, filename: str) -> str:
         """Decode URL-encoded filenames and clean them"""
@@ -426,7 +754,10 @@ class PDFExtractor:
                     yield Path(root) / file
     
     def extract_all(self, max_workers: int = 4, force: bool = False, progress_callback=None) -> Dict[str, Any]:
-        """Extract text from all PDFs
+        """Extract text from all PDFs using process isolation
+        
+        Uses ProcessPoolExecutor to isolate each PDF extraction in a subprocess.
+        This prevents segfaults from corrupted PDFs from crashing the entire extraction.
         
         Args:
             max_workers: Number of parallel workers
@@ -449,12 +780,30 @@ class PDFExtractor:
         
         print(f"Processing {len(to_process)} new files ({results['skipped']} already processed)")
         
-        processed_count = 0
-        save_interval = 1000  # Save index every 1000 files to prevent progress loss
-        last_save_count = 0
+        if not to_process:
+            return results
         
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = {executor.submit(self.extract_pdf, pdf): pdf for pdf in to_process}
+        # Check if tesseract is available for OCR
+        use_ocr = self._check_tesseract()
+        
+        processed_count = 0
+        save_interval = 500  # Save index every 500 files (more frequent for crash recovery)
+        last_save_count = 0
+        file_timeout = 120  # 2 minute timeout per file
+        
+        # Prepare arguments for subprocess function
+        # Convert Path to string for pickling
+        base_path_str = str(self.base_path)
+        process_args = [(str(pdf), base_path_str, use_ocr) for pdf in to_process]
+        
+        print(f"  🔒 Using process isolation (max {max_workers} workers, {file_timeout}s timeout)")
+        print(f"  💡 Corrupted PDFs will only crash their worker, not the entire process")
+        
+        # Use ProcessPoolExecutor for crash isolation
+        # maxtasksperchild=50 restarts workers periodically to prevent memory leaks
+        with ProcessPoolExecutor(max_workers=max_workers, mp_context=multiprocessing.get_context('spawn')) as executor:
+            # Submit all jobs
+            futures = {executor.submit(_extract_pdf_subprocess, args): to_process[i] for i, args in enumerate(process_args)}
             
             for future in tqdm(as_completed(futures), total=len(to_process), desc="Extracting"):
                 pdf = futures[future]
@@ -468,7 +817,7 @@ class PDFExtractor:
                         pass
                 
                 try:
-                    result = future.result()
+                    result = future.result(timeout=file_timeout)
                     if result and result.get("has_content"):
                         # Save extracted text
                         output_file = self.extracted_dir / f"{result['id']}.json"
@@ -484,10 +833,28 @@ class PDFExtractor:
                             "char_count": result.get("char_count", 0)
                         }
                         results["success"] += 1
+                    elif result and result.get("error"):
+                        # Log the error but continue
+                        results["failed"] += 1
                     else:
                         results["failed"] += 1
+                except FuturesTimeoutError:
+                    print(f"\n  ⏱ Timeout ({file_timeout}s): {pdf.name}")
+                    self._save_failed_file(pdf, f"Timeout after {file_timeout}s")
+                    results["failed"] += 1
+                except multiprocessing.TimeoutError:
+                    print(f"\n  ⏱ Timeout ({file_timeout}s): {pdf.name}")
+                    self._save_failed_file(pdf, f"Timeout after {file_timeout}s")
+                    results["failed"] += 1
                 except Exception as e:
-                    print(f"Error processing {pdf}: {e}")
+                    # This catches BrokenProcessPool and other subprocess errors
+                    error_msg = str(e)
+                    if "BrokenProcessPool" in error_msg or "segmentation" in error_msg.lower():
+                        print(f"\n  💥 Worker crashed on {pdf.name} (corrupted PDF?)")
+                        self._save_failed_file(pdf, "Worker crashed (likely corrupted PDF)")
+                    else:
+                        print(f"\n  ✗ Error processing {pdf.name}: {e}")
+                        self._save_failed_file(pdf, error_msg)
                     results["failed"] += 1
                 
                 # Periodically save index to prevent progress loss on crash
@@ -504,6 +871,10 @@ class PDFExtractor:
         self.index["stats"]["processed"] = results["success"] + results["skipped"]
         self.index["stats"]["failed"] = results["failed"]
         self._save_index()
+        
+        # Print summary of failed files
+        if self.failed_files["count"] > 0:
+            print(f"\n  ⚠ {self.failed_files['count']} PDFs failed - see: {self.failed_files_log}")
         
         return results
 
@@ -547,8 +918,13 @@ class ImageExtractor:
             json.dump(self.index, f, indent=2)
     
     def _file_hash(self, filepath: Path) -> str:
-        """Generate hash for file to detect changes"""
-        return hashlib.md5(f"{filepath}_{filepath.stat().st_size}".encode()).hexdigest()
+        """Generate hash for file to detect changes
+        
+        Uses relative path from base_path to ensure consistent hashes
+        across different environments (local vs server).
+        """
+        relative_path = filepath.relative_to(self.base_path)
+        return hashlib.md5(f"{relative_path}_{filepath.stat().st_size}".encode()).hexdigest()
     
     def _clean_filename(self, filename: str) -> str:
         """Decode URL-encoded filenames and clean them"""
@@ -1016,8 +1392,13 @@ class AudioVideoExtractor:
             json.dump(self.index, f, indent=2)
     
     def _file_hash(self, filepath: Path) -> str:
-        """Generate hash for file to detect changes"""
-        return hashlib.md5(f"{filepath}_{filepath.stat().st_size}".encode()).hexdigest()
+        """Generate hash for file to detect changes
+        
+        Uses relative path from base_path to ensure consistent hashes
+        across different environments (local vs server).
+        """
+        relative_path = filepath.relative_to(self.base_path)
+        return hashlib.md5(f"{relative_path}_{filepath.stat().st_size}".encode()).hexdigest()
     
     def _clean_filename(self, filename: str) -> str:
         """Decode URL-encoded filenames and clean them"""

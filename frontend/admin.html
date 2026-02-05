@@ -1617,6 +1617,94 @@
 
         <!-- Content Management Tab -->
         <div id="content-tab" class="tab-panel">
+            <!-- Status Page Management -->
+            <div class="card" style="margin-bottom: var(--space-lg); border-color: var(--warning);">
+                <div class="card-header" style="background: var(--warning-dim);">
+                    <span class="card-title">🚧 Site Status Page</span>
+                    <span id="status-page-indicator" class="badge" style="margin-left: auto;">Loading...</span>
+                </div>
+                <div class="card-body">
+                    <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: var(--space-lg);">
+                        <div>
+                            <p style="margin-bottom: var(--space-xs); font-weight: 500;">Enable Maintenance Status Page</p>
+                            <p style="font-size: 0.85rem; color: var(--text-muted);">
+                                When enabled, visitors will see a maintenance page with your custom message instead of the archive.
+                            </p>
+                        </div>
+                        <label class="toggle-switch">
+                            <input type="checkbox" id="status-page-toggle" onchange="toggleStatusPage(this.checked)">
+                            <span class="toggle-slider"></span>
+                        </label>
+                    </div>
+                    
+                    <div id="status-page-form" style="display: none;">
+                        <!-- Title -->
+                        <div style="margin-bottom: var(--space-md);">
+                            <label class="login-label" style="display: block; margin-bottom: var(--space-xs);">Title</label>
+                            <input 
+                                type="text" 
+                                id="status-page-title" 
+                                class="login-input" 
+                                placeholder="Under Maintenance"
+                                style="width: 100%;"
+                            >
+                        </div>
+                        
+                        <!-- Message Templates -->
+                        <div style="margin-bottom: var(--space-md);">
+                            <label class="login-label" style="display: block; margin-bottom: var(--space-xs);">Quick Templates</label>
+                            <div style="display: flex; gap: var(--space-sm); flex-wrap: wrap;">
+                                <button class="btn btn-sm" onclick="applyStatusTemplate('maintenance')">🔧 Maintenance</button>
+                                <button class="btn btn-sm" onclick="applyStatusTemplate('technical')">⚠️ Technical Issues</button>
+                                <button class="btn btn-sm" onclick="applyStatusTemplate('upgrade')">📦 Upgrade</button>
+                                <button class="btn btn-sm" onclick="applyStatusTemplate('server')">🖥️ Server Issues</button>
+                            </div>
+                        </div>
+                        
+                        <!-- Custom Message -->
+                        <div style="margin-bottom: var(--space-md);">
+                            <label class="login-label" style="display: block; margin-bottom: var(--space-xs);">Message</label>
+                            <textarea 
+                                id="status-page-message" 
+                                class="login-input" 
+                                placeholder="We're performing scheduled maintenance. Please check back soon."
+                                rows="4"
+                                style="width: 100%; resize: vertical;"
+                            ></textarea>
+                        </div>
+                        
+                        <!-- Expected Timeline -->
+                        <div style="margin-bottom: var(--space-lg);">
+                            <label class="login-label" style="display: block; margin-bottom: var(--space-xs);">Expected Return Time (optional)</label>
+                            <input 
+                                type="text" 
+                                id="status-page-timeline" 
+                                class="login-input" 
+                                placeholder="e.g., 'in about 2 hours' or 'by 5:00 PM EST'"
+                                style="width: 100%;"
+                            >
+                            <p style="margin-top: var(--space-xs); font-size: 0.8rem; color: var(--text-muted);">
+                                A friendly description of when users can expect the site to be back online.
+                            </p>
+                        </div>
+                        
+                        <!-- Save Button -->
+                        <button class="btn btn-primary" onclick="saveStatusPageSettings()" style="width: 100%;">
+                            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/>
+                                <polyline points="17 21 17 13 7 13 7 21"/>
+                                <polyline points="7 3 7 8 15 8"/>
+                            </svg>
+                            Save Status Page Settings
+                        </button>
+                    </div>
+                    
+                    <div id="status-page-info" style="padding: var(--space-md); background: var(--bg-tertiary); border-radius: 6px; margin-top: var(--space-md);">
+                        <span style="color: var(--text-muted);">Loading status page info...</span>
+                    </div>
+                </div>
+            </div>
+
             <!-- Ask AI Toggle -->
             <div class="card" style="margin-bottom: var(--space-lg);">
                 <div class="card-header">
@@ -2088,7 +2176,7 @@
         </div>
     </main>
 
-    <script src="/static/admin.js?v=5"></script>
+    <script src="/static/admin.js?v=6"></script>
 </body>
 </html>
 

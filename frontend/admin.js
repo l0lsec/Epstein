@@ -1611,12 +1611,213 @@ async function deleteFeedback(feedbackId) {
 
 async function loadContentData() {
     await Promise.all([
+        loadStatusPageSettings(),
         loadAskAIStatus(),
         loadPinnedDocsStatus(),
         loadPinnedDocuments(),
         loadKeywords(),
         loadDojCompleteness()
     ]);
+}
+
+// =============================================================================
+// STATUS PAGE MANAGEMENT FUNCTIONS
+// =============================================================================
+
+// Status page message templates
+const STATUS_TEMPLATES = {
+    maintenance: {
+        title: "Under Maintenance",
+        message: "We're performing scheduled maintenance to improve your experience. The archive will be back online shortly."
+    },
+    technical: {
+        title: "Technical Difficulties",
+        message: "We're experiencing technical difficulties and are working to resolve them as quickly as possible. We apologize for any inconvenience."
+    },
+    upgrade: {
+        title: "System Upgrade in Progress",
+        message: "We're upgrading our systems with new features and improvements. The archive will be back online once the upgrade is complete."
+    },
+    server: {
+        title: "Server Unavailable",
+        message: "Our servers are temporarily unavailable due to unexpected issues. Our team is working to restore service. Thank you for your patience."
+    }
+};
+
+async function loadStatusPageSettings() {
+    try {
+        const response = await authFetch(`${window.location.origin}/api/admin/status-page`);
+        if (!response.ok) throw new Error('Failed to load status page settings');
+        const data = await response.json();
+        
+        const toggle = document.getElementById('status-page-toggle');
+        const form = document.getElementById('status-page-form');
+        const indicator = document.getElementById('status-page-indicator');
+        const infoEl = document.getElementById('status-page-info');
+        
+        // Update toggle state
+        if (toggle) toggle.checked = data.enabled;
+        
+        // Show/hide form based on state
+        if (form) form.style.display = data.enabled ? 'block' : 'none';
+        
+        // Update indicator badge
+        if (indicator) {
+            if (data.indexing_active) {
+                indicator.className = 'badge badge-warning';
+                indicator.textContent = '⏳ Indexing Active';
+            } else if (data.enabled) {
+                indicator.className = 'badge badge-danger';
+                indicator.textContent = '🚧 Status Page Active';
+            } else {
+                indicator.className = 'badge badge-success';
+                indicator.textContent = '✓ Site Online';
+            }
+        }
+        
+        // Populate form fields
+        document.getElementById('status-page-title').value = data.title || 'Under Maintenance';
+        document.getElementById('status-page-message').value = data.message || '';
+        document.getElementById('status-page-timeline').value = data.timeline || '';
+        
+        // Update info panel
+        if (infoEl) {
+            if (data.indexing_active) {
+                infoEl.innerHTML = `
+                    <div style="color: var(--warning);">
+                        <strong>⏳ Indexing in Progress</strong><br>
+                        <span style="font-size: 0.85rem;">The site is currently showing the indexing progress page. 
+                        The custom status page will not be shown until indexing completes.</span>
+                    </div>
+                `;
+            } else if (data.enabled) {
+                const startedText = data.started ? `Started: ${new Date(data.started).toLocaleString()}` : '';
+                infoEl.innerHTML = `
+                    <div style="color: var(--danger);">
+                        <strong>🚧 Status Page is LIVE</strong><br>
+                        <span style="font-size: 0.85rem;">Visitors are currently seeing the maintenance page instead of the archive.</span>
+                        ${startedText ? `<br><span style="font-size: 0.8rem; color: var(--text-muted);">${startedText}</span>` : ''}
+                    </div>
+                `;
+            } else {
+                infoEl.innerHTML = `
+                    <div style="color: var(--success);">
+                        <strong>✓ Site is Online</strong><br>
+                        <span style="font-size: 0.85rem;">The archive is accessible to visitors. Enable the status page when you need to take the site down for maintenance.</span>
+                    </div>
+                `;
+            }
+        }
+        
+    } catch (error) {
+        console.error('Error loading status page settings:', error);
+        const infoEl = document.getElementById('status-page-info');
+        if (infoEl) infoEl.innerHTML = '<span style="color: var(--danger);">Error loading status page settings</span>';
+    }
+}
+
+async function toggleStatusPage(enabled) {
+    const toggle = document.getElementById('status-page-toggle');
+    const form = document.getElementById('status-page-form');
+    
+    // Show/hide form
+    if (form) form.style.display = enabled ? 'block' : 'none';
+    
+    if (enabled) {
+        // When enabling, just show the form - user needs to click Save
+        // Pre-populate with defaults if empty
+        const titleEl = document.getElementById('status-page-title');
+        const messageEl = document.getElementById('status-page-message');
+        
+        if (!titleEl.value) titleEl.value = 'Under Maintenance';
+        if (!messageEl.value) messageEl.value = STATUS_TEMPLATES.maintenance.message;
+        
+    } else {
+        // When disabling, immediately disable the status page
+        if (!confirm('Are you sure you want to disable the status page? The site will be accessible to visitors again.')) {
+            if (toggle) toggle.checked = true;
+            if (form) form.style.display = 'block';
+            return;
+        }
+        
+        try {
+            const response = await authFetch(`${window.location.origin}/api/admin/status-page/disable`, {
+                method: 'POST'
+            });
+            
+            if (!response.ok) throw new Error('Failed to disable status page');
+            
+            // Reload settings to update UI
+            await loadStatusPageSettings();
+            
+        } catch (error) {
+            console.error('Error disabling status page:', error);
+            alert('Error: ' + error.message);
+            // Revert toggle
+            if (toggle) toggle.checked = true;
+            if (form) form.style.display = 'block';
+        }
+    }
+}
+
+function applyStatusTemplate(templateName) {
+    const template = STATUS_TEMPLATES[templateName];
+    if (!template) return;
+    
+    document.getElementById('status-page-title').value = template.title;
+    document.getElementById('status-page-message').value = template.message;
+}
+
+async function saveStatusPageSettings() {
+    const enabled = document.getElementById('status-page-toggle').checked;
+    const title = document.getElementById('status-page-title').value.trim();
+    const message = document.getElementById('status-page-message').value.trim();
+    const timeline = document.getElementById('status-page-timeline').value.trim();
+    
+    if (!title) {
+        alert('Please enter a title for the status page');
+        return;
+    }
+    
+    if (!message) {
+        alert('Please enter a message for the status page');
+        return;
+    }
+    
+    // Confirm if enabling
+    if (enabled) {
+        const confirmMsg = `Are you sure you want to enable the status page?\n\nThis will immediately take the site offline for visitors.\n\nTitle: ${title}\nMessage: ${message}\n${timeline ? 'Timeline: ' + timeline : ''}`;
+        if (!confirm(confirmMsg)) {
+            return;
+        }
+    }
+    
+    try {
+        const response = await authFetch(`${window.location.origin}/api/admin/status-page`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                enabled: enabled,
+                title: title,
+                message: message,
+                timeline: timeline
+            })
+        });
+        
+        if (!response.ok) {
+            const data = await response.json();
+            throw new Error(data.detail || 'Failed to save status page settings');
+        }
+        
+        alert(enabled ? '✓ Status page is now LIVE. Visitors will see the maintenance page.' : '✓ Settings saved.');
+        
+        // Reload settings to update UI
+        await loadStatusPageSettings();
+        
+    } catch (error) {
+        console.error('Error saving status page settings:', error);
+        alert('Error: ' + error.message);
+    }
 }
 
 async function loadAskAIStatus() {
@@ -2460,6 +2661,12 @@ function escapeHtml(str) {
               .replace(/"/g, '&quot;')
               .replace(/'/g, '&#039;');
 }
+
+// Export Status Page functions
+window.loadStatusPageSettings = loadStatusPageSettings;
+window.toggleStatusPage = toggleStatusPage;
+window.applyStatusTemplate = applyStatusTemplate;
+window.saveStatusPageSettings = saveStatusPageSettings;
 
 // Export DOJ functions
 window.loadDojCompleteness = loadDojCompleteness;

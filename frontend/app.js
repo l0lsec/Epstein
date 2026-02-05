@@ -49,6 +49,14 @@ async function init() {
     if (timestampField) {
         timestampField.value = Date.now().toString();
     }
+    
+    // Check for ?doc= parameter to auto-open a shared document
+    const urlParams = new URLSearchParams(window.location.search);
+    const docId = urlParams.get('doc');
+    if (docId) {
+        // Small delay to ensure everything is loaded
+        setTimeout(() => openDocument(docId), 100);
+    }
 }
 
 function cacheElements() {
@@ -1891,6 +1899,14 @@ function handleShare(platform) {
             appUrl = `linkedin://shareArticle?url=${encodeURIComponent(shareUrl)}&title=${encodeURIComponent(shareText)}`;
             // Android Intent for LinkedIn
             intentUrl = `intent://shareArticle?url=${encodeURIComponent(shareUrl)}#Intent;package=com.linkedin.android;scheme=linkedin;end`;
+            break;
+        case 'threads':
+            // Threads Web Intent URL (combines text and URL in single text param)
+            webUrl = `https://www.threads.net/intent/post?text=${encodeURIComponent(shareText + ' ' + shareUrl)}`;
+            // iOS deep link
+            appUrl = `threads://post?text=${encodeURIComponent(shareText + ' ' + shareUrl)}`;
+            // Android Intent (Threads package is com.instagram.barcelona)
+            intentUrl = `intent://post?text=${encodeURIComponent(shareText + ' ' + shareUrl)}#Intent;package=com.instagram.barcelona;scheme=threads;end`;
             break;
         case 'copy':
             copyToClipboard(shareUrl).then(success => {
