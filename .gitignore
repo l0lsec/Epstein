@@ -50,3 +50,4 @@ extracted_text/
 backend/__init__.py
 mlx_models/
 deploy_extracted_data.sh
+.maintenance

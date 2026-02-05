@@ -121,6 +121,12 @@ function cacheElements() {
     elements.docPrevBtn = document.getElementById('doc-prev-btn');
     elements.docNextBtn = document.getElementById('doc-next-btn');
     elements.docNavInfo = document.getElementById('doc-nav-info');
+    
+    // Search Help & Query Feedback
+    elements.searchHelpToggle = document.getElementById('search-help-toggle');
+    elements.searchHelpContent = document.getElementById('search-help-content');
+    elements.queryFeedback = document.getElementById('query-feedback');
+    elements.feedbackTerms = document.getElementById('feedback-terms');
 }
 
 function setupEventListeners() {
@@ -138,6 +144,11 @@ function setupEventListeners() {
     // Clear search button
     if (elements.clearSearchBtn) {
         elements.clearSearchBtn.addEventListener('click', clearSearch);
+    }
+    
+    // Search help toggle
+    if (elements.searchHelpToggle) {
+        elements.searchHelpToggle.addEventListener('click', toggleSearchHelp);
     }
     
     // Search category change - load subcategories and re-run search
@@ -915,6 +926,11 @@ async function performSearchWithPagination() {
         state.searchTotal = data.total;
         renderSearchResults(data);
         
+        // Display query interpretation feedback if Boolean operators were used
+        if (data.parsed_query) {
+            displayQueryFeedback(data.parsed_query);
+        }
+        
         // Hide stats, show results
         elements.statsDisplay.classList.add('hidden');
         elements.searchResults.classList.remove('hidden');
@@ -926,6 +942,10 @@ async function performSearchWithPagination() {
         console.error('Search error:', error);
         elements.resultsList.innerHTML = '<p class="error">Search failed. Please try again.</p>';
         elements.searchResults.classList.remove('hidden');
+        // Hide query feedback on error
+        if (elements.queryFeedback) {
+            elements.queryFeedback.classList.add('hidden');
+        }
     } finally {
         elements.searchBtn.disabled = false;
         elements.searchBtn.innerHTML = '<span>Search</span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12h14m-7-7l7 7-7 7"/></svg>';
@@ -976,6 +996,11 @@ async function clearSearch() {
         elements.clearSearchBtn.classList.add('hidden');
     }
     
+    // Hide query feedback
+    if (elements.queryFeedback) {
+        elements.queryFeedback.classList.add('hidden');
+    }
+    
     // Reload original categories with full counts
     await loadCategories();
     
@@ -984,6 +1009,99 @@ async function clearSearch() {
     
     // Scroll to top
     window.scrollTo({ top: 0, behavior: 'smooth' });
+}
+
+/**
+ * Toggle search help section visibility
+ */
+function toggleSearchHelp() {
+    if (!elements.searchHelpContent || !elements.searchHelpToggle) return;
+    
+    const isExpanded = elements.searchHelpToggle.getAttribute('aria-expanded') === 'true';
+    
+    elements.searchHelpToggle.setAttribute('aria-expanded', !isExpanded);
+    elements.searchHelpContent.classList.toggle('hidden');
+    
+    // Animate the chevron
+    const chevron = elements.searchHelpToggle.querySelector('.chevron-icon');
+    if (chevron) {
+        chevron.style.transform = isExpanded ? 'rotate(0deg)' : 'rotate(180deg)';
+    }
+}
+
+/**
+ * Display visual feedback showing how the search query was interpreted
+ * @param {Object} parsedQuery - The parsed_query object from the search response
+ */
+function displayQueryFeedback(parsedQuery) {
+    if (!elements.queryFeedback || !elements.feedbackTerms || !parsedQuery) {
+        return;
+    }
+    
+    const { excluded_terms, required_terms, phrases, has_or, has_wildcards } = parsedQuery;
+    
+    // Don't show feedback if query is simple (no special operators)
+    const hasSpecialOperators = (excluded_terms && excluded_terms.length > 0) ||
+                                (phrases && phrases.length > 0) ||
+                                has_or ||
+                                has_wildcards;
+    
+    if (!hasSpecialOperators) {
+        elements.queryFeedback.classList.add('hidden');
+        return;
+    }
+    
+    // Build the feedback HTML
+    let feedbackHTML = '';
+    
+    // Show required terms
+    if (required_terms && required_terms.length > 0) {
+        const termsWithoutPhrases = required_terms.filter(t => !phrases.includes(t));
+        if (termsWithoutPhrases.length > 0) {
+            feedbackHTML += termsWithoutPhrases.map(term => 
+                `<span class="feedback-term feedback-required">${escapeHtml(term)}${term.endsWith('*') ? '' : ''}</span>`
+            ).join(' ');
+        }
+    }
+    
+    // Show phrases
+    if (phrases && phrases.length > 0) {
+        if (feedbackHTML) feedbackHTML += ' ';
+        feedbackHTML += phrases.map(phrase => 
+            `<span class="feedback-term feedback-phrase">"${escapeHtml(phrase)}"</span>`
+        ).join(' ');
+    }
+    
+    // Show OR indicator
+    if (has_or) {
+        feedbackHTML += ' <span class="feedback-operator">OR</span> ';
+    }
+    
+    // Show excluded terms
+    if (excluded_terms && excluded_terms.length > 0) {
+        if (feedbackHTML && !has_or) feedbackHTML += ' ';
+        feedbackHTML += '<span class="feedback-excluding">excluding:</span> ';
+        feedbackHTML += excluded_terms.map(term => 
+            `<span class="feedback-term feedback-excluded">${escapeHtml(term)}</span>`
+        ).join(' ');
+    }
+    
+    // Show wildcard indicator
+    if (has_wildcards) {
+        feedbackHTML += ' <span class="feedback-note">(prefix matching)</span>';
+    }
+    
+    elements.feedbackTerms.innerHTML = feedbackHTML;
+    elements.queryFeedback.classList.remove('hidden');
+}
+
+/**
+ * Escape HTML to prevent XSS
+ */
+function escapeHtml(text) {
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
 }
 
 function renderSearchResults(data) {

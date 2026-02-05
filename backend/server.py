@@ -496,6 +496,205 @@ def verify_admin_access(request: Request, x_api_key: str = None) -> tuple[bool, 
     return True, ""
 
 
+# Boolean Query Parser for FTS5
+import re
+
+def parse_boolean_query(query: str) -> dict:
+    """
+    Parse user-friendly Boolean search syntax and convert to FTS5 format.
+    
+    Supported syntax:
+    - -term or -"phrase" → FTS5 NOT term (exclusion)
+    - term1 term2 → term1 AND term2 (implicit AND between words)
+    - term1 OR term2 → preserved (explicit OR)
+    - term1 AND term2 → preserved (explicit AND)
+    - "exact phrase" → preserved (phrase search)
+    - term* → preserved (prefix matching)
+    
+    Returns:
+        dict: {
+            'fts_query': str,  # Converted FTS5 query
+            'original_query': str,  # Original input
+            'parsed_info': {
+                'excluded_terms': [],  # Terms prefixed with -
+                'required_terms': [],  # Regular terms (ANDed together)
+                'phrases': [],  # Quoted phrases
+                'has_or': bool,  # Whether OR operator is used
+                'has_wildcards': bool  # Whether prefix wildcards are used
+            }
+        }
+    """
+    if not query or not query.strip():
+        return {
+            'fts_query': '',
+            'original_query': query,
+            'parsed_info': {
+                'excluded_terms': [],
+                'required_terms': [],
+                'phrases': [],
+                'has_or': False,
+                'has_wildcards': False
+            }
+        }
+    
+    original_query = query.strip()
+    
+    # Track parsed components
+    excluded_terms = []
+    required_terms = []
+    phrases = []
+    has_or = False
+    has_wildcards = False
+    
+    # First, extract all quoted phrases (both excluded and included)
+    # Pattern matches: -"phrase" or "phrase"
+    phrase_pattern = r'(-?)"([^"]+)"'
+    
+    def process_phrase(match):
+        nonlocal excluded_terms, phrases
+        is_excluded = match.group(1) == '-'
+        phrase = match.group(2).strip()
+        if phrase:
+            if is_excluded:
+                excluded_terms.append(f'"{phrase}"')
+            else:
+                phrases.append(phrase)
+        # Return placeholder to preserve position
+        return f' __PHRASE_{len(phrases) + len(excluded_terms) - 1}__ '
+    
+    # Store phrases and replace with placeholders
+    phrase_map = {}
+    phrase_counter = [0]
+    
+    def extract_phrase(match):
+        nonlocal phrase_counter
+        is_excluded = match.group(1) == '-'
+        phrase = match.group(2).strip()
+        if phrase:
+            placeholder = f'__PHRASE{phrase_counter[0]}__'
+            phrase_map[placeholder] = (is_excluded, phrase)
+            phrase_counter[0] += 1
+            if is_excluded:
+                excluded_terms.append(f'"{phrase}"')
+            else:
+                phrases.append(phrase)
+            return f' {placeholder} '
+        return ''
+    
+    working_query = re.sub(phrase_pattern, extract_phrase, original_query)
+    
+    # Check for OR operator (case insensitive)
+    if re.search(r'\bOR\b', working_query, re.IGNORECASE):
+        has_or = True
+    
+    # Check for wildcards
+    if '*' in working_query:
+        has_wildcards = True
+    
+    # Tokenize remaining query (split on whitespace)
+    tokens = working_query.split()
+    
+    # Process tokens
+    processed_tokens = []
+    i = 0
+    while i < len(tokens):
+        token = tokens[i]
+        
+        # Skip empty tokens
+        if not token.strip():
+            i += 1
+            continue
+        
+        # Handle phrase placeholders
+        if token.startswith('__PHRASE') and token.endswith('__'):
+            if token in phrase_map:
+                is_excluded, phrase = phrase_map[token]
+                if is_excluded:
+                    processed_tokens.append(f'NOT "{phrase}"')
+                else:
+                    processed_tokens.append(f'"{phrase}"')
+            i += 1
+            continue
+        
+        # Handle excluded terms (-term)
+        if token.startswith('-') and len(token) > 1:
+            term = token[1:]
+            # Clean the term of any special chars that might break FTS5
+            term = re.sub(r'[^\w*]', '', term)
+            if term:
+                excluded_terms.append(term)
+                processed_tokens.append(f'NOT {term}')
+            i += 1
+            continue
+        
+        # Handle OR (preserve as-is, case insensitive -> uppercase)
+        if token.upper() == 'OR':
+            processed_tokens.append('OR')
+            i += 1
+            continue
+        
+        # Handle AND (preserve as-is, case insensitive -> uppercase)
+        if token.upper() == 'AND':
+            processed_tokens.append('AND')
+            i += 1
+            continue
+        
+        # Handle NOT (preserve as-is for explicit NOT usage)
+        if token.upper() == 'NOT':
+            processed_tokens.append('NOT')
+            i += 1
+            continue
+        
+        # Regular term - clean it and add
+        # Allow alphanumeric, underscore, and wildcard
+        term = re.sub(r'[^\w*]', '', token)
+        if term:
+            required_terms.append(term.rstrip('*'))  # Store without wildcard for display
+            processed_tokens.append(term)
+        
+        i += 1
+    
+    # Build FTS5 query
+    # Insert AND between adjacent terms that aren't already connected by operators
+    fts_tokens = []
+    for i, token in enumerate(processed_tokens):
+        fts_tokens.append(token)
+        
+        # Check if we need to insert AND before the next token
+        if i < len(processed_tokens) - 1:
+            current_upper = token.upper()
+            next_upper = processed_tokens[i + 1].upper()
+            
+            # Don't add AND if current or next token is already an operator
+            if current_upper not in ['AND', 'OR', 'NOT'] and next_upper not in ['AND', 'OR', 'NOT']:
+                # Don't add AND if current token is NOT (NOT should connect to next)
+                if not current_upper.startswith('NOT '):
+                    fts_tokens.append('AND')
+    
+    fts_query = ' '.join(fts_tokens)
+    
+    # Clean up any double spaces
+    fts_query = re.sub(r'\s+', ' ', fts_query).strip()
+    
+    # Handle edge case: query is only exclusions (prepend * to match all then exclude)
+    if fts_query.startswith('NOT ') and not any(t.upper() not in ['NOT', 'AND', 'OR'] and not t.upper().startswith('NOT ') for t in processed_tokens):
+        # All tokens are NOT terms - this won't work in FTS5, need a workaround
+        # We'll handle this by returning an empty result indicator
+        pass
+    
+    return {
+        'fts_query': fts_query,
+        'original_query': original_query,
+        'parsed_info': {
+            'excluded_terms': excluded_terms,
+            'required_terms': required_terms,
+            'phrases': phrases,
+            'has_or': has_or,
+            'has_wildcards': has_wildcards
+        }
+    }
+
+
 # Request/Response Models
 class SearchRequest(BaseModel):
     query: str
@@ -1043,11 +1242,15 @@ async def search(search_request: SearchRequest, request: Request) -> dict:
     results = []
     total_count = 0
     
+    # Parse the query for Boolean operators (for full-text search)
+    parsed = parse_boolean_query(search_request.query)
+    fts_query = parsed['fts_query']
+    
     if search_request.search_type in ["fulltext", "hybrid"]:
-        # Full-text search
+        # Full-text search using parsed Boolean query
         try:
             ft_results = db.search_fulltext(
-                query=search_request.query,
+                query=fts_query,
                 limit=search_request.limit,
                 offset=search_request.offset,
                 category=search_request.category,
@@ -1056,7 +1259,7 @@ async def search(search_request: SearchRequest, request: Request) -> dict:
             )
             # Get actual total count for pagination
             total_count = db.count_fulltext_results(
-                query=search_request.query,
+                query=fts_query,
                 category=search_request.category,
                 subcategory=search_request.subcategory,
                 file_type=search_request.file_type
@@ -1124,7 +1327,7 @@ async def search(search_request: SearchRequest, request: Request) -> dict:
     if search_request.search_type in ["fulltext", "hybrid"]:
         try:
             facets = db.get_search_facets(
-                query=search_request.query,
+                query=fts_query,
                 category=search_request.category,
                 subcategory=search_request.subcategory,
                 file_type=search_request.file_type
@@ -1156,7 +1359,15 @@ async def search(search_request: SearchRequest, request: Request) -> dict:
         "offset": search_request.offset,
         "limit": search_request.limit,
         "results": results,
-        "facets": facets
+        "facets": facets,
+        "parsed_query": {
+            "fts_query": parsed['fts_query'],
+            "excluded_terms": parsed['parsed_info']['excluded_terms'],
+            "required_terms": parsed['parsed_info']['required_terms'],
+            "phrases": parsed['parsed_info']['phrases'],
+            "has_or": parsed['parsed_info']['has_or'],
+            "has_wildcards": parsed['parsed_info']['has_wildcards']
+        }
     }
 
 

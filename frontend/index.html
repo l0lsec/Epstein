@@ -37,7 +37,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Crimson+Pro:wght@400;500;600&family=JetBrains+Mono:wght@400;500&family=Source+Sans+3:wght@300;400;500;600;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="/static/styles.css?v=24">
+    <link rel="stylesheet" href="/static/styles.css?v=25">
     
     <!-- Structured Data (JSON-LD) -->
     <script type="application/ld+json">
@@ -154,6 +154,67 @@
                                 <option value="video">🎬 Video</option>
                             </select>
                         </div>
+                    </div>
+                    
+                    <!-- Search Syntax Help -->
+                    <div class="search-help">
+                        <button class="search-help-toggle" id="search-help-toggle" type="button" aria-expanded="false">
+                            <svg class="help-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
+                                <circle cx="12" cy="12" r="10"/>
+                                <path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/>
+                                <line x1="12" y1="17" x2="12.01" y2="17"/>
+                            </svg>
+                            <span>Search Tips &amp; Boolean Operators</span>
+                            <svg class="chevron-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
+                                <polyline points="6 9 12 15 18 9"/>
+                            </svg>
+                        </button>
+                        <div class="search-help-content hidden" id="search-help-content">
+                            <div class="help-section">
+                                <h4>Boolean Search Operators</h4>
+                                <div class="help-grid">
+                                    <div class="help-item">
+                                        <code class="help-syntax">-term</code>
+                                        <span class="help-desc">Exclude results containing "term"</span>
+                                        <span class="help-example">e.g., <code>Epstein -Maxwell</code></span>
+                                    </div>
+                                    <div class="help-item">
+                                        <code class="help-syntax">-"exact phrase"</code>
+                                        <span class="help-desc">Exclude an exact phrase</span>
+                                        <span class="help-example">e.g., <code>flight -"passenger list"</code></span>
+                                    </div>
+                                    <div class="help-item">
+                                        <code class="help-syntax">term1 OR term2</code>
+                                        <span class="help-desc">Match either term</span>
+                                        <span class="help-example">e.g., <code>flight OR travel</code></span>
+                                    </div>
+                                    <div class="help-item">
+                                        <code class="help-syntax">"exact phrase"</code>
+                                        <span class="help-desc">Search for exact phrase</span>
+                                        <span class="help-example">e.g., <code>"flight log"</code></span>
+                                    </div>
+                                    <div class="help-item">
+                                        <code class="help-syntax">term*</code>
+                                        <span class="help-desc">Prefix/wildcard search</span>
+                                        <span class="help-example">e.g., <code>invest*</code> matches invest, investigation, etc.</span>
+                                    </div>
+                                    <div class="help-item">
+                                        <code class="help-syntax">term1 term2</code>
+                                        <span class="help-desc">Both terms required (AND)</span>
+                                        <span class="help-example">e.g., <code>Maxwell deposition</code></span>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="help-note">
+                                <strong>Tip:</strong> Combine operators for powerful searches like <code>Epstein "flight log" -redacted</code>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <!-- Query Interpretation Feedback -->
+                    <div class="query-feedback hidden" id="query-feedback">
+                        <span class="feedback-label">Searching for:</span>
+                        <div class="feedback-terms" id="feedback-terms"></div>
                     </div>
                 </div>
             </div>
@@ -509,7 +570,7 @@
     </footer>
 
     <script src="https://www.google.com/recaptcha/api.js?render=6Lf9EDYsAAAAANDlA_xYFIM7Ylccgmc24LhZgDIr"></script>
-    <script src="/static/app.js?v=27"></script></invoke>
+    <script src="/static/app.js?v=28"></script></invoke>
 </body>
 </html>
 
