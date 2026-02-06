@@ -2489,8 +2489,16 @@ async function deleteKeyword(keywordId, keywordName) {
         });
         
         if (!response.ok) {
-            const data = await response.json();
-            throw new Error(data.detail || 'Failed to delete keyword');
+            let errorMessage = 'Failed to delete keyword';
+            const text = await response.text();
+            try {
+                const data = JSON.parse(text);
+                errorMessage = data.detail || errorMessage;
+            } catch (e) {
+                // Response wasn't valid JSON
+                errorMessage = text || `Server error (${response.status})`;
+            }
+            throw new Error(errorMessage);
         }
         
         loadKeywords();
