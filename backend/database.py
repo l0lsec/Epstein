@@ -1545,6 +1545,106 @@ class Database:
             conn.commit()
             return cursor.rowcount
     
+    def get_documents_for_export(self, category: Optional[str] = None,
+                                  subcategory: Optional[str] = None,
+                                  file_type: Optional[str] = None,
+                                  filename: Optional[str] = None,
+                                  keyword: Optional[str] = None,
+                                  search_query: Optional[str] = None,
+                                  max_results: int = 50000) -> List[Dict[str, Any]]:
+        """Get documents with DOJ manifest URLs for CSV export
+        
+        Args:
+            category: Filter by category
+            subcategory: Filter by subcategory
+            file_type: Filter by file type
+            filename: Partial filename match
+            keyword: Keyword search using FTS
+            search_query: Full-text search query
+            max_results: Maximum number of results (default 50,000)
+        
+        Returns:
+            List of dicts with: filename, category, subcategory, doj_url
+        """
+        with self.get_connection() as conn:
+            params = []
+            conditions = []
+            
+            # Base query with LEFT JOIN to doj_manifest
+            if search_query:
+                # Full-text search mode
+                sql = """
+                    SELECT DISTINCT 
+                        d.filename, d.category, d.subcategory, dm.url as doj_url
+                    FROM documents_fts
+                    JOIN documents d ON documents_fts.id = d.id
+                    LEFT JOIN hidden_categories hc ON d.category = hc.category
+                    LEFT JOIN doj_manifest dm ON d.filename = dm.filename
+                    WHERE documents_fts MATCH ?
+                """
+                params.append(search_query)
+                # Exclude hidden
+                conditions.append("(d.is_hidden IS NULL OR d.is_hidden = 0)")
+                conditions.append("hc.category IS NULL")
+            elif keyword:
+                # Keyword search mode
+                sql = """
+                    SELECT DISTINCT 
+                        d.filename, d.category, d.subcategory, dm.url as doj_url
+                    FROM documents d
+                    JOIN documents_fts fts ON d.id = fts.id
+                    LEFT JOIN hidden_categories hc ON d.category = hc.category
+                    LEFT JOIN doj_manifest dm ON d.filename = dm.filename
+                    WHERE documents_fts MATCH ?
+                """
+                escaped_keyword = keyword.replace('"', '""')
+                params.append(f'"{escaped_keyword}"*')
+                # Exclude hidden
+                conditions.append("(d.is_hidden IS NULL OR d.is_hidden = 0)")
+                conditions.append("hc.category IS NULL")
+            else:
+                # Browse mode (no search)
+                sql = """
+                    SELECT 
+                        d.filename, d.category, d.subcategory, dm.url as doj_url
+                    FROM documents d
+                    LEFT JOIN hidden_categories hc ON d.category = hc.category
+                    LEFT JOIN doj_manifest dm ON d.filename = dm.filename
+                """
+                # Exclude hidden
+                conditions.append("(d.is_hidden IS NULL OR d.is_hidden = 0)")
+                conditions.append("hc.category IS NULL")
+            
+            # Apply filters
+            if category:
+                conditions.append("d.category = ?")
+                params.append(category)
+            
+            if subcategory:
+                conditions.append("d.subcategory = ?")
+                params.append(subcategory)
+            
+            if file_type:
+                conditions.append("d.file_type = ?")
+                params.append(file_type)
+            
+            if filename:
+                conditions.append("LOWER(d.filename) LIKE LOWER(?)")
+                params.append(f"%{filename}%")
+            
+            # Add conditions to query
+            if conditions:
+                if search_query or keyword:
+                    sql += " AND " + " AND ".join(conditions)
+                else:
+                    sql += " WHERE " + " AND ".join(conditions)
+            
+            sql += " ORDER BY d.filename LIMIT ?"
+            params.append(max_results)
+            
+            cursor = conn.execute(sql, params)
+            return [dict(row) for row in cursor]
+    
     # =========================================================================
     # Document Visibility Methods
     # =========================================================================

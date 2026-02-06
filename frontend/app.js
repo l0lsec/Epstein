@@ -422,6 +422,17 @@ function setupEventListeners() {
             }
         }
     });
+    
+    // Export CSV buttons
+    const exportSearchBtn = document.getElementById('export-search-results');
+    if (exportSearchBtn) {
+        exportSearchBtn.addEventListener('click', exportSearchResults);
+    }
+    
+    const exportBrowseBtn = document.getElementById('export-browse-results');
+    if (exportBrowseBtn) {
+        exportBrowseBtn.addEventListener('click', exportBrowseDocuments);
+    }
 }
 
 async function handleFeedbackSubmit(e) {
@@ -2404,5 +2415,158 @@ function sanitizeSnippet(html) {
     });
     
     return div.innerHTML;
+}
+
+// =============================================================================
+// CSV Export Functions
+// =============================================================================
+
+/**
+ * Export search results to CSV
+ * Exports all matching documents (not just current page) with DOJ links
+ */
+async function exportSearchResults() {
+    const btn = document.getElementById('export-search-results');
+    if (!state.lastSearchParams) {
+        alert('Please perform a search first.');
+        return;
+    }
+    
+    try {
+        // Show loading state
+        const originalText = btn.textContent;
+        btn.textContent = 'Exporting...';
+        btn.disabled = true;
+        
+        // Build export params from last search
+        const params = new URLSearchParams();
+        if (state.lastSearchParams.query) {
+            params.append('search_query', state.lastSearchParams.query);
+        }
+        if (state.lastSearchParams.search_type) {
+            params.append('search_type', state.lastSearchParams.search_type);
+        }
+        if (state.lastSearchParams.category) {
+            params.append('category', state.lastSearchParams.category);
+        }
+        if (state.lastSearchParams.subcategory) {
+            params.append('subcategory', state.lastSearchParams.subcategory);
+        }
+        if (state.lastSearchParams.file_type) {
+            params.append('file_type', state.lastSearchParams.file_type);
+        }
+        
+        const response = await fetch(`${API_BASE}/documents/export?${params}`);
+        if (!response.ok) throw new Error('Export failed');
+        
+        const data = await response.json();
+        downloadCSV(data.documents, `search_export_${new Date().toISOString().split('T')[0]}.csv`);
+        
+    } catch (error) {
+        console.error('Export error:', error);
+        alert('Failed to export results. Please try again.');
+    } finally {
+        // Restore button
+        btn.textContent = 'Export CSV';
+        btn.disabled = false;
+    }
+}
+
+/**
+ * Export browse documents to CSV
+ * Exports all matching documents (not just current page) with DOJ links
+ */
+async function exportBrowseDocuments() {
+    const btn = document.getElementById('export-browse-results');
+    
+    try {
+        // Show loading state
+        const originalText = btn.textContent;
+        btn.textContent = 'Exporting...';
+        btn.disabled = true;
+        
+        // Build export params from current browse filters
+        const params = new URLSearchParams();
+        if (state.browseCategory) {
+            params.append('category', state.browseCategory);
+        }
+        if (state.browseSubcategory) {
+            params.append('subcategory', state.browseSubcategory);
+        }
+        if (state.browseFileType) {
+            params.append('file_type', state.browseFileType);
+        }
+        if (state.browseFilename) {
+            params.append('filename', state.browseFilename);
+        }
+        if (state.browseKeyword) {
+            params.append('keyword', state.browseKeyword);
+        }
+        
+        const response = await fetch(`${API_BASE}/documents/export?${params}`);
+        if (!response.ok) throw new Error('Export failed');
+        
+        const data = await response.json();
+        downloadCSV(data.documents, `documents_export_${new Date().toISOString().split('T')[0]}.csv`);
+        
+    } catch (error) {
+        console.error('Export error:', error);
+        alert('Failed to export documents. Please try again.');
+    } finally {
+        // Restore button
+        btn.textContent = 'Export CSV';
+        btn.disabled = false;
+    }
+}
+
+/**
+ * Generate and download CSV from documents array
+ * @param {Array} documents - Array of {filename, category, subcategory, doj_url}
+ * @param {string} filename - Name for downloaded file
+ */
+function downloadCSV(documents, filename) {
+    if (!documents || documents.length === 0) {
+        alert('No documents to export.');
+        return;
+    }
+    
+    // CSV header
+    let csv = 'Filename,Category,Subcategory,DOJ URL\n';
+    
+    // Add rows
+    for (const doc of documents) {
+        const row = [
+            escapeCSVField(doc.filename || ''),
+            escapeCSVField(doc.category || ''),
+            escapeCSVField(doc.subcategory || ''),
+            escapeCSVField(doc.doj_url || '')
+        ];
+        csv += row.join(',') + '\n';
+    }
+    
+    // Create download
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+}
+
+/**
+ * Escape a field for CSV format
+ * Wraps in quotes if contains comma, quote, or newline
+ */
+function escapeCSVField(field) {
+    if (field === null || field === undefined) return '';
+    const str = String(field);
+    // If contains comma, quote, or newline, wrap in quotes and escape internal quotes
+    if (str.includes(',') || str.includes('"') || str.includes('\n')) {
+        return '"' + str.replace(/"/g, '""') + '"';
+    }
+    return str;
 }
 

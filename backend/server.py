@@ -1515,6 +1515,60 @@ async def list_documents(
     return result
 
 
+@app.get("/api/documents/export")
+async def export_documents(
+    category: Optional[str] = None,
+    subcategory: Optional[str] = None,
+    file_type: Optional[str] = None,
+    filename: Optional[str] = None,
+    keyword: Optional[str] = None,
+    search_query: Optional[str] = None,
+    search_type: str = "fulltext"
+):
+    """Export documents as a list for CSV download
+    
+    Returns all matching documents (up to 50,000) with filename, category, 
+    subcategory, and DOJ direct link (if available in manifest).
+    
+    Args:
+        category: Filter by category
+        subcategory: Filter by subcategory
+        file_type: Filter by file type
+        filename: Partial filename match
+        keyword: Keyword search
+        search_query: Full-text search query
+        search_type: Type of search (fulltext, semantic, hybrid)
+    
+    Returns:
+        JSON with documents array containing filename, category, subcategory, doj_url
+    """
+    if not db:
+        raise HTTPException(status_code=503, detail="Database not initialized")
+    
+    # Parse search query for FTS if provided
+    fts_query = None
+    if search_query and search_type in ["fulltext", "hybrid"]:
+        parsed = parse_boolean_query(search_query)
+        fts_query = parsed['fts_query']
+    
+    try:
+        documents = db.get_documents_for_export(
+            category=category,
+            subcategory=subcategory,
+            file_type=file_type,
+            filename=filename,
+            keyword=keyword,
+            search_query=fts_query
+        )
+        
+        return {
+            "total": len(documents),
+            "documents": documents
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Export failed: {str(e)}")
+
+
 @app.get("/api/documents/{doc_id}")
 async def get_document(doc_id: str, request: Request):
     """Get a specific document by ID

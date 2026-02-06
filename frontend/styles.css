@@ -876,6 +876,40 @@ body {
     color: var(--text-muted);
 }
 
+/* Export CSV Button */
+.export-btn {
+    padding: var(--space-xs) var(--space-md);
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--text-primary);
+    font-family: var(--font-body);
+    font-size: 0.85rem;
+    cursor: pointer;
+    transition: all var(--transition-fast);
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-xs);
+}
+
+.export-btn:hover:not(:disabled) {
+    background: var(--accent-glow);
+    border-color: var(--accent-dim);
+    color: var(--accent);
+}
+
+.export-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+/* Export button in pagination-info area */
+.pagination-info {
+    display: flex;
+    align-items: center;
+    gap: var(--space-md);
+}
+
 .results-list {
     display: flex;
     flex-direction: column;
