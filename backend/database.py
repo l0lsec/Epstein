@@ -832,6 +832,9 @@ class Database:
         # Prepare documents with extracted dates
         prepared_docs = []
         for doc in documents:
+            doc_id = doc.get("id")
+            if doc_id is None:
+                continue  # skip docs without id (should not happen if build_index sets it)
             # Extract date from email headers if not already provided
             document_date = doc.get("document_date")
             if not document_date:
@@ -840,7 +843,7 @@ class Database:
                     document_date = extract_email_date(full_text)
             
             prepared_docs.append((
-                doc["id"],
+                doc_id,
                 doc["filename"],
                 doc.get("original_filename", doc["filename"]),
                 doc["path"],
@@ -1865,8 +1868,31 @@ def build_index(base_path: str, force: bool = False,
             all_files.update(media_index.get("files", {}))
             print(f"Found {len(media_index.get('files', {}))} audio/video files")
     
+    # If no index files (e.g. server-only deploy): discover from extracted_text/*.json
+    index_file_names = {"index.json", "image_index.json", "media_index.json", "failed_pdf_files.json", "failed_media_files.json"}
     if not all_files:
-        print("No index files found.")
+        print("No index files found; discovering from extracted_text/*.json...")
+        for jf in extracted_dir.iterdir():
+            if jf.suffix != ".json" or jf.name in index_file_names or jf.name.startswith("index."):
+                continue
+            try:
+                with open(jf) as f:
+                    data = json.load(f)
+                doc_id = data.get("id") or jf.stem
+                all_files[doc_id] = {
+                    "filename": data.get("filename", jf.name),
+                    "path": data.get("path", ""),
+                    "category": data.get("category", "Unknown"),
+                    "subcategory": data.get("subcategory", ""),
+                    "page_count": data.get("page_count", 0),
+                    "char_count": data.get("char_count", 0),
+                }
+            except Exception:
+                continue
+        if all_files:
+            print(f"Discovered {len(all_files)} documents from JSON files.")
+    if not all_files:
+        print("No documents to index.")
         return
     
     # Get already indexed document IDs (skip unless force)
@@ -1907,6 +1933,10 @@ def build_index(base_path: str, force: bool = False,
         
         with open(doc_file) as f:
             doc = json.load(f)
+        
+        # Ensure doc has id (older extracted JSON may lack it)
+        if "id" not in doc:
+            doc["id"] = file_id
         
         # Add to SQLite batch
         db_batch.append(doc)

@@ -70,7 +70,10 @@ def _ip_in_cloudflare_range(ip: str) -> bool:
     return False
 
 LOG_DIR = BASE_PATH / "logs"
-LOG_DIR.mkdir(exist_ok=True)
+try:
+    LOG_DIR.mkdir(exist_ok=True)
+except (PermissionError, OSError):
+    pass  # Use fallback logging if we can't create or write to logs dir
 
 # Log file paths
 ACCESS_LOG = LOG_DIR / "access.log"
@@ -739,22 +742,30 @@ class SecurityLogger:
         log_file: Path, 
         level: int = logging.INFO
     ) -> logging.Logger:
-        """Create a logger with rotating file handler and JSON formatting"""
-        
+        """Create a logger with rotating file handler and JSON formatting.
+        On permission errors (e.g. after deploy when logs dir is root-owned),
+        falls back to stderr so the app still starts.
+        """
+        import sys
         logger = logging.getLogger(name)
         logger.setLevel(level)
         logger.propagate = False
-        
-        # Rotating file handler
-        file_handler = RotatingFileHandler(
-            log_file,
-            maxBytes=MAX_LOG_SIZE,
-            backupCount=BACKUP_COUNT,
-            encoding="utf-8"
-        )
-        file_handler.setFormatter(JSONFormatter())
-        logger.addHandler(file_handler)
-        
+
+        try:
+            file_handler = RotatingFileHandler(
+                log_file,
+                maxBytes=MAX_LOG_SIZE,
+                backupCount=BACKUP_COUNT,
+                encoding="utf-8"
+            )
+            file_handler.setFormatter(JSONFormatter())
+            logger.addHandler(file_handler)
+        except (PermissionError, OSError):
+            # After deploy, logs dir may be root-owned; don't crash - log to stderr
+            fallback = logging.StreamHandler(sys.stderr)
+            fallback.setFormatter(JSONFormatter())
+            logger.addHandler(fallback)
+
         return logger
     
     def _log_with_extra(

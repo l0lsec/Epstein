@@ -14,8 +14,11 @@ from pathlib import Path
 from datetime import datetime
 from dotenv import load_dotenv
 
-# Load environment variables from .env file
-load_dotenv()
+# Load environment variables from .env file (skip if unreadable e.g. wrong permissions)
+try:
+    load_dotenv()
+except PermissionError:
+    pass  # .env exists but not readable (e.g. root-owned); use env vars from systemd/shell
 
 BASE_PATH = Path(__file__).parent
 BACKEND_PATH = BASE_PATH / "backend"
