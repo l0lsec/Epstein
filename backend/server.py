@@ -1092,7 +1092,10 @@ async def rebuild_fts_index(request: Request, x_api_key: str = Header(None)):
 
 @app.get("/api/categories")
 async def get_categories(keyword: Optional[str] = None, response: Response = None):
-    """Get all document categories, optionally filtered by keyword (cached for 60 seconds)"""
+    """Get all document categories, optionally filtered by keyword (cached for 60 seconds)
+    
+    Note: Hidden categories and documents in hidden categories are excluded from results.
+    """
     if not db:
         raise HTTPException(status_code=503, detail="Database not initialized")
     
@@ -1106,7 +1109,8 @@ async def get_categories(keyword: Optional[str] = None, response: Response = Non
                 response.headers["Cache-Control"] = "public, max-age=60, s-maxage=60"
             return cached
     
-    categories = db.get_category_counts(keyword=keyword)
+    # Exclude hidden categories and hidden documents from public view
+    categories = db.get_category_counts(keyword=keyword, include_hidden=False)
     result = {"categories": categories}
     
     # Cache unfiltered results
@@ -1121,15 +1125,26 @@ async def get_categories(keyword: Optional[str] = None, response: Response = Non
 
 @app.get("/api/subcategories")
 async def get_subcategories(category: Optional[str] = None):
-    """Get subcategories, optionally filtered by category"""
+    """Get subcategories, optionally filtered by category
+    
+    Note: Returns empty list if the category is hidden.
+    """
     if not db:
         raise HTTPException(status_code=503, detail="Database not initialized")
+    
+    # If category is specified and it's hidden, return empty
+    if category and db.is_category_hidden(category):
+        return {"subcategories": []}
     
     stats = db.get_stats()
     subcategories = stats["by_subcategory"]
     
     if category:
         subcategories = [s for s in subcategories if s.get("category") == category]
+    else:
+        # Filter out hidden categories from the list
+        hidden_categories = {hc["category"] for hc in db.get_hidden_categories()}
+        subcategories = [s for s in subcategories if s.get("category") not in hidden_categories]
     
     return {"subcategories": subcategories}
 
@@ -1309,6 +1324,7 @@ async def search(search_request: SearchRequest, request: Request) -> dict:
     
     if search_request.search_type in ["fulltext", "hybrid"]:
         # Full-text search using parsed Boolean query
+        # Note: Hidden documents and hidden categories are excluded from results
         try:
             ft_results = db.search_fulltext(
                 query=fts_query,
@@ -1318,7 +1334,8 @@ async def search(search_request: SearchRequest, request: Request) -> dict:
                 subcategory=search_request.subcategory,
                 file_type=search_request.file_type,
                 date_from=search_request.date_from,
-                date_to=search_request.date_to
+                date_to=search_request.date_to,
+                include_hidden=False
             )
             # Get actual total count for pagination
             total_count = db.count_fulltext_results(
@@ -1327,7 +1344,8 @@ async def search(search_request: SearchRequest, request: Request) -> dict:
                 subcategory=search_request.subcategory,
                 file_type=search_request.file_type,
                 date_from=search_request.date_from,
-                date_to=search_request.date_to
+                date_to=search_request.date_to,
+                include_hidden=False
             )
             for r in ft_results:
                 results.append({
@@ -1355,12 +1373,14 @@ async def search(search_request: SearchRequest, request: Request) -> dict:
         )
         
         # Merge with existing results or add new
-        # Note: Validate docs exist in DB to avoid stale vector store entries
+        # Note: Validate docs exist in DB and are visible to avoid stale/hidden entries
         existing_ids = {r["id"] for r in results}
         for r in sem_results:
             doc_id = r.get("id", "")
             if doc_id and doc_id not in existing_ids:
-                # Verify document exists in database (vector store may have stale entries)
+                # Verify document exists and is visible (not hidden)
+                if not db.is_document_visible(doc_id):
+                    continue
                 doc = db.get_document(doc_id)
                 if doc:
                     text = r.get("text", "")
@@ -1387,7 +1407,7 @@ async def search(search_request: SearchRequest, request: Request) -> dict:
     # Sort by score (results are already paginated for fulltext)
     results.sort(key=lambda x: x.get("score", 0), reverse=True)
     
-    # Get faceted counts for filter dropdowns
+    # Get faceted counts for filter dropdowns (excluding hidden content)
     facets = {}
     if search_request.search_type in ["fulltext", "hybrid"]:
         try:
@@ -1397,7 +1417,8 @@ async def search(search_request: SearchRequest, request: Request) -> dict:
                 subcategory=search_request.subcategory,
                 file_type=search_request.file_type,
                 date_from=search_request.date_from,
-                date_to=search_request.date_to
+                date_to=search_request.date_to,
+                include_hidden=False
             )
         except Exception as e:
             security_logger.log_error(
@@ -1454,6 +1475,8 @@ async def list_documents(
     
     Args:
         search: Searches both filename AND subcategory (for admin document search)
+    
+    Note: Hidden documents and hidden categories are excluded from results.
     """
     if not db:
         raise HTTPException(status_code=503, detail="Database not initialized")
@@ -1471,8 +1494,9 @@ async def list_documents(
             response.headers["Cache-Control"] = "public, max-age=30, s-maxage=30"
             return cached
     
-    docs = db.get_all_documents(limit=limit, offset=offset, category=category, subcategory=subcategory, file_type=file_type, filename=filename, keyword=keyword, search=search)
-    total = db.count_documents(category=category, subcategory=subcategory, file_type=file_type, filename=filename, keyword=keyword)
+    # Exclude hidden documents and hidden categories from public view
+    docs = db.get_all_documents(limit=limit, offset=offset, category=category, subcategory=subcategory, file_type=file_type, filename=filename, keyword=keyword, search=search, include_hidden=False)
+    total = db.count_documents(category=category, subcategory=subcategory, file_type=file_type, filename=filename, keyword=keyword, include_hidden=False)
     
     result = {
         "total": total,
@@ -1493,19 +1517,23 @@ async def list_documents(
 
 @app.get("/api/documents/{doc_id}")
 async def get_document(doc_id: str, request: Request):
-    """Get a specific document by ID"""
+    """Get a specific document by ID
+    
+    Note: Returns 404 for hidden documents or documents in hidden categories.
+    """
     client_ip, request_id = get_client_info(request)
     
     if not db:
         raise HTTPException(status_code=503, detail="Database not initialized")
     
-    doc = db.get_document(doc_id)
+    # Check if document is visible (not hidden and category not hidden)
+    doc = db.get_document(doc_id, include_hidden=False)
     if not doc:
         security_logger.log_security_event(
             event_type="document_not_found",
             severity="low",
             client_ip=client_ip,
-            message=f"Attempted access to non-existent document: {doc_id}",
+            message=f"Attempted access to non-existent or hidden document: {doc_id}",
             request_id=request_id,
             document_id=doc_id
         )
@@ -1526,7 +1554,10 @@ async def get_document(doc_id: str, request: Request):
 
 @app.get("/api/documents/{doc_id}/file")
 async def get_document_file(doc_id: str, request: Request):
-    """Get the actual document file for inline viewing"""
+    """Get the actual document file for inline viewing
+    
+    Note: Returns 404 for hidden documents or documents in hidden categories.
+    """
     client_ip, request_id = get_client_info(request)
     
     # Referer validation - redirect direct API access to main site
@@ -1552,13 +1583,14 @@ async def get_document_file(doc_id: str, request: Request):
     if not db:
         raise HTTPException(status_code=503, detail="Database not initialized")
     
-    doc = db.get_document(doc_id)
+    # CRITICAL: Check if document is visible (not hidden and category not hidden)
+    doc = db.get_document(doc_id, include_hidden=False)
     if not doc:
         security_logger.log_security_event(
             event_type="file_not_found",
             severity="low",
             client_ip=client_ip,
-            message=f"Attempted file access for non-existent document: {doc_id}",
+            message=f"Attempted file access for non-existent or hidden document: {doc_id}",
             request_id=request_id,
             document_id=doc_id
         )
@@ -1797,11 +1829,15 @@ def create_placeholder_thumbnail(file_type: str, output_path: Path) -> bool:
 
 @app.get("/api/documents/{doc_id}/thumbnail")
 async def get_document_thumbnail(doc_id: str, request: Request):
-    """Get a thumbnail preview of a document"""
+    """Get a thumbnail preview of a document
+    
+    Note: Returns 404 for hidden documents or documents in hidden categories.
+    """
     if not db:
         raise HTTPException(status_code=503, detail="Database not initialized")
     
-    doc = db.get_document(doc_id)
+    # Check if document is visible (not hidden and category not hidden)
+    doc = db.get_document(doc_id, include_hidden=False)
     if not doc:
         raise HTTPException(status_code=404, detail="Document not found")
     
@@ -1855,7 +1891,10 @@ async def get_document_thumbnail(doc_id: str, request: Request):
 
 @app.post("/api/ask")
 async def ask_question(ask_request: AskRequest, request: Request):
-    """Ask a question and get an AI-powered answer"""
+    """Ask a question and get an AI-powered answer
+    
+    Note: Hidden documents are excluded from AI context.
+    """
     client_ip, request_id = get_client_info(request)
     
     if not llm or not llm.is_available():
@@ -1874,16 +1913,19 @@ async def ask_question(ask_request: AskRequest, request: Request):
         category=ask_request.category
     )
     
+    # Filter out hidden documents from AI context (SECURITY: prevent hidden doc content from being exposed via AI)
+    visible_context_docs = [doc for doc in context_docs if db.is_document_visible(doc.get("id", ""))]
+    
     # Log the LLM query
     security_logger.log_llm_query(
         client_ip=client_ip,
         question=ask_request.question,
-        context_docs_count=len(context_docs),
+        context_docs_count=len(visible_context_docs),
         request_id=request_id,
         category=ask_request.category
     )
     
-    if not context_docs:
+    if not visible_context_docs:
         return {
             "question": ask_request.question,
             "answer": "No relevant documents found for this question.",
@@ -1893,10 +1935,10 @@ async def ask_question(ask_request: AskRequest, request: Request):
     # Fetch full document content from database for better accuracy
     # The vector store only has 500-char snippets, we need full text for LLM
     enriched_docs = []
-    for doc in context_docs:
+    for doc in visible_context_docs:
         doc_id = doc.get("id")
         if doc_id and db:
-            full_doc = db.get_document(doc_id)
+            full_doc = db.get_document(doc_id, include_hidden=False)
             if full_doc:
                 enriched_docs.append({
                     **doc,
@@ -1905,10 +1947,10 @@ async def ask_question(ask_request: AskRequest, request: Request):
                     "category": full_doc.get("category", doc.get("category", "Unknown")),
                     "subcategory": full_doc.get("subcategory", doc.get("subcategory", ""))
                 })
-            else:
-                enriched_docs.append(doc)
+            # Skip if document no longer visible (was hidden between search and fetch)
         else:
-            enriched_docs.append(doc)
+            # Vector store doc without DB lookup - skip for safety
+            pass
     
     # Get answer from LLM with enriched context
     try:
@@ -1943,7 +1985,10 @@ async def ask_question(ask_request: AskRequest, request: Request):
 
 @app.post("/api/ask/stream")
 async def ask_question_stream(ask_request: AskRequest, request: Request):
-    """Ask a question and stream the response"""
+    """Ask a question and stream the response
+    
+    Note: Hidden documents are excluded from AI context.
+    """
     client_ip, request_id = get_client_info(request)
     
     if not llm or not llm.is_available():
@@ -1959,12 +2004,15 @@ async def ask_question_stream(ask_request: AskRequest, request: Request):
         category=ask_request.category
     )
     
+    # Filter out hidden documents from AI context (SECURITY: prevent hidden doc content from being exposed via AI)
+    visible_context_docs = [doc for doc in context_docs if db.is_document_visible(doc.get("id", ""))]
+    
     # Fetch full document content from database for better accuracy
     enriched_docs = []
-    for doc in context_docs:
+    for doc in visible_context_docs:
         doc_id = doc.get("id")
         if doc_id and db:
-            full_doc = db.get_document(doc_id)
+            full_doc = db.get_document(doc_id, include_hidden=False)
             if full_doc:
                 enriched_docs.append({
                     **doc,
@@ -1973,10 +2021,7 @@ async def ask_question_stream(ask_request: AskRequest, request: Request):
                     "category": full_doc.get("category", doc.get("category", "Unknown")),
                     "subcategory": full_doc.get("subcategory", doc.get("subcategory", ""))
                 })
-            else:
-                enriched_docs.append(doc)
-        else:
-            enriched_docs.append(doc)
+            # Skip if document no longer visible
     
     # Log the streaming LLM query
     security_logger.log_llm_query(
@@ -1998,19 +2043,23 @@ async def ask_question_stream(ask_request: AskRequest, request: Request):
 
 @app.get("/api/documents/{doc_id}/summary")
 async def get_document_summary(doc_id: str, request: Request, regenerate: bool = False):
-    """Get an AI-generated summary of a document (cached if available)"""
+    """Get an AI-generated summary of a document (cached if available)
+    
+    Note: Returns 404 for hidden documents or documents in hidden categories.
+    """
     client_ip, request_id = get_client_info(request)
     
     if not db:
         raise HTTPException(status_code=503, detail="Database not initialized")
     
-    doc = db.get_document(doc_id)
+    # Check if document is visible (not hidden and category not hidden)
+    doc = db.get_document(doc_id, include_hidden=False)
     if not doc:
         security_logger.log_security_event(
             event_type="summary_not_found",
             severity="low",
             client_ip=client_ip,
-            message=f"Summary requested for non-existent document: {doc_id}",
+            message=f"Summary requested for non-existent or hidden document: {doc_id}",
             request_id=request_id,
             document_id=doc_id
         )
@@ -3332,11 +3381,15 @@ async def disable_status_page(request: Request, x_api_key: str = Header(None)):
 
 @app.get("/api/pinned-documents")
 async def get_pinned_documents():
-    """Get all pinned/featured documents (public endpoint)"""
+    """Get all pinned/featured documents (public endpoint)
+    
+    Note: Hidden documents are excluded from the pinned list.
+    """
     if not db:
         raise HTTPException(status_code=503, detail="Database not initialized")
     
-    return {"pinned_documents": db.get_pinned_documents()}
+    # Exclude hidden documents from public pinned list
+    return {"pinned_documents": db.get_pinned_documents(include_hidden=False)}
 
 
 class PinDocumentRequest(BaseModel):
@@ -3449,7 +3502,222 @@ async def get_admin_pinned_documents(request: Request, x_api_key: str = Header(N
     if not db:
         raise HTTPException(status_code=503, detail="Database not initialized")
     
-    return {"pinned_documents": db.get_pinned_documents()}
+    # Admin sees all pinned documents including hidden ones
+    return {"pinned_documents": db.get_pinned_documents(include_hidden=True)}
+
+
+# =============================================================================
+# Document Visibility Endpoints (Admin only)
+# =============================================================================
+
+@app.get("/api/admin/hidden-documents")
+async def get_hidden_documents(
+    request: Request, 
+    x_api_key: str = Header(None),
+    limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0)
+):
+    """Get all hidden documents (requires admin authentication)"""
+    is_authorized, error = verify_admin_access(request, x_api_key)
+    if not is_authorized:
+        raise HTTPException(status_code=401, detail=error)
+    
+    if not db:
+        raise HTTPException(status_code=503, detail="Database not initialized")
+    
+    docs = db.get_hidden_documents(limit=limit, offset=offset)
+    total = db.count_hidden_documents()
+    
+    return {
+        "hidden_documents": docs,
+        "total": total,
+        "limit": limit,
+        "offset": offset
+    }
+
+
+@app.post("/api/admin/documents/{doc_id}/hide")
+async def hide_document(doc_id: str, request: Request, x_api_key: str = Header(None)):
+    """Hide a document from public view (requires admin authentication)"""
+    is_authorized, error = verify_admin_access(request, x_api_key)
+    if not is_authorized:
+        raise HTTPException(status_code=401, detail=error)
+    
+    if not db:
+        raise HTTPException(status_code=503, detail="Database not initialized")
+    
+    # Get document info for logging
+    doc = db.get_document(doc_id, include_hidden=True)
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found")
+    
+    success = db.hide_document(doc_id)
+    if success:
+        # Invalidate caches
+        _categories_cache.clear()
+        
+        security_logger.log_system_event(
+            "document_hidden",
+            f"Document hidden by admin: {doc_id} ({doc.get('filename', 'Unknown')})",
+            document_id=doc_id
+        )
+        return {"success": True, "message": f"Document '{doc.get('filename', doc_id)}' is now hidden"}
+    
+    raise HTTPException(status_code=500, detail="Failed to hide document")
+
+
+@app.post("/api/admin/documents/{doc_id}/unhide")
+async def unhide_document(doc_id: str, request: Request, x_api_key: str = Header(None)):
+    """Unhide a document (make visible to public) (requires admin authentication)"""
+    is_authorized, error = verify_admin_access(request, x_api_key)
+    if not is_authorized:
+        raise HTTPException(status_code=401, detail=error)
+    
+    if not db:
+        raise HTTPException(status_code=503, detail="Database not initialized")
+    
+    # Get document info for logging
+    doc = db.get_document(doc_id, include_hidden=True)
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found")
+    
+    success = db.unhide_document(doc_id)
+    if success:
+        # Invalidate caches
+        _categories_cache.clear()
+        
+        security_logger.log_system_event(
+            "document_unhidden",
+            f"Document unhidden by admin: {doc_id} ({doc.get('filename', 'Unknown')})",
+            document_id=doc_id
+        )
+        return {"success": True, "message": f"Document '{doc.get('filename', doc_id)}' is now visible"}
+    
+    raise HTTPException(status_code=500, detail="Failed to unhide document")
+
+
+@app.get("/api/admin/hidden-categories")
+async def get_hidden_categories(request: Request, x_api_key: str = Header(None)):
+    """Get all hidden categories (requires admin authentication)"""
+    is_authorized, error = verify_admin_access(request, x_api_key)
+    if not is_authorized:
+        raise HTTPException(status_code=401, detail=error)
+    
+    if not db:
+        raise HTTPException(status_code=503, detail="Database not initialized")
+    
+    return {"hidden_categories": db.get_hidden_categories()}
+
+
+@app.get("/api/admin/categories-visibility")
+async def get_categories_visibility(request: Request, x_api_key: str = Header(None)):
+    """Get all categories with their visibility status (requires admin authentication)"""
+    is_authorized, error = verify_admin_access(request, x_api_key)
+    if not is_authorized:
+        raise HTTPException(status_code=401, detail=error)
+    
+    if not db:
+        raise HTTPException(status_code=503, detail="Database not initialized")
+    
+    return {"categories": db.get_all_categories_with_visibility()}
+
+
+@app.post("/api/admin/categories/{category}/hide")
+async def hide_category(category: str, request: Request, x_api_key: str = Header(None)):
+    """Hide an entire category from public view (requires admin authentication)"""
+    is_authorized, error = verify_admin_access(request, x_api_key)
+    if not is_authorized:
+        raise HTTPException(status_code=401, detail=error)
+    
+    if not db:
+        raise HTTPException(status_code=503, detail="Database not initialized")
+    
+    # URL decode the category name (handles spaces and special characters)
+    from urllib.parse import unquote
+    category = unquote(category)
+    
+    # Verify category exists
+    category_counts = db.get_category_counts(include_hidden=True)
+    if not any(c["category"] == category for c in category_counts):
+        raise HTTPException(status_code=404, detail=f"Category '{category}' not found")
+    
+    success = db.hide_category(category)
+    if success:
+        # Invalidate caches
+        _categories_cache.clear()
+        
+        security_logger.log_system_event(
+            "category_hidden",
+            f"Category hidden by admin: {category}",
+            category=category
+        )
+        return {"success": True, "message": f"Category '{category}' is now hidden"}
+    
+    raise HTTPException(status_code=500, detail="Failed to hide category")
+
+
+@app.post("/api/admin/categories/{category}/unhide")
+async def unhide_category(category: str, request: Request, x_api_key: str = Header(None)):
+    """Unhide a category (make visible to public) (requires admin authentication)"""
+    is_authorized, error = verify_admin_access(request, x_api_key)
+    if not is_authorized:
+        raise HTTPException(status_code=401, detail=error)
+    
+    if not db:
+        raise HTTPException(status_code=503, detail="Database not initialized")
+    
+    # URL decode the category name
+    from urllib.parse import unquote
+    category = unquote(category)
+    
+    success = db.unhide_category(category)
+    if success:
+        # Invalidate caches
+        _categories_cache.clear()
+        
+        security_logger.log_system_event(
+            "category_unhidden",
+            f"Category unhidden by admin: {category}",
+            category=category
+        )
+        return {"success": True, "message": f"Category '{category}' is now visible"}
+    
+    raise HTTPException(status_code=500, detail="Failed to unhide category")
+
+
+@app.get("/api/admin/documents-visibility")
+async def search_documents_visibility(
+    request: Request,
+    x_api_key: str = Header(None),
+    search: Optional[str] = None,
+    category: Optional[str] = None,
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0)
+):
+    """Search documents for visibility management (admin only, includes hidden docs)"""
+    is_authorized, error = verify_admin_access(request, x_api_key)
+    if not is_authorized:
+        raise HTTPException(status_code=401, detail=error)
+    
+    if not db:
+        raise HTTPException(status_code=503, detail="Database not initialized")
+    
+    # Get documents including hidden ones
+    docs = db.get_all_documents(
+        limit=limit, 
+        offset=offset, 
+        category=category, 
+        search=search,
+        include_hidden=True
+    )
+    total = db.count_documents(category=category, include_hidden=True)
+    
+    return {
+        "documents": docs,
+        "total": total,
+        "limit": limit,
+        "offset": offset
+    }
 
 
 # =============================================================================

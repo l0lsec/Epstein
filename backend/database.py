@@ -199,6 +199,24 @@ class Database:
             conn.execute("CREATE INDEX IF NOT EXISTS idx_manifest_dataset ON doj_manifest(dataset_num)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_manifest_status ON doj_manifest(status)")
             conn.commit()
+            
+            # Hidden categories table for visibility control
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS hidden_categories (
+                    category TEXT PRIMARY KEY,
+                    hidden_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            conn.commit()
+            
+            # Migration: Add is_hidden column if it doesn't exist
+            try:
+                conn.execute("SELECT is_hidden FROM documents LIMIT 1")
+            except:
+                conn.execute("ALTER TABLE documents ADD COLUMN is_hidden INTEGER DEFAULT 0")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_documents_hidden ON documents(is_hidden)")
+                conn.commit()
+                print("✅ Added is_hidden column to documents table")
     
     def rebuild_fts(self):
         """Rebuild the FTS5 index to fix sync issues"""
@@ -279,8 +297,13 @@ class Database:
                         subcategory: Optional[str] = None,
                         file_type: Optional[str] = None,
                         date_from: Optional[str] = None,
-                        date_to: Optional[str] = None) -> List[Dict[str, Any]]:
-        """Full-text search across documents"""
+                        date_to: Optional[str] = None,
+                        include_hidden: bool = False) -> List[Dict[str, Any]]:
+        """Full-text search across documents
+        
+        Args:
+            include_hidden: If False (default), excludes hidden documents and hidden categories
+        """
         with self.get_connection() as conn:
             # Build query with optional filters
             sql = """
@@ -291,9 +314,14 @@ class Database:
                     bm25(documents_fts) as score
                 FROM documents_fts
                 JOIN documents d ON documents_fts.id = d.id
+                LEFT JOIN hidden_categories hc ON d.category = hc.category
                 WHERE documents_fts MATCH ?
             """
             params = [query]
+            
+            # Filter out hidden documents and categories unless include_hidden is True
+            if not include_hidden:
+                sql += " AND (d.is_hidden IS NULL OR d.is_hidden = 0) AND hc.category IS NULL"
             
             if category:
                 sql += " AND d.category = ?"
@@ -329,16 +357,26 @@ class Database:
                                subcategory: Optional[str] = None,
                                file_type: Optional[str] = None,
                                date_from: Optional[str] = None,
-                               date_to: Optional[str] = None) -> int:
-        """Count total full-text search results (for pagination)"""
+                               date_to: Optional[str] = None,
+                               include_hidden: bool = False) -> int:
+        """Count total full-text search results (for pagination)
+        
+        Args:
+            include_hidden: If False (default), excludes hidden documents and hidden categories
+        """
         with self.get_connection() as conn:
             sql = """
                 SELECT COUNT(*)
                 FROM documents_fts
                 JOIN documents d ON documents_fts.id = d.id
+                LEFT JOIN hidden_categories hc ON d.category = hc.category
                 WHERE documents_fts MATCH ?
             """
             params = [query]
+            
+            # Filter out hidden documents and categories unless include_hidden is True
+            if not include_hidden:
+                sql += " AND (d.is_hidden IS NULL OR d.is_hidden = 0) AND hc.category IS NULL"
             
             if category:
                 sql += " AND d.category = ?"
@@ -368,12 +406,22 @@ class Database:
                           subcategory: Optional[str] = None,
                           file_type: Optional[str] = None,
                           date_from: Optional[str] = None,
-                          date_to: Optional[str] = None) -> Dict[str, Any]:
-        """Get faceted counts for search results (category, subcategory, file_type breakdowns)"""
+                          date_to: Optional[str] = None,
+                          include_hidden: bool = False) -> Dict[str, Any]:
+        """Get faceted counts for search results (category, subcategory, file_type breakdowns)
+        
+        Args:
+            include_hidden: If False (default), excludes hidden documents and hidden categories
+        """
         with self.get_connection() as conn:
             # Base match condition
             base_match = "documents_fts MATCH ?"
             base_params = [query]
+            
+            # Visibility filter
+            visibility_filter = ""
+            if not include_hidden:
+                visibility_filter = " AND (d.is_hidden IS NULL OR d.is_hidden = 0) AND hc.category IS NULL"
             
             # Build date filter conditions
             date_filter = ""
@@ -390,7 +438,8 @@ class Database:
                 SELECT d.category, COUNT(*) as count
                 FROM documents_fts
                 JOIN documents d ON documents_fts.id = d.id
-                WHERE {base_match}
+                LEFT JOIN hidden_categories hc ON d.category = hc.category
+                WHERE {base_match}{visibility_filter}
             """
             category_params = list(base_params)
             if file_type:
@@ -410,7 +459,8 @@ class Database:
                     SELECT d.subcategory, COUNT(*) as count
                     FROM documents_fts
                     JOIN documents d ON documents_fts.id = d.id
-                    WHERE {base_match} AND d.category = ?
+                    LEFT JOIN hidden_categories hc ON d.category = hc.category
+                    WHERE {base_match}{visibility_filter} AND d.category = ?
                 """
                 subcategory_params = list(base_params) + [category]
                 if file_type:
@@ -428,7 +478,8 @@ class Database:
                 SELECT d.file_type, COUNT(*) as count
                 FROM documents_fts
                 JOIN documents d ON documents_fts.id = d.id
-                WHERE {base_match}
+                LEFT JOIN hidden_categories hc ON d.category = hc.category
+                WHERE {base_match}{visibility_filter}
             """
             file_type_params = list(base_params)
             if category:
@@ -450,12 +501,27 @@ class Database:
                 "file_types": file_types
             }
     
-    def get_document(self, doc_id: str) -> Optional[Dict[str, Any]]:
-        """Get a single document by ID"""
+    def get_document(self, doc_id: str, include_hidden: bool = True) -> Optional[Dict[str, Any]]:
+        """Get a single document by ID
+        
+        Args:
+            doc_id: The document ID
+            include_hidden: If False, returns None for hidden documents or documents in hidden categories
+        """
         with self.get_connection() as conn:
-            cursor = conn.execute(
-                "SELECT * FROM documents WHERE id = ?", (doc_id,)
-            )
+            if include_hidden:
+                cursor = conn.execute(
+                    "SELECT * FROM documents WHERE id = ?", (doc_id,)
+                )
+            else:
+                cursor = conn.execute("""
+                    SELECT d.* 
+                    FROM documents d
+                    LEFT JOIN hidden_categories hc ON d.category = hc.category
+                    WHERE d.id = ? 
+                      AND (d.is_hidden IS NULL OR d.is_hidden = 0)
+                      AND hc.category IS NULL
+                """, (doc_id,))
             row = cursor.fetchone()
             return dict(row) if row else None
     
@@ -501,29 +567,59 @@ class Database:
             
             return stats
     
-    def get_category_counts(self, keyword: Optional[str] = None) -> List[Dict[str, Any]]:
-        """Get category counts, optionally filtered by keyword search"""
+    def get_category_counts(self, keyword: Optional[str] = None, include_hidden: bool = False) -> List[Dict[str, Any]]:
+        """Get category counts, optionally filtered by keyword search
+        
+        Args:
+            keyword: Optional keyword to filter by
+            include_hidden: If False (default), excludes hidden categories and hidden documents
+        """
         with self.get_connection() as conn:
             if keyword:
                 # Use FTS to filter by keyword
                 escaped_keyword = keyword.replace('"', '""')
-                sql = """
-                    SELECT d.category, COUNT(*) as count
-                    FROM documents d
-                    JOIN documents_fts fts ON d.id = fts.id
-                    WHERE documents_fts MATCH ?
-                    GROUP BY d.category
-                    ORDER BY count DESC
-                """
+                if include_hidden:
+                    sql = """
+                        SELECT d.category, COUNT(*) as count
+                        FROM documents d
+                        JOIN documents_fts fts ON d.id = fts.id
+                        WHERE documents_fts MATCH ?
+                        GROUP BY d.category
+                        ORDER BY count DESC
+                    """
+                else:
+                    sql = """
+                        SELECT d.category, COUNT(*) as count
+                        FROM documents d
+                        JOIN documents_fts fts ON d.id = fts.id
+                        LEFT JOIN hidden_categories hc ON d.category = hc.category
+                        WHERE documents_fts MATCH ?
+                          AND (d.is_hidden IS NULL OR d.is_hidden = 0)
+                          AND hc.category IS NULL
+                        GROUP BY d.category
+                        ORDER BY count DESC
+                    """
                 cursor = conn.execute(sql, [f'"{escaped_keyword}"*'])
             else:
-                sql = """
-                    SELECT category, COUNT(*) as count 
-                    FROM documents 
-                    GROUP BY category 
-                    ORDER BY count DESC
-                """
-                cursor = conn.execute(sql)
+                if include_hidden:
+                    sql = """
+                        SELECT category, COUNT(*) as count 
+                        FROM documents 
+                        GROUP BY category 
+                        ORDER BY count DESC
+                    """
+                    cursor = conn.execute(sql)
+                else:
+                    sql = """
+                        SELECT d.category, COUNT(*) as count 
+                        FROM documents d
+                        LEFT JOIN hidden_categories hc ON d.category = hc.category
+                        WHERE (d.is_hidden IS NULL OR d.is_hidden = 0)
+                          AND hc.category IS NULL
+                        GROUP BY d.category 
+                        ORDER BY count DESC
+                    """
+                    cursor = conn.execute(sql)
             
             return [dict(row) for row in cursor]
     
@@ -533,11 +629,13 @@ class Database:
                           file_type: Optional[str] = None,
                           filename: Optional[str] = None,
                           keyword: Optional[str] = None,
-                          search: Optional[str] = None) -> List[Dict[str, Any]]:
+                          search: Optional[str] = None,
+                          include_hidden: bool = False) -> List[Dict[str, Any]]:
         """Get all documents with pagination and filtering
         
         Args:
             search: Searches both filename AND subcategory (for admin document search)
+            include_hidden: If False (default), excludes hidden documents and hidden categories
         """
         with self.get_connection() as conn:
             params = []
@@ -546,43 +644,52 @@ class Database:
             # If keyword search, use FTS join
             if keyword:
                 sql = """
-                    SELECT DISTINCT d.id, d.filename, d.path, d.category, d.subcategory, d.file_type, d.page_count, d.char_count, d.duration_seconds
+                    SELECT DISTINCT d.id, d.filename, d.path, d.category, d.subcategory, d.file_type, d.page_count, d.char_count, d.duration_seconds, d.is_hidden
                     FROM documents d
                     JOIN documents_fts fts ON d.id = fts.id
+                    LEFT JOIN hidden_categories hc ON d.category = hc.category
                     WHERE documents_fts MATCH ?
                 """
                 # Escape special FTS characters and add wildcards for partial matching
                 escaped_keyword = keyword.replace('"', '""')
                 params.append(f'"{escaped_keyword}"*')
+                
+                # Visibility filter
+                if not include_hidden:
+                    conditions.append("(d.is_hidden IS NULL OR d.is_hidden = 0)")
+                    conditions.append("hc.category IS NULL")
             else:
                 sql = """
-                    SELECT id, filename, path, category, subcategory, file_type, page_count, char_count, duration_seconds
-                    FROM documents
+                    SELECT d.id, d.filename, d.path, d.category, d.subcategory, d.file_type, d.page_count, d.char_count, d.duration_seconds, d.is_hidden
+                    FROM documents d
+                    LEFT JOIN hidden_categories hc ON d.category = hc.category
                 """
+                
+                # Visibility filter
+                if not include_hidden:
+                    conditions.append("(d.is_hidden IS NULL OR d.is_hidden = 0)")
+                    conditions.append("hc.category IS NULL")
             
             if category:
-                conditions.append("category = ?" if not keyword else "d.category = ?")
+                conditions.append("d.category = ?")
                 params.append(category)
             
             if subcategory:
-                conditions.append("subcategory = ?" if not keyword else "d.subcategory = ?")
+                conditions.append("d.subcategory = ?")
                 params.append(subcategory)
             
             if file_type:
-                conditions.append("file_type = ?" if not keyword else "d.file_type = ?")
+                conditions.append("d.file_type = ?")
                 params.append(file_type)
             
             if filename:
                 # Case-insensitive partial match on filename
-                conditions.append("LOWER(filename) LIKE LOWER(?)" if not keyword else "LOWER(d.filename) LIKE LOWER(?)")
+                conditions.append("LOWER(d.filename) LIKE LOWER(?)")
                 params.append(f"%{filename}%")
             
             if search:
                 # Search both filename and subcategory (for admin document search)
-                if keyword:
-                    conditions.append("(LOWER(d.filename) LIKE LOWER(?) OR LOWER(d.subcategory) LIKE LOWER(?))")
-                else:
-                    conditions.append("(LOWER(filename) LIKE LOWER(?) OR LOWER(subcategory) LIKE LOWER(?))")
+                conditions.append("(LOWER(d.filename) LIKE LOWER(?) OR LOWER(d.subcategory) LIKE LOWER(?))")
                 params.append(f"%{search}%")
                 params.append(f"%{search}%")
             
@@ -592,7 +699,7 @@ class Database:
                 else:
                     sql += " WHERE " + " AND ".join(conditions)
             
-            sql += " ORDER BY filename LIMIT ? OFFSET ?" if not keyword else " ORDER BY d.filename LIMIT ? OFFSET ?"
+            sql += " ORDER BY d.filename LIMIT ? OFFSET ?"
             params.extend([limit, offset])
             
             cursor = conn.execute(sql, params)
@@ -602,8 +709,13 @@ class Database:
                         subcategory: Optional[str] = None,
                         file_type: Optional[str] = None,
                         filename: Optional[str] = None,
-                        keyword: Optional[str] = None) -> int:
-        """Count documents with optional filters"""
+                        keyword: Optional[str] = None,
+                        include_hidden: bool = False) -> int:
+        """Count documents with optional filters
+        
+        Args:
+            include_hidden: If False (default), excludes hidden documents and hidden categories
+        """
         with self.get_connection() as conn:
             params = []
             conditions = []
@@ -614,27 +726,42 @@ class Database:
                     SELECT COUNT(DISTINCT d.id)
                     FROM documents d
                     JOIN documents_fts fts ON d.id = fts.id
+                    LEFT JOIN hidden_categories hc ON d.category = hc.category
                     WHERE documents_fts MATCH ?
                 """
                 escaped_keyword = keyword.replace('"', '""')
                 params.append(f'"{escaped_keyword}"*')
+                
+                # Visibility filter
+                if not include_hidden:
+                    conditions.append("(d.is_hidden IS NULL OR d.is_hidden = 0)")
+                    conditions.append("hc.category IS NULL")
             else:
-                sql = "SELECT COUNT(*) FROM documents"
+                sql = """
+                    SELECT COUNT(*) 
+                    FROM documents d
+                    LEFT JOIN hidden_categories hc ON d.category = hc.category
+                """
+                
+                # Visibility filter
+                if not include_hidden:
+                    conditions.append("(d.is_hidden IS NULL OR d.is_hidden = 0)")
+                    conditions.append("hc.category IS NULL")
             
             if category:
-                conditions.append("category = ?" if not keyword else "d.category = ?")
+                conditions.append("d.category = ?")
                 params.append(category)
             
             if subcategory:
-                conditions.append("subcategory = ?" if not keyword else "d.subcategory = ?")
+                conditions.append("d.subcategory = ?")
                 params.append(subcategory)
             
             if file_type:
-                conditions.append("file_type = ?" if not keyword else "d.file_type = ?")
+                conditions.append("d.file_type = ?")
                 params.append(file_type)
             
             if filename:
-                conditions.append("LOWER(filename) LIKE LOWER(?)" if not keyword else "LOWER(d.filename) LIKE LOWER(?)")
+                conditions.append("LOWER(d.filename) LIKE LOWER(?)")
                 params.append(f"%{filename}%")
             
             if conditions:
@@ -774,18 +901,36 @@ class Database:
     # Pinned Documents Methods
     # =========================================================================
     
-    def get_pinned_documents(self) -> List[Dict[str, Any]]:
-        """Get all pinned documents with their details"""
+    def get_pinned_documents(self, include_hidden: bool = False) -> List[Dict[str, Any]]:
+        """Get all pinned documents with their details
+        
+        Args:
+            include_hidden: If False (default), excludes hidden documents and hidden categories
+        """
         with self.get_connection() as conn:
-            cursor = conn.execute("""
-                SELECT 
-                    p.document_id, p.reason, p.display_order, p.pinned_at,
-                    d.filename, d.path, d.category, d.subcategory, d.file_type,
-                    d.page_count, d.char_count
-                FROM pinned_documents p
-                JOIN documents d ON p.document_id = d.id
-                ORDER BY p.display_order ASC, p.pinned_at DESC
-            """)
+            if include_hidden:
+                cursor = conn.execute("""
+                    SELECT 
+                        p.document_id, p.reason, p.display_order, p.pinned_at,
+                        d.filename, d.path, d.category, d.subcategory, d.file_type,
+                        d.page_count, d.char_count, d.is_hidden
+                    FROM pinned_documents p
+                    JOIN documents d ON p.document_id = d.id
+                    ORDER BY p.display_order ASC, p.pinned_at DESC
+                """)
+            else:
+                cursor = conn.execute("""
+                    SELECT 
+                        p.document_id, p.reason, p.display_order, p.pinned_at,
+                        d.filename, d.path, d.category, d.subcategory, d.file_type,
+                        d.page_count, d.char_count, d.is_hidden
+                    FROM pinned_documents p
+                    JOIN documents d ON p.document_id = d.id
+                    LEFT JOIN hidden_categories hc ON d.category = hc.category
+                    WHERE (d.is_hidden IS NULL OR d.is_hidden = 0)
+                      AND hc.category IS NULL
+                    ORDER BY p.display_order ASC, p.pinned_at DESC
+                """)
             return [dict(row) for row in cursor.fetchall()]
     
     def pin_document(self, document_id: str, reason: str = None, display_order: int = 0) -> bool:
@@ -1363,6 +1508,160 @@ class Database:
                 cursor = conn.execute("DELETE FROM doj_manifest")
             conn.commit()
             return cursor.rowcount
+    
+    # =========================================================================
+    # Document Visibility Methods
+    # =========================================================================
+    
+    def hide_document(self, doc_id: str) -> bool:
+        """Hide a document from public view
+        
+        Returns:
+            True if updated, False if document not found
+        """
+        with self.get_connection() as conn:
+            cursor = conn.execute(
+                "UPDATE documents SET is_hidden = 1 WHERE id = ?",
+                (doc_id,)
+            )
+            conn.commit()
+            return cursor.rowcount > 0
+    
+    def unhide_document(self, doc_id: str) -> bool:
+        """Unhide a document (make visible to public)
+        
+        Returns:
+            True if updated, False if document not found
+        """
+        with self.get_connection() as conn:
+            cursor = conn.execute(
+                "UPDATE documents SET is_hidden = 0 WHERE id = ?",
+                (doc_id,)
+            )
+            conn.commit()
+            return cursor.rowcount > 0
+    
+    def is_document_hidden(self, doc_id: str) -> bool:
+        """Check if a specific document is hidden"""
+        with self.get_connection() as conn:
+            cursor = conn.execute(
+                "SELECT is_hidden FROM documents WHERE id = ?",
+                (doc_id,)
+            )
+            row = cursor.fetchone()
+            return row and row[0] == 1
+    
+    def get_hidden_documents(self, limit: int = 100, offset: int = 0) -> List[Dict[str, Any]]:
+        """Get all hidden documents (for admin panel)"""
+        with self.get_connection() as conn:
+            cursor = conn.execute("""
+                SELECT id, filename, path, category, subcategory, file_type, 
+                       page_count, char_count, is_hidden
+                FROM documents 
+                WHERE is_hidden = 1
+                ORDER BY filename
+                LIMIT ? OFFSET ?
+            """, (limit, offset))
+            return [dict(row) for row in cursor.fetchall()]
+    
+    def count_hidden_documents(self) -> int:
+        """Count total hidden documents"""
+        with self.get_connection() as conn:
+            cursor = conn.execute("SELECT COUNT(*) FROM documents WHERE is_hidden = 1")
+            return cursor.fetchone()[0]
+    
+    # =========================================================================
+    # Category Visibility Methods
+    # =========================================================================
+    
+    def hide_category(self, category: str) -> bool:
+        """Hide an entire category from public view
+        
+        Returns:
+            True if added/updated
+        """
+        with self.get_connection() as conn:
+            try:
+                conn.execute("""
+                    INSERT OR REPLACE INTO hidden_categories (category, hidden_at)
+                    VALUES (?, CURRENT_TIMESTAMP)
+                """, (category,))
+                conn.commit()
+                return True
+            except Exception:
+                return False
+    
+    def unhide_category(self, category: str) -> bool:
+        """Unhide a category (make visible to public)
+        
+        Returns:
+            True if removed, False if not found
+        """
+        with self.get_connection() as conn:
+            cursor = conn.execute(
+                "DELETE FROM hidden_categories WHERE category = ?",
+                (category,)
+            )
+            conn.commit()
+            return cursor.rowcount > 0
+    
+    def is_category_hidden(self, category: str) -> bool:
+        """Check if a category is hidden"""
+        with self.get_connection() as conn:
+            cursor = conn.execute(
+                "SELECT 1 FROM hidden_categories WHERE category = ?",
+                (category,)
+            )
+            return cursor.fetchone() is not None
+    
+    def get_hidden_categories(self) -> List[Dict[str, Any]]:
+        """Get all hidden categories with document counts"""
+        with self.get_connection() as conn:
+            cursor = conn.execute("""
+                SELECT 
+                    hc.category,
+                    hc.hidden_at,
+                    COUNT(d.id) as document_count
+                FROM hidden_categories hc
+                LEFT JOIN documents d ON d.category = hc.category
+                GROUP BY hc.category
+                ORDER BY hc.category
+            """)
+            return [dict(row) for row in cursor.fetchall()]
+    
+    def is_document_visible(self, doc_id: str) -> bool:
+        """Check if a document is visible to public (not hidden AND category not hidden)
+        
+        This is the main visibility check that should be used by all public endpoints.
+        
+        Returns:
+            True if document exists and is visible, False otherwise
+        """
+        with self.get_connection() as conn:
+            cursor = conn.execute("""
+                SELECT d.id 
+                FROM documents d
+                LEFT JOIN hidden_categories hc ON d.category = hc.category
+                WHERE d.id = ? 
+                  AND (d.is_hidden IS NULL OR d.is_hidden = 0)
+                  AND hc.category IS NULL
+            """, (doc_id,))
+            return cursor.fetchone() is not None
+    
+    def get_all_categories_with_visibility(self) -> List[Dict[str, Any]]:
+        """Get all categories with their visibility status and document counts (for admin)"""
+        with self.get_connection() as conn:
+            cursor = conn.execute("""
+                SELECT 
+                    d.category,
+                    COUNT(*) as document_count,
+                    CASE WHEN hc.category IS NOT NULL THEN 1 ELSE 0 END as is_hidden
+                FROM documents d
+                LEFT JOIN hidden_categories hc ON d.category = hc.category
+                GROUP BY d.category
+                ORDER BY d.category
+            """)
+            return [dict(row) for row in cursor.fetchall()]
 
 
 class VectorStore:

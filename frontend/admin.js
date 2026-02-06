@@ -1737,7 +1737,9 @@ async function loadContentData() {
         loadPinnedDocsStatus(),
         loadPinnedDocuments(),
         loadKeywords(),
-        loadDojCompleteness()
+        loadDojCompleteness(),
+        loadHiddenDocuments(),
+        loadCategoryVisibility()
     ]);
 }
 
@@ -2794,4 +2796,287 @@ window.loadDojCompleteness = loadDojCompleteness;
 window.refreshDojCompleteness = refreshDojCompleteness;
 window.filterDojData = filterDojData;
 window.exportMissingDocs = exportMissingDocs;
+
+// =============================================================================
+// Document Visibility Management
+// =============================================================================
+
+let hiddenDocumentsData = [];
+let categoryVisibilityData = [];
+
+async function loadHiddenDocuments() {
+    try {
+        const response = await authFetch(`${window.location.origin}/api/admin/hidden-documents?limit=100`);
+        if (!response.ok) throw new Error('Failed to load hidden documents');
+        const data = await response.json();
+        
+        hiddenDocumentsData = data.hidden_documents || [];
+        
+        // Update count
+        const countEl = document.getElementById('hidden-docs-count');
+        if (countEl) countEl.textContent = data.total || 0;
+        
+        renderHiddenDocuments();
+    } catch (error) {
+        console.error('Error loading hidden documents:', error);
+        const el = document.getElementById('hidden-docs-list');
+        if (el) el.innerHTML = '<div style="color: var(--danger);">Error loading hidden documents</div>';
+    }
+}
+
+function renderHiddenDocuments() {
+    const el = document.getElementById('hidden-docs-list');
+    if (!el) return;
+    
+    if (!hiddenDocumentsData || hiddenDocumentsData.length === 0) {
+        el.innerHTML = `
+            <div style="padding: var(--space-md); text-align: center; color: var(--text-muted);">
+                <svg viewBox="0 0 24 24" width="32" height="32" fill="none" stroke="currentColor" stroke-width="2" style="margin-bottom: var(--space-sm); opacity: 0.5;">
+                    <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/>
+                    <circle cx="12" cy="12" r="3"/>
+                </svg>
+                <p>No documents are currently hidden</p>
+            </div>
+        `;
+        return;
+    }
+    
+    el.innerHTML = `
+        <div style="max-height: 300px; overflow-y: auto;">
+            ${hiddenDocumentsData.map(doc => `
+                <div style="display: flex; align-items: center; justify-content: space-between; padding: var(--space-sm) var(--space-md); border-bottom: 1px solid var(--border);">
+                    <div style="flex: 1; min-width: 0;">
+                        <div style="font-family: var(--font-mono); font-size: 0.85rem; color: var(--text-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;" title="${escapeHtml(doc.filename)}">
+                            ${escapeHtml(doc.filename)}
+                        </div>
+                        <div style="font-size: 0.75rem; color: var(--text-muted);">
+                            ${escapeHtml(doc.category || 'Unknown')} • ${escapeHtml(doc.subcategory || '')}
+                        </div>
+                    </div>
+                    <button class="btn btn-sm" onclick="unhideDocument('${escapeHtml(doc.id)}')" style="flex-shrink: 0;">
+                        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/>
+                            <circle cx="12" cy="12" r="3"/>
+                        </svg>
+                        Unhide
+                    </button>
+                </div>
+            `).join('')}
+        </div>
+    `;
+}
+
+async function searchDocumentsForVisibility() {
+    const searchInput = document.getElementById('visibility-doc-search');
+    const query = searchInput ? searchInput.value.trim() : '';
+    
+    const resultsEl = document.getElementById('visibility-search-results');
+    if (!resultsEl) return;
+    
+    if (!query) {
+        resultsEl.innerHTML = '<div style="padding: var(--space-md); color: var(--text-muted); text-align: center;">Search for documents to manage their visibility</div>';
+        return;
+    }
+    
+    resultsEl.innerHTML = '<div class="loading"><span class="spinner"></span>Searching...</div>';
+    
+    try {
+        const response = await authFetch(`${window.location.origin}/api/admin/documents-visibility?search=${encodeURIComponent(query)}&limit=50`);
+        if (!response.ok) throw new Error('Search failed');
+        const data = await response.json();
+        
+        if (!data.documents || data.documents.length === 0) {
+            resultsEl.innerHTML = '<div style="padding: var(--space-md); color: var(--text-muted); text-align: center;">No documents found</div>';
+            return;
+        }
+        
+        resultsEl.innerHTML = data.documents.map(doc => {
+            const isHidden = doc.is_hidden === 1;
+            return `
+                <div style="display: flex; align-items: center; justify-content: space-between; padding: var(--space-sm) var(--space-md); border-bottom: 1px solid var(--border); ${isHidden ? 'background: var(--danger-dim);' : ''}">
+                    <div style="flex: 1; min-width: 0;">
+                        <div style="font-family: var(--font-mono); font-size: 0.85rem; color: var(--text-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;" title="${escapeHtml(doc.filename)}">
+                            ${isHidden ? '🔒 ' : ''}${escapeHtml(doc.filename)}
+                        </div>
+                        <div style="font-size: 0.75rem; color: var(--text-muted);">
+                            ${escapeHtml(doc.category || 'Unknown')} • ${escapeHtml(doc.subcategory || '')}
+                        </div>
+                    </div>
+                    ${isHidden ? `
+                        <button class="btn btn-sm" onclick="unhideDocument('${escapeHtml(doc.id)}'); searchDocumentsForVisibility();">
+                            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/>
+                                <circle cx="12" cy="12" r="3"/>
+                            </svg>
+                            Unhide
+                        </button>
+                    ` : `
+                        <button class="btn btn-sm btn-danger" onclick="hideDocument('${escapeHtml(doc.id)}'); searchDocumentsForVisibility();">
+                            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/>
+                                <line x1="1" y1="1" x2="23" y2="23"/>
+                            </svg>
+                            Hide
+                        </button>
+                    `}
+                </div>
+            `;
+        }).join('');
+        
+    } catch (error) {
+        console.error('Error searching documents:', error);
+        resultsEl.innerHTML = '<div style="padding: var(--space-md); color: var(--danger); text-align: center;">Search failed</div>';
+    }
+}
+
+async function hideDocument(docId) {
+    try {
+        const response = await authFetch(`${window.location.origin}/api/admin/documents/${encodeURIComponent(docId)}/hide`, {
+            method: 'POST'
+        });
+        
+        if (!response.ok) {
+            const data = await response.json();
+            throw new Error(data.detail || 'Failed to hide document');
+        }
+        
+        loadHiddenDocuments();
+    } catch (error) {
+        console.error('Error hiding document:', error);
+        alert('Error: ' + error.message);
+    }
+}
+
+async function unhideDocument(docId) {
+    try {
+        const response = await authFetch(`${window.location.origin}/api/admin/documents/${encodeURIComponent(docId)}/unhide`, {
+            method: 'POST'
+        });
+        
+        if (!response.ok) {
+            const data = await response.json();
+            throw new Error(data.detail || 'Failed to unhide document');
+        }
+        
+        loadHiddenDocuments();
+    } catch (error) {
+        console.error('Error unhiding document:', error);
+        alert('Error: ' + error.message);
+    }
+}
+
+// =============================================================================
+// Category Visibility Management
+// =============================================================================
+
+async function loadCategoryVisibility() {
+    try {
+        const response = await authFetch(`${window.location.origin}/api/admin/categories-visibility`);
+        if (!response.ok) throw new Error('Failed to load categories');
+        const data = await response.json();
+        
+        categoryVisibilityData = data.categories || [];
+        renderCategoryVisibility();
+    } catch (error) {
+        console.error('Error loading category visibility:', error);
+        const el = document.getElementById('category-visibility-list');
+        if (el) el.innerHTML = '<div style="color: var(--danger);">Error loading categories</div>';
+    }
+}
+
+function renderCategoryVisibility() {
+    const el = document.getElementById('category-visibility-list');
+    if (!el) return;
+    
+    if (!categoryVisibilityData || categoryVisibilityData.length === 0) {
+        el.innerHTML = '<div style="padding: var(--space-md); text-align: center; color: var(--text-muted);">No categories found</div>';
+        return;
+    }
+    
+    el.innerHTML = `
+        <div style="display: grid; gap: var(--space-sm);">
+            ${categoryVisibilityData.map(cat => {
+                const isHidden = cat.is_hidden === 1;
+                return `
+                    <div style="display: flex; align-items: center; justify-content: space-between; padding: var(--space-md); background: ${isHidden ? 'var(--danger-dim)' : 'var(--bg-tertiary)'}; border: 1px solid ${isHidden ? 'var(--danger)' : 'var(--border)'}; border-radius: 6px;">
+                        <div>
+                            <div style="font-weight: 500; color: var(--text-primary);">
+                                ${isHidden ? '🔒 ' : ''}${escapeHtml(cat.category)}
+                            </div>
+                            <div style="font-size: 0.8rem; color: var(--text-muted);">
+                                ${formatNumber(cat.document_count)} documents
+                            </div>
+                        </div>
+                        ${isHidden ? `
+                            <button class="btn btn-sm" onclick="unhideCategory('${escapeHtml(cat.category)}')">
+                                <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
+                                    <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/>
+                                    <circle cx="12" cy="12" r="3"/>
+                                </svg>
+                                Show Category
+                            </button>
+                        ` : `
+                            <button class="btn btn-sm btn-danger" onclick="hideCategory('${escapeHtml(cat.category)}')">
+                                <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
+                                    <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/>
+                                    <line x1="1" y1="1" x2="23" y2="23"/>
+                                </svg>
+                                Hide Category
+                            </button>
+                        `}
+                    </div>
+                `;
+            }).join('')}
+        </div>
+    `;
+}
+
+async function hideCategory(category) {
+    if (!confirm(`Are you sure you want to hide the "${category}" category?\n\nAll ${categoryVisibilityData.find(c => c.category === category)?.document_count || 0} documents in this category will become inaccessible to the public.`)) {
+        return;
+    }
+    
+    try {
+        const response = await authFetch(`${window.location.origin}/api/admin/categories/${encodeURIComponent(category)}/hide`, {
+            method: 'POST'
+        });
+        
+        if (!response.ok) {
+            const data = await response.json();
+            throw new Error(data.detail || 'Failed to hide category');
+        }
+        
+        loadCategoryVisibility();
+    } catch (error) {
+        console.error('Error hiding category:', error);
+        alert('Error: ' + error.message);
+    }
+}
+
+async function unhideCategory(category) {
+    try {
+        const response = await authFetch(`${window.location.origin}/api/admin/categories/${encodeURIComponent(category)}/unhide`, {
+            method: 'POST'
+        });
+        
+        if (!response.ok) {
+            const data = await response.json();
+            throw new Error(data.detail || 'Failed to unhide category');
+        }
+        
+        loadCategoryVisibility();
+    } catch (error) {
+        console.error('Error unhiding category:', error);
+        alert('Error: ' + error.message);
+    }
+}
+
+// Export Visibility Management functions
+window.loadHiddenDocuments = loadHiddenDocuments;
+window.searchDocumentsForVisibility = searchDocumentsForVisibility;
+window.hideDocument = hideDocument;
+window.unhideDocument = unhideDocument;
+window.loadCategoryVisibility = loadCategoryVisibility;
+window.hideCategory = hideCategory;
+window.unhideCategory = unhideCategory;
 
