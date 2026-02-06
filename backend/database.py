@@ -4,6 +4,7 @@ Handles SQLite for metadata, full-text search, and vector search
 """
 
 import os
+import re
 import json
 import sqlite3
 import pickle
@@ -1643,7 +1644,20 @@ class Database:
             params.append(max_results)
             
             cursor = conn.execute(sql, params)
-            return [dict(row) for row in cursor]
+            results = [dict(row) for row in cursor]
+            
+            # Generate DOJ URLs for documents missing them
+            for doc in results:
+                if not doc.get('doj_url') and doc.get('category') == 'DOJ Disclosures':
+                    subcategory = doc.get('subcategory', '')
+                    # Extract dataset number from "Data Set N"
+                    match = re.match(r'Data Set (\d+)', subcategory)
+                    if match:
+                        dataset_num = match.group(1)
+                        filename = doc.get('filename', '')
+                        doc['doj_url'] = f"https://www.justice.gov/epstein/files/DataSet%20{dataset_num}/{filename}"
+            
+            return results
     
     # =========================================================================
     # Document Visibility Methods
