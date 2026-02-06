@@ -824,9 +824,16 @@ Data Sources:
             print("✗ Database not found. Run 'python run.py setup' first.")
             sys.exit(1)
         
+        def _fts_progress(phase, current, total, message):
+            if phase == 3 and total > 0:
+                pct = int(100 * current / total)
+                print(f"\r  {message} {current:,}/{total:,} ({pct}%)  ", end="", flush=True)
+            else:
+                print(f"\n  {message}")
+        
         db = Database(str(db_path))
-        db.rebuild_fts()
-        print("✅ FTS5 index rebuilt successfully!")
+        db.rebuild_fts(progress_callback=_fts_progress)
+        print("\n✅ FTS5 index rebuilt successfully!")
         sys.exit(0)
     
     # Handle cleanup-db command

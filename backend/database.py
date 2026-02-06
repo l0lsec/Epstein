@@ -221,16 +221,30 @@ class Database:
                 conn.commit()
                 print("✅ Added is_hidden column to documents table")
     
-    def rebuild_fts(self):
-        """Rebuild the FTS5 index to fix sync issues"""
+    def rebuild_fts(self, progress_callback=None):
+        """Rebuild the FTS5 index to fix sync issues.
+
+        progress_callback: optional callable(phase, current, total, message)
+            phase: 1=drop, 2=create table, 3=populate, 4=triggers
+            current/total: progress during phase 3 (documents), else 0/total_steps
+        """
+        batch_size = 500
         with self.get_connection() as conn:
-            # Drop and recreate the FTS table and triggers
+            # Phase 1: Drop triggers and FTS table
+            if progress_callback:
+                progress_callback(1, 0, 4, "Dropping old FTS index and triggers...")
             conn.executescript("""
                 DROP TRIGGER IF EXISTS documents_ai;
                 DROP TRIGGER IF EXISTS documents_ad;
                 DROP TRIGGER IF EXISTS documents_au;
                 DROP TABLE IF EXISTS documents_fts;
-                
+            """)
+            conn.commit()
+
+            # Phase 2: Create empty FTS table
+            if progress_callback:
+                progress_callback(2, 1, 4, "Creating FTS table...")
+            conn.executescript("""
                 CREATE VIRTUAL TABLE documents_fts USING fts5(
                     id,
                     filename,
@@ -238,22 +252,37 @@ class Database:
                     content=documents,
                     content_rowid=rowid
                 );
-                
-                -- Repopulate FTS from documents table
-                INSERT INTO documents_fts(rowid, id, filename, full_text)
-                SELECT rowid, id, filename, full_text FROM documents;
-                
-                -- Recreate triggers
+            """)
+            conn.commit()
+
+            # Phase 3: Repopulate in batches for progress reporting
+            total = conn.execute("SELECT COUNT(*) FROM documents").fetchone()[0]
+            if progress_callback:
+                progress_callback(3, 0, total, "Populating FTS index...")
+            offset = 0
+            while offset < total:
+                conn.execute("""
+                    INSERT INTO documents_fts(rowid, id, filename, full_text)
+                    SELECT rowid, id, filename, full_text FROM documents
+                    ORDER BY rowid LIMIT ? OFFSET ?
+                """, (batch_size, offset))
+                offset += batch_size
+                if progress_callback:
+                    progress_callback(3, min(offset, total), total, "Populating FTS index...")
+            conn.commit()
+
+            # Phase 4: Recreate triggers
+            if progress_callback:
+                progress_callback(4, 4, 4, "Creating triggers...")
+            conn.executescript("""
                 CREATE TRIGGER documents_ai AFTER INSERT ON documents BEGIN
                     INSERT INTO documents_fts(rowid, id, filename, full_text)
                     VALUES (new.rowid, new.id, new.filename, new.full_text);
                 END;
-                
                 CREATE TRIGGER documents_ad AFTER DELETE ON documents BEGIN
                     INSERT INTO documents_fts(documents_fts, rowid, id, filename, full_text)
                     VALUES('delete', old.rowid, old.id, old.filename, old.full_text);
                 END;
-                
                 CREATE TRIGGER documents_au AFTER UPDATE ON documents BEGIN
                     INSERT INTO documents_fts(documents_fts, rowid, id, filename, full_text)
                     VALUES('delete', old.rowid, old.id, old.filename, old.full_text);
@@ -262,7 +291,8 @@ class Database:
                 END;
             """)
             conn.commit()
-        print("FTS index rebuilt successfully")
+        if not progress_callback:
+            print("FTS index rebuilt successfully")
     
     def insert_document(self, doc: Dict[str, Any]):
         """Insert or update a document"""
