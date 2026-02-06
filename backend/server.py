@@ -11,7 +11,7 @@ from typing import Optional, List
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 
-from fastapi import FastAPI, HTTPException, Query, Request, Header
+from fastapi import FastAPI, HTTPException, Query, Request, Header, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, StreamingResponse, Response, HTMLResponse, RedirectResponse
@@ -21,6 +21,7 @@ from sse_starlette.sse import EventSourceResponse
 
 from database import Database, VectorStore, build_index
 from llm import LLMAssistant
+from extractor import extract_email_date
 from security_logger import (
     SecurityLogger, 
     RequestLoggingMiddleware, 
@@ -705,6 +706,8 @@ class SearchRequest(BaseModel):
     category: Optional[str] = None
     subcategory: Optional[str] = None
     file_type: Optional[str] = None  # "pdf", "audio", "video"
+    date_from: Optional[str] = None  # YYYY-MM-DD format
+    date_to: Optional[str] = None    # YYYY-MM-DD format
     limit: int = 50  # Results per page (unlimited total via pagination)
     offset: int = 0
 
@@ -1313,14 +1316,18 @@ async def search(search_request: SearchRequest, request: Request) -> dict:
                 offset=search_request.offset,
                 category=search_request.category,
                 subcategory=search_request.subcategory,
-                file_type=search_request.file_type
+                file_type=search_request.file_type,
+                date_from=search_request.date_from,
+                date_to=search_request.date_to
             )
             # Get actual total count for pagination
             total_count = db.count_fulltext_results(
                 query=fts_query,
                 category=search_request.category,
                 subcategory=search_request.subcategory,
-                file_type=search_request.file_type
+                file_type=search_request.file_type,
+                date_from=search_request.date_from,
+                date_to=search_request.date_to
             )
             for r in ft_results:
                 results.append({
@@ -1388,7 +1395,9 @@ async def search(search_request: SearchRequest, request: Request) -> dict:
                 query=fts_query,
                 category=search_request.category,
                 subcategory=search_request.subcategory,
-                file_type=search_request.file_type
+                file_type=search_request.file_type,
+                date_from=search_request.date_from,
+                date_to=search_request.date_to
             )
         except Exception as e:
             security_logger.log_error(
@@ -2889,6 +2898,125 @@ async def clear_logs(
         "errors": errors,
         "message": f"Cleared {len(cleared)} log file(s)" + (f" with {len(errors)} error(s)" if errors else "")
     }
+
+
+# Global state for date extraction progress
+_date_extraction_status = {
+    "running": False,
+    "total": 0,
+    "processed": 0,
+    "updated": 0,
+    "errors": 0,
+    "started_at": None,
+    "completed_at": None
+}
+
+
+def run_date_extraction():
+    """Background task to extract dates from all documents without a document_date."""
+    global _date_extraction_status, db
+    
+    _date_extraction_status["running"] = True
+    _date_extraction_status["started_at"] = datetime.now().isoformat()
+    _date_extraction_status["completed_at"] = None
+    _date_extraction_status["processed"] = 0
+    _date_extraction_status["updated"] = 0
+    _date_extraction_status["errors"] = 0
+    
+    try:
+        # Get all documents without a date
+        with db.get_connection() as conn:
+            cursor = conn.execute("""
+                SELECT id, full_text FROM documents 
+                WHERE document_date IS NULL AND full_text IS NOT NULL
+            """)
+            documents = cursor.fetchall()
+        
+        _date_extraction_status["total"] = len(documents)
+        
+        # Process in batches of 100
+        batch_size = 100
+        updates = []
+        
+        for doc in documents:
+            doc_id = doc["id"]
+            full_text = doc["full_text"] or ""
+            
+            try:
+                date = extract_email_date(full_text)
+                if date:
+                    updates.append((date, doc_id))
+                    _date_extraction_status["updated"] += 1
+            except Exception:
+                _date_extraction_status["errors"] += 1
+            
+            _date_extraction_status["processed"] += 1
+            
+            # Commit in batches
+            if len(updates) >= batch_size:
+                with db.get_connection() as conn:
+                    conn.executemany(
+                        "UPDATE documents SET document_date = ? WHERE id = ?",
+                        updates
+                    )
+                    conn.commit()
+                updates = []
+        
+        # Commit remaining updates
+        if updates:
+            with db.get_connection() as conn:
+                conn.executemany(
+                    "UPDATE documents SET document_date = ? WHERE id = ?",
+                    updates
+                )
+                conn.commit()
+    
+    except Exception as e:
+        print(f"Date extraction error: {e}")
+        _date_extraction_status["errors"] += 1
+    
+    finally:
+        _date_extraction_status["running"] = False
+        _date_extraction_status["completed_at"] = datetime.now().isoformat()
+
+
+@app.post("/api/admin/extract-dates")
+async def extract_document_dates(
+    request: Request,
+    background_tasks: BackgroundTasks,
+    x_api_key: str = Header(None)
+):
+    """
+    Run date extraction on all documents without a document_date (requires admin authentication).
+    This runs in the background and progress can be monitored via GET /api/admin/extract-dates/status.
+    """
+    is_authorized, error = verify_admin_access(request, x_api_key)
+    if not is_authorized:
+        raise HTTPException(status_code=401, detail=error)
+    
+    if _date_extraction_status["running"]:
+        return {
+            "status": "already_running",
+            "message": "Date extraction is already in progress",
+            "progress": _date_extraction_status
+        }
+    
+    background_tasks.add_task(run_date_extraction)
+    
+    return {
+        "status": "started",
+        "message": "Date extraction started in background. Check /api/admin/extract-dates/status for progress."
+    }
+
+
+@app.get("/api/admin/extract-dates/status")
+async def get_date_extraction_status(request: Request, x_api_key: str = Header(None)):
+    """Get the current status of date extraction (requires admin authentication)."""
+    is_authorized, error = verify_admin_access(request, x_api_key)
+    if not is_authorized:
+        raise HTTPException(status_code=401, detail=error)
+    
+    return _date_extraction_status
 
 
 @app.get("/api/admin/telemetry/ai-summaries")

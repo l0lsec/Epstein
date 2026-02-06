@@ -531,6 +531,8 @@ body {
     border-radius: 12px;
     padding: var(--space-md) var(--space-lg);
     transition: all var(--transition-base);
+    overflow: hidden;
+    max-width: 100%;
 }
 
 .option-group {
@@ -562,6 +564,76 @@ body {
     min-width: 0;
     max-width: 180px;
     text-overflow: ellipsis;
+}
+
+/* Date Range Inputs */
+.option-group-date {
+    display: flex;
+    align-items: center;
+    gap: var(--space-sm);
+    flex: 1 1 auto;
+    min-width: 0;
+    max-width: 280px;
+}
+
+.option-group-date > label {
+    font-size: 0.85rem;
+    color: var(--text-muted);
+    white-space: nowrap;
+    flex-shrink: 0;
+}
+
+.date-range-inputs {
+    display: flex;
+    align-items: center;
+    gap: var(--space-xs);
+    flex: 1;
+    min-width: 0;
+}
+
+.date-range-inputs input[type="date"] {
+    padding: 8px 8px;
+    background: #1a1d25;
+    border: 1px solid #2a2e38;
+    border-radius: 6px;
+    color: #e8e9eb;
+    font-family: 'Source Sans 3', -apple-system, BlinkMacSystemFont, sans-serif;
+    font-size: 0.85rem;
+    cursor: pointer;
+    width: 105px;
+    min-width: 0;
+    flex-shrink: 1;
+    color-scheme: dark;
+}
+
+.date-range-inputs input[type="date"]:hover {
+    border-color: #3a3f4b;
+}
+
+.date-range-inputs input[type="date"]:focus {
+    outline: none;
+    border-color: #c9a227;
+    box-shadow: 0 0 0 2px rgba(201, 162, 39, 0.15);
+}
+
+.date-range-inputs input[type="date"]::-webkit-calendar-picker-indicator {
+    filter: invert(0.8) sepia(1) saturate(5) hue-rotate(0deg);
+    cursor: pointer;
+    opacity: 0.7;
+}
+
+.date-range-inputs input[type="date"]::-webkit-calendar-picker-indicator:hover {
+    opacity: 1;
+}
+
+.date-separator {
+    color: #6b7280;
+    font-size: 0.85rem;
+}
+
+/* Result Date Display */
+.result-date {
+    color: #c9a227;
 }
 
 /* Search Help Section */
@@ -2910,6 +2982,23 @@ body {
         flex-direction: column;
         gap: var(--space-md);
         padding: var(--space-md);
+    }
+    
+    .option-group-date {
+        width: 100%;
+        flex-direction: column;
+        align-items: center;
+        gap: var(--space-xs);
+    }
+    
+    .date-range-inputs {
+        justify-content: center;
+    }
+    
+    .date-range-inputs input[type="date"] {
+        width: 115px;
+        font-size: 0.85rem;
+        padding: 6px 8px;
     }
     
     .stats-grid {

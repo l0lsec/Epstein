@@ -515,6 +515,127 @@ async function rebuildFTS() {
     }
 }
 
+// Date Extraction Functions
+let dateExtractionPollInterval = null;
+
+async function triggerDateExtraction() {
+    const btn = document.getElementById('extract-dates-btn');
+    const progressSpan = document.getElementById('date-extraction-progress');
+    
+    if (!confirm('This will extract dates from email headers in all documents. This runs in the background and does not re-index files. Continue?')) {
+        return;
+    }
+    
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner" style="width: 16px; height: 16px;"></span> Starting...';
+    
+    try {
+        const response = await authFetch(`${window.location.origin}/api/admin/extract-dates`, {
+            method: 'POST'
+        });
+        
+        if (!response.ok) {
+            const data = await response.json();
+            throw new Error(data.detail || 'Failed to start date extraction');
+        }
+        
+        const data = await response.json();
+        
+        if (data.status === 'already_running') {
+            progressSpan.textContent = 'Extraction already in progress...';
+        } else {
+            progressSpan.textContent = 'Extraction started...';
+        }
+        
+        // Start polling for status
+        pollDateExtractionStatus();
+        
+    } catch (error) {
+        console.error('Error starting date extraction:', error);
+        alert(`Error: ${error.message}`);
+        resetDateExtractionButton();
+    }
+}
+
+async function checkDateExtractionStatus() {
+    const progressSpan = document.getElementById('date-extraction-progress');
+    
+    try {
+        const response = await authFetch(`${window.location.origin}/api/admin/extract-dates/status`);
+        
+        if (!response.ok) {
+            throw new Error('Failed to get status');
+        }
+        
+        const data = await response.json();
+        updateDateExtractionUI(data);
+        
+    } catch (error) {
+        console.error('Error checking date extraction status:', error);
+        progressSpan.textContent = 'Error checking status';
+    }
+}
+
+function updateDateExtractionUI(status) {
+    const btn = document.getElementById('extract-dates-btn');
+    const progressSpan = document.getElementById('date-extraction-progress');
+    
+    if (status.running) {
+        btn.disabled = true;
+        btn.innerHTML = '<span class="spinner" style="width: 16px; height: 16px;"></span> Extracting...';
+        progressSpan.textContent = `Progress: ${status.processed}/${status.total} (${status.updated} dates found)`;
+    } else {
+        resetDateExtractionButton();
+        if (status.completed_at) {
+            progressSpan.textContent = `Last run: ${status.updated} dates extracted from ${status.processed} documents`;
+        } else if (status.total === 0 && status.processed === 0) {
+            progressSpan.textContent = '';
+        }
+    }
+}
+
+function resetDateExtractionButton() {
+    const btn = document.getElementById('extract-dates-btn');
+    if (btn) {
+        btn.disabled = false;
+        btn.innerHTML = `
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
+                <rect x="3" y="4" width="18" height="18" rx="2" ry="2"/>
+                <line x1="16" y1="2" x2="16" y2="6"/>
+                <line x1="8" y1="2" x2="8" y2="6"/>
+                <line x1="3" y1="10" x2="21" y2="10"/>
+            </svg>
+            Extract Dates
+        `;
+    }
+}
+
+function pollDateExtractionStatus() {
+    // Clear any existing poll
+    if (dateExtractionPollInterval) {
+        clearInterval(dateExtractionPollInterval);
+    }
+    
+    // Poll every 2 seconds
+    dateExtractionPollInterval = setInterval(async () => {
+        try {
+            const response = await authFetch(`${window.location.origin}/api/admin/extract-dates/status`);
+            if (!response.ok) return;
+            
+            const data = await response.json();
+            updateDateExtractionUI(data);
+            
+            // Stop polling when complete
+            if (!data.running) {
+                clearInterval(dateExtractionPollInterval);
+                dateExtractionPollInterval = null;
+            }
+        } catch (error) {
+            console.error('Error polling date extraction status:', error);
+        }
+    }, 2000);
+}
+
 let indexPollInterval = null;
 
 function pollIndexStatus() {

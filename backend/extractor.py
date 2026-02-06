@@ -18,6 +18,56 @@ from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_compl
 from tqdm import tqdm
 import pdfplumber
 import multiprocessing
+import re
+from dateutil import parser as date_parser
+
+
+def extract_email_date(text: str) -> Optional[str]:
+    """
+    Extract date from email headers in document text.
+    
+    Looks for patterns like:
+    - Sent: Tuesday, July 23, 2013 5:35 PM
+    - Date: July 23, 2013
+    - Sent: 07/23/2013
+    - Date: 2013-07-23
+    
+    Returns:
+        Date string in YYYY-MM-DD format, or None if no date found
+    """
+    if not text:
+        return None
+    
+    # Only search the first 2000 characters for efficiency (email headers are at the top)
+    search_text = text[:2000]
+    
+    # Patterns to match email date headers
+    patterns = [
+        # "Sent: Tuesday, July 23, 2013 5:35 PM" or "Sent: July 23, 2013"
+        r'Sent:\s*(?:[A-Za-z]+,?\s+)?([A-Za-z]+\s+\d{1,2},?\s+\d{4}(?:\s+\d{1,2}:\d{2}(?::\d{2})?\s*(?:AM|PM)?)?)',
+        # "Date: July 23, 2013"
+        r'Date:\s*(?:[A-Za-z]+,?\s+)?([A-Za-z]+\s+\d{1,2},?\s+\d{4})',
+        # "Sent: 07/23/2013" or "Date: 07/23/2013"
+        r'(?:Sent|Date):\s*(\d{1,2}/\d{1,2}/\d{2,4})',
+        # "Sent: 2013-07-23" or "Date: 2013-07-23" (ISO format)
+        r'(?:Sent|Date):\s*(\d{4}-\d{2}-\d{2})',
+        # "From: ... Date: ..." pattern common in email chains
+        r'From:.*?(?:Sent|Date):\s*([A-Za-z]+\s+\d{1,2},?\s+\d{4})',
+    ]
+    
+    for pattern in patterns:
+        match = re.search(pattern, search_text, re.IGNORECASE | re.DOTALL)
+        if match:
+            try:
+                # Parse the matched date string
+                parsed = date_parser.parse(match.group(1), fuzzy=True)
+                # Return in YYYY-MM-DD format for consistent storage
+                return parsed.strftime('%Y-%m-%d')
+            except (ValueError, TypeError):
+                continue
+    
+    return None
+
 
 # Global flag for skipping current file
 _skip_current_file = False
@@ -109,8 +159,8 @@ def _extract_pdf_subprocess(args: tuple) -> Optional[Dict[str, Any]]:
         from urllib.parse import unquote
         clean_name = unquote(filepath.name)
         
-        # Generate file hash
-        file_hash = hashlib.md5(f"{filepath}_{filepath.stat().st_size}".encode()).hexdigest()
+        # Generate file hash using RELATIVE path (must match _file_hash method)
+        file_hash = hashlib.md5(f"{relative_path}_{filepath.stat().st_size}".encode()).hexdigest()
         
         # Categorize file (simplified version for subprocess)
         category, subcategory = _categorize_file_simple(filepath, base_path)
@@ -137,10 +187,10 @@ def _extract_pdf_subprocess(args: tuple) -> Optional[Dict[str, Any]]:
         return result
         
     except Exception as e:
-        # Generate file hash for error result
+        # Generate file hash for error result using RELATIVE path (must match _file_hash method)
         try:
-            file_hash = hashlib.md5(f"{filepath}_{filepath.stat().st_size}".encode()).hexdigest()
             relative_path = filepath.relative_to(base_path)
+            file_hash = hashlib.md5(f"{relative_path}_{filepath.stat().st_size}".encode()).hexdigest()
             from urllib.parse import unquote
             clean_name = unquote(filepath.name)
         except:
@@ -269,12 +319,25 @@ MEDIA_EXTENSIONS = AUDIO_EXTENSIONS | VIDEO_EXTENSIONS
 
 # Directories to ignore during extraction
 IGNORED_DIRS = {
-    'venv', '.venv', 'env', '.env',  # Python virtual environments
-    'node_modules',                   # Node.js
-    '.git', '.svn', '.hg',           # Version control
-    '__pycache__', '.pytest_cache',   # Python cache
-    'extracted_text', 'transcripts',  # Our output directories
-    '.cursor', '.vscode', '.idea',    # IDE directories
+    # Python virtual environments
+    'venv', '.venv', 'env', '.env',
+    # Node.js
+    'node_modules',
+    # Version control
+    '.git', '.svn', '.hg',
+    # Python cache
+    '__pycache__', '.pytest_cache',
+    # Our output/system directories
+    'extracted_text', 'transcripts',
+    'thumbnails',      # Thumbnail cache
+    'vector_store',    # Vector embeddings
+    'frontend',        # Web frontend
+    'backend',         # Python backend code
+    'scripts',         # Utility scripts
+    'logs',            # Log files
+    'temp', 'tmp',     # Temporary files
+    # IDE directories
+    '.cursor', '.vscode', '.idea',
 }
 
 

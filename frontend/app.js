@@ -73,6 +73,8 @@ function cacheElements() {
     elements.searchSubcategory = document.getElementById('search-subcategory');
     elements.searchSubcategoryGroup = document.getElementById('search-subcategory-group');
     elements.searchFileType = document.getElementById('search-file-type');
+    elements.searchDateFrom = document.getElementById('search-date-from');
+    elements.searchDateTo = document.getElementById('search-date-to');
     elements.searchResults = document.getElementById('search-results');
     elements.resultsList = document.getElementById('results-list');
     elements.resultsCount = document.getElementById('results-count');
@@ -192,6 +194,27 @@ function setupEventListeners() {
             if (state.lastSearchParams) {
                 state.searchPage = 0;
                 state.lastSearchParams.file_type = elements.searchFileType.value || null;
+                performSearchWithPagination();
+            }
+        });
+    }
+    
+    // Search date range change - re-run search
+    if (elements.searchDateFrom) {
+        elements.searchDateFrom.addEventListener('change', () => {
+            if (state.lastSearchParams) {
+                state.searchPage = 0;
+                state.lastSearchParams.date_from = elements.searchDateFrom.value || null;
+                performSearchWithPagination();
+            }
+        });
+    }
+    
+    if (elements.searchDateTo) {
+        elements.searchDateTo.addEventListener('change', () => {
+            if (state.lastSearchParams) {
+                state.searchPage = 0;
+                state.lastSearchParams.date_to = elements.searchDateTo.value || null;
                 performSearchWithPagination();
             }
         });
@@ -895,7 +918,9 @@ async function performSearch() {
         search_type: elements.searchType.value,
         category: elements.searchCategory.value || null,
         subcategory: elements.searchSubcategory?.value || null,
-        file_type: elements.searchFileType?.value || null
+        file_type: elements.searchFileType?.value || null,
+        date_from: elements.searchDateFrom?.value || null,
+        date_to: elements.searchDateTo?.value || null
     };
     
     await performSearchWithPagination();
@@ -975,6 +1000,14 @@ async function clearSearch() {
     }
     if (elements.searchFileType) {
         elements.searchFileType.value = '';
+    }
+    
+    // Reset date range inputs
+    if (elements.searchDateFrom) {
+        elements.searchDateFrom.value = '';
+    }
+    if (elements.searchDateTo) {
+        elements.searchDateTo.value = '';
     }
     
     // Hide subcategory group
@@ -1174,6 +1207,7 @@ function renderSearchResults(data) {
                 </div>
                 <div class="result-meta">
                     <span class="result-category">${escapeHtml(result.category)}</span>
+                    ${result.document_date ? `<span class="result-date">${formatDocumentDate(result.document_date)}</span>` : ''}
                     ${result.subcategory ? `<span>${escapeHtml(result.subcategory)}</span>` : ''}
                     <span>${getSearchResultMeta(result)}</span>
                 </div>
@@ -1794,6 +1828,20 @@ async function askQuestion() {
 function formatNumber(num) {
     if (num === null || num === undefined) return '0';
     return num.toLocaleString();
+}
+
+function formatDocumentDate(dateStr) {
+    if (!dateStr) return '';
+    try {
+        const date = new Date(dateStr + 'T00:00:00'); // Add time to avoid timezone issues
+        return date.toLocaleDateString('en-US', { 
+            year: 'numeric', 
+            month: 'short', 
+            day: 'numeric' 
+        });
+    } catch (e) {
+        return '';
+    }
 }
 
 function formatRelevanceScore(score, searchType) {

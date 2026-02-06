@@ -2099,6 +2099,39 @@
                 </div>
             </div>
 
+            <!-- Date Extraction Card -->
+            <div class="card" style="margin-bottom: var(--space-lg);">
+                <div class="card-header">
+                    <span class="card-title">📅 Date Extraction</span>
+                </div>
+                <div class="card-body">
+                    <div id="date-extraction-status" style="margin-bottom: var(--space-md);">
+                        <p style="font-size: 0.85rem; color: var(--text-muted);">
+                            Extract dates from email headers in documents. This parses "Sent:" and "Date:" fields to enable date display on search results.
+                        </p>
+                    </div>
+                    <div style="display: flex; gap: var(--space-md); flex-wrap: wrap; align-items: center;">
+                        <button id="extract-dates-btn" class="btn btn-primary" onclick="triggerDateExtraction()">
+                            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
+                                <rect x="3" y="4" width="18" height="18" rx="2" ry="2"/>
+                                <line x1="16" y1="2" x2="16" y2="6"/>
+                                <line x1="8" y1="2" x2="8" y2="6"/>
+                                <line x1="3" y1="10" x2="21" y2="10"/>
+                            </svg>
+                            Extract Dates
+                        </button>
+                        <button id="check-dates-btn" class="btn" onclick="checkDateExtractionStatus()">
+                            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
+                                <circle cx="12" cy="12" r="10"/>
+                                <polyline points="12,6 12,12 16,14"/>
+                            </svg>
+                            Check Status
+                        </button>
+                        <span id="date-extraction-progress" style="font-size: 0.85rem; color: var(--text-muted);"></span>
+                    </div>
+                </div>
+            </div>
+
             <!-- Log Management Card -->
             <div class="card" style="margin-bottom: var(--space-lg);">
                 <div class="card-header">
@@ -2176,7 +2209,7 @@
         </div>
     </main>
 
-    <script src="/static/admin.js?v=6"></script>
+    <script src="/static/admin.js?v=7"></script>
 </body>
 </html>
 

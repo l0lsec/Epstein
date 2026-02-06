@@ -12,6 +12,8 @@ from typing import List, Dict, Any, Optional
 from contextlib import contextmanager
 import numpy as np
 
+from extractor import extract_email_date
+
 
 class Database:
     """SQLite database for document metadata and search"""
@@ -103,6 +105,15 @@ class Database:
                 conn.execute("ALTER TABLE documents ADD COLUMN duration_seconds REAL")
                 conn.commit()
                 print("✅ Added duration_seconds column to documents table")
+            
+            # Migration: Add document_date column if it doesn't exist
+            try:
+                conn.execute("SELECT document_date FROM documents LIMIT 1")
+            except:
+                conn.execute("ALTER TABLE documents ADD COLUMN document_date TEXT")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_documents_date ON documents(document_date)")
+                conn.commit()
+                print("✅ Added document_date column to documents table")
             
             # Migration: Create summaries table if it doesn't exist (for existing databases)
             conn.execute("""
@@ -234,12 +245,19 @@ class Database:
     
     def insert_document(self, doc: Dict[str, Any]):
         """Insert or update a document"""
+        # Extract date from email headers if not already provided
+        document_date = doc.get("document_date")
+        if not document_date:
+            full_text = doc.get("full_text", "")
+            if full_text:
+                document_date = extract_email_date(full_text)
+        
         with self.get_connection() as conn:
             conn.execute("""
                 INSERT OR REPLACE INTO documents 
                 (id, filename, original_filename, path, category, subcategory, 
-                 file_type, page_count, char_count, duration_seconds, full_text)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 file_type, page_count, char_count, duration_seconds, full_text, document_date)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 doc["id"],
                 doc["filename"],
@@ -251,21 +269,24 @@ class Database:
                 doc.get("page_count", 0),
                 doc.get("char_count", 0),
                 doc.get("duration_seconds"),
-                doc.get("full_text", "")
+                doc.get("full_text", ""),
+                document_date
             ))
             conn.commit()
     
     def search_fulltext(self, query: str, limit: int = 50, offset: int = 0, 
                         category: Optional[str] = None,
                         subcategory: Optional[str] = None,
-                        file_type: Optional[str] = None) -> List[Dict[str, Any]]:
+                        file_type: Optional[str] = None,
+                        date_from: Optional[str] = None,
+                        date_to: Optional[str] = None) -> List[Dict[str, Any]]:
         """Full-text search across documents"""
         with self.get_connection() as conn:
             # Build query with optional filters
             sql = """
                 SELECT 
                     d.id, d.filename, d.path, d.category, d.subcategory, d.file_type,
-                    d.page_count, d.char_count, d.duration_seconds,
+                    d.page_count, d.char_count, d.duration_seconds, d.document_date,
                     snippet(documents_fts, 2, '<mark>', '</mark>', '...', 64) as snippet,
                     bm25(documents_fts) as score
                 FROM documents_fts
@@ -286,6 +307,14 @@ class Database:
                 sql += " AND d.file_type = ?"
                 params.append(file_type)
             
+            if date_from:
+                sql += " AND d.document_date >= ?"
+                params.append(date_from)
+            
+            if date_to:
+                sql += " AND d.document_date <= ?"
+                params.append(date_to)
+            
             sql += " ORDER BY score LIMIT ? OFFSET ?"
             params.extend([limit, offset])
             
@@ -298,7 +327,9 @@ class Database:
     def count_fulltext_results(self, query: str, 
                                category: Optional[str] = None,
                                subcategory: Optional[str] = None,
-                               file_type: Optional[str] = None) -> int:
+                               file_type: Optional[str] = None,
+                               date_from: Optional[str] = None,
+                               date_to: Optional[str] = None) -> int:
         """Count total full-text search results (for pagination)"""
         with self.get_connection() as conn:
             sql = """
@@ -321,18 +352,38 @@ class Database:
                 sql += " AND d.file_type = ?"
                 params.append(file_type)
             
+            if date_from:
+                sql += " AND d.document_date >= ?"
+                params.append(date_from)
+            
+            if date_to:
+                sql += " AND d.document_date <= ?"
+                params.append(date_to)
+            
             cursor = conn.execute(sql, params)
             return cursor.fetchone()[0]
     
     def get_search_facets(self, query: str, 
                           category: Optional[str] = None,
                           subcategory: Optional[str] = None,
-                          file_type: Optional[str] = None) -> Dict[str, Any]:
+                          file_type: Optional[str] = None,
+                          date_from: Optional[str] = None,
+                          date_to: Optional[str] = None) -> Dict[str, Any]:
         """Get faceted counts for search results (category, subcategory, file_type breakdowns)"""
         with self.get_connection() as conn:
             # Base match condition
             base_match = "documents_fts MATCH ?"
             base_params = [query]
+            
+            # Build date filter conditions
+            date_filter = ""
+            date_params = []
+            if date_from:
+                date_filter += " AND d.document_date >= ?"
+                date_params.append(date_from)
+            if date_to:
+                date_filter += " AND d.document_date <= ?"
+                date_params.append(date_to)
             
             # Category counts (unfiltered by category to show all options)
             category_sql = f"""
@@ -345,6 +396,8 @@ class Database:
             if file_type:
                 category_sql += " AND d.file_type = ?"
                 category_params.append(file_type)
+            category_sql += date_filter
+            category_params.extend(date_params)
             category_sql += " GROUP BY d.category ORDER BY count DESC"
             
             cursor = conn.execute(category_sql, category_params)
@@ -363,6 +416,8 @@ class Database:
                 if file_type:
                     subcategory_sql += " AND d.file_type = ?"
                     subcategory_params.append(file_type)
+                subcategory_sql += date_filter
+                subcategory_params.extend(date_params)
                 subcategory_sql += " GROUP BY d.subcategory ORDER BY count DESC"
                 
                 cursor = conn.execute(subcategory_sql, subcategory_params)
@@ -382,6 +437,8 @@ class Database:
             if subcategory:
                 file_type_sql += " AND d.subcategory = ?"
                 file_type_params.append(subcategory)
+            file_type_sql += date_filter
+            file_type_params.extend(date_params)
             file_type_sql += " GROUP BY d.file_type ORDER BY count DESC"
             
             cursor = conn.execute(file_type_sql, file_type_params)
@@ -644,13 +701,18 @@ class Database:
         """Insert multiple documents efficiently in a single transaction"""
         if not documents:
             return
-        with self.get_connection() as conn:
-            conn.executemany("""
-                INSERT OR REPLACE INTO documents 
-                (id, filename, original_filename, path, category, subcategory, 
-                 file_type, page_count, char_count, duration_seconds, full_text)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, [(
+        
+        # Prepare documents with extracted dates
+        prepared_docs = []
+        for doc in documents:
+            # Extract date from email headers if not already provided
+            document_date = doc.get("document_date")
+            if not document_date:
+                full_text = doc.get("full_text", "")
+                if full_text:
+                    document_date = extract_email_date(full_text)
+            
+            prepared_docs.append((
                 doc["id"],
                 doc["filename"],
                 doc.get("original_filename", doc["filename"]),
@@ -661,8 +723,17 @@ class Database:
                 doc.get("page_count", 0),
                 doc.get("char_count", 0),
                 doc.get("duration_seconds"),
-                doc.get("full_text", "")
-            ) for doc in documents])
+                doc.get("full_text", ""),
+                document_date
+            ))
+        
+        with self.get_connection() as conn:
+            conn.executemany("""
+                INSERT OR REPLACE INTO documents 
+                (id, filename, original_filename, path, category, subcategory, 
+                 file_type, page_count, char_count, duration_seconds, full_text, document_date)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, prepared_docs)
             conn.commit()
     
     def get_indexed_doc_ids(self) -> set:
