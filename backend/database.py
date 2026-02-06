@@ -12,7 +12,10 @@ from typing import List, Dict, Any, Optional
 from contextlib import contextmanager
 import numpy as np
 
-from extractor import extract_email_date
+try:
+    from backend.extractor import extract_email_date
+except ImportError:
+    from extractor import extract_email_date
 
 
 class Database:
