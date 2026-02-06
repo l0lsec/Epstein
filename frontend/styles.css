@@ -531,7 +531,7 @@ body {
     border-radius: 12px;
     padding: var(--space-md) var(--space-lg);
     transition: all var(--transition-base);
-    overflow: hidden;
+    overflow: visible;
     max-width: 100%;
 }
 
