@@ -26,7 +26,9 @@ let state = {
     lastSearchParams: null,  // Store last search to enable pagination
     // Document navigation state
     documentList: [],  // Current list of documents (from search or browse)
-    documentIndex: -1  // Current index within documentList
+    documentIndex: -1,  // Current index within documentList
+    // User category exclusion preferences (stored in localStorage)
+    excludedCategories: JSON.parse(localStorage.getItem('excludedCategories') || '[]')
 };
 
 // DOM Elements
@@ -270,6 +272,35 @@ function setupEventListeners() {
             loadDocuments();
         });
     }
+    
+    // Exclude dropdown toggles
+    const searchExcludeToggle = document.getElementById('search-exclude-toggle');
+    const browseExcludeToggle = document.getElementById('browse-exclude-toggle');
+    
+    if (searchExcludeToggle) {
+        searchExcludeToggle.addEventListener('click', (e) => {
+            e.stopPropagation();
+            toggleExcludeMenu('search-exclude-menu');
+            document.getElementById('browse-exclude-menu')?.classList.add('hidden');
+        });
+    }
+    
+    if (browseExcludeToggle) {
+        browseExcludeToggle.addEventListener('click', (e) => {
+            e.stopPropagation();
+            toggleExcludeMenu('browse-exclude-menu');
+            document.getElementById('search-exclude-menu')?.classList.add('hidden');
+        });
+    }
+    
+    // Close exclude menus when clicking outside
+    document.addEventListener('click', (e) => {
+        if (!e.target.closest('.exclude-dropdown-container')) {
+            document.getElementById('search-exclude-menu')?.classList.add('hidden');
+            document.getElementById('browse-exclude-menu')?.classList.add('hidden');
+        }
+    });
+    
     elements.prevPage.addEventListener('click', () => {
         if (state.browsePage > 0) {
             state.browsePage--;
@@ -550,8 +581,13 @@ async function loadCategories(keyword = null) {
         const data = await response.json();
         state.categories = data.categories || [];
         
-        // Populate category dropdowns
-        const categoryOptions = state.categories.map(c => 
+        // Filter out user-excluded categories for dropdowns
+        const visibleCategories = state.categories.filter(
+            c => !state.excludedCategories.includes(c.category)
+        );
+        
+        // Populate category dropdowns with visible categories only
+        const categoryOptions = visibleCategories.map(c => 
             `<option value="${c.category}">${c.category} (${c.count})</option>`
         ).join('');
         
@@ -562,16 +598,98 @@ async function loadCategories(keyword = null) {
         elements.searchCategory.innerHTML = '<option value="">All File Sets</option>' + categoryOptions;
         elements.browseCategory.innerHTML = '<option value="">All File Sets</option>' + categoryOptions;
         
-        // Restore selection if still valid
-        if (currentBrowseCategory && state.categories.some(c => c.category === currentBrowseCategory)) {
+        // Restore selection if still valid (and not excluded)
+        if (currentBrowseCategory && visibleCategories.some(c => c.category === currentBrowseCategory)) {
             elements.browseCategory.value = currentBrowseCategory;
         }
-        if (currentSearchCategory && state.categories.some(c => c.category === currentSearchCategory)) {
+        if (currentSearchCategory && visibleCategories.some(c => c.category === currentSearchCategory)) {
             elements.searchCategory.value = currentSearchCategory;
         }
+        
+        // Populate exclude dropdowns with ALL categories (so user can toggle)
+        renderExcludeDropdowns();
     } catch (error) {
         console.error('Error loading categories:', error);
     }
+}
+
+// ============================================================================
+// Category Exclusion Functions (User Preferences)
+// ============================================================================
+
+// Render exclude dropdown checkboxes
+function renderExcludeDropdowns() {
+    const html = state.categories.map(c => `
+        <label>
+            <input type="checkbox" 
+                   value="${c.category}" 
+                   ${state.excludedCategories.includes(c.category) ? 'checked' : ''}
+                   onchange="toggleCategoryExclusion('${c.category.replace(/'/g, "\\'")}')">
+            ${c.category}
+        </label>
+    `).join('');
+    
+    const searchOptions = document.getElementById('search-exclude-options');
+    const browseOptions = document.getElementById('browse-exclude-options');
+    if (searchOptions) searchOptions.innerHTML = html;
+    if (browseOptions) browseOptions.innerHTML = html;
+    
+    updateExcludeButtons();
+}
+
+// Toggle a category exclusion
+function toggleCategoryExclusion(category) {
+    const index = state.excludedCategories.indexOf(category);
+    if (index === -1) {
+        state.excludedCategories.push(category);
+    } else {
+        state.excludedCategories.splice(index, 1);
+    }
+    saveExcludedCategories();
+    loadCategories(); // Refresh dropdowns
+    
+    // Refresh current view if needed
+    if (state.currentView === 'browse') {
+        loadDocuments();
+    }
+}
+
+// Save to localStorage
+function saveExcludedCategories() {
+    localStorage.setItem('excludedCategories', JSON.stringify(state.excludedCategories));
+    updateExcludeButtons();
+}
+
+// Clear all exclusions
+function clearExclusions() {
+    state.excludedCategories = [];
+    saveExcludedCategories();
+    loadCategories();
+    if (state.currentView === 'browse') {
+        loadDocuments();
+    }
+}
+
+// Update button text to show count
+function updateExcludeButtons() {
+    const count = state.excludedCategories.length;
+    const searchBtn = document.getElementById('search-exclude-toggle');
+    const browseBtn = document.getElementById('browse-exclude-toggle');
+    
+    if (searchBtn) {
+        searchBtn.textContent = count > 0 ? `(${count}) ▼` : 'None ▼';
+        searchBtn.classList.toggle('active', count > 0);
+    }
+    if (browseBtn) {
+        browseBtn.textContent = count > 0 ? `Exclude (${count}) ▼` : 'Exclude ▼';
+        browseBtn.classList.toggle('active', count > 0);
+    }
+}
+
+// Toggle exclude menu visibility
+function toggleExcludeMenu(menuId) {
+    const menu = document.getElementById(menuId);
+    if (menu) menu.classList.toggle('hidden');
 }
 
 // Load keywords for topic filtering
@@ -1138,6 +1256,13 @@ function escapeHtml(text) {
 }
 
 function renderSearchResults(data) {
+    // Filter out results from user-excluded categories (client-side filtering)
+    let filteredResults = data.results || [];
+    if (state.excludedCategories.length > 0 && !state.lastSearchParams?.category) {
+        // Only filter if searching "All File Sets" (no specific category selected)
+        filteredResults = filteredResults.filter(r => !state.excludedCategories.includes(r.category));
+    }
+    
     const totalPages = Math.ceil(data.total / state.searchLimit);
     const startResult = state.searchPage * state.searchLimit + 1;
     const endResult = Math.min((state.searchPage + 1) * state.searchLimit, data.total);
@@ -1161,11 +1286,17 @@ function renderSearchResults(data) {
         }
     }
     
+    // Add exclusion note if categories are being filtered
+    let exclusionNote = '';
+    if (state.excludedCategories.length > 0 && !state.lastSearchParams?.category) {
+        exclusionNote = ` (excluding ${state.excludedCategories.length} file set${state.excludedCategories.length > 1 ? 's' : ''})`;
+    }
+    
     // Update results count with range and filter context
     if (data.total > state.searchLimit) {
-        elements.resultsCount.textContent = `Showing ${startResult}-${endResult} of ${formatNumber(data.total)} results for "${data.query}"${filterContext}`;
+        elements.resultsCount.textContent = `Showing ${startResult}-${endResult} of ${formatNumber(data.total)} results for "${data.query}"${filterContext}${exclusionNote}`;
     } else {
-        elements.resultsCount.textContent = `${formatNumber(data.total)} results for "${data.query}"${filterContext}`;
+        elements.resultsCount.textContent = `${formatNumber(data.total)} results for "${data.query}"${filterContext}${exclusionNote}`;
     }
     
     // Update pagination controls
@@ -1184,15 +1315,15 @@ function renderSearchResults(data) {
         }
     }
     
-    if (!data.results || data.results.length === 0) {
+    if (!filteredResults || filteredResults.length === 0) {
         elements.resultsList.innerHTML = '<p class="no-results">No documents found matching your query.</p>';
         return;
     }
     
-    // Store document list for navigation
-    state.documentList = data.results.map(r => ({ id: r.id, filename: r.filename }));
+    // Store document list for navigation (using filtered results)
+    state.documentList = filteredResults.map(r => ({ id: r.id, filename: r.filename }));
     
-    elements.resultsList.innerHTML = data.results.map((result, index) => `
+    elements.resultsList.innerHTML = filteredResults.map((result, index) => `
         <div class="result-item" data-id="${result.id}" data-index="${index}">
             <div class="result-thumbnail" data-file-type="${result.file_type || 'pdf'}">
                 <img src="${API_BASE}/documents/${result.id}/thumbnail" 
@@ -1406,7 +1537,19 @@ async function loadDocuments() {
 }
 
 function renderDocuments(data) {
-    elements.browseCount.textContent = `${formatNumber(data.total)} documents`;
+    // Filter out documents from user-excluded categories (client-side filtering)
+    let filteredDocuments = data.documents || [];
+    if (state.excludedCategories.length > 0 && !state.browseCategory) {
+        // Only filter if browsing "All File Sets" (no specific category selected)
+        filteredDocuments = filteredDocuments.filter(d => !state.excludedCategories.includes(d.category));
+    }
+    
+    // Update count with exclusion note if applicable
+    let countText = `${formatNumber(data.total)} documents`;
+    if (state.excludedCategories.length > 0 && !state.browseCategory) {
+        countText += ` (excluding ${state.excludedCategories.length} file set${state.excludedCategories.length > 1 ? 's' : ''})`;
+    }
+    elements.browseCount.textContent = countText;
     
     const totalPages = Math.ceil(data.total / state.browseLimit);
     elements.pageInfo.textContent = `Page ${state.browsePage + 1} of ${Math.max(1, totalPages)}`;
@@ -1416,16 +1559,16 @@ function renderDocuments(data) {
     const hasMoreResults = (state.browsePage + 1) * state.browseLimit < data.total;
     elements.nextPage.disabled = !hasMoreResults || totalPages <= 1;
     
-    if (!data.documents || data.documents.length === 0) {
+    if (!filteredDocuments || filteredDocuments.length === 0) {
         elements.documentsGrid.innerHTML = '<p class="no-results">No documents found.</p>';
         state.documentList = [];
         return;
     }
     
-    // Store document list for navigation
-    state.documentList = data.documents.map(d => ({ id: d.id, filename: d.filename }));
+    // Store document list for navigation (using filtered results)
+    state.documentList = filteredDocuments.map(d => ({ id: d.id, filename: d.filename }));
     
-    elements.documentsGrid.innerHTML = data.documents.map((doc, index) => `
+    elements.documentsGrid.innerHTML = filteredDocuments.map((doc, index) => `
         <div class="document-card" data-id="${doc.id}" data-index="${index}">
             <div class="document-thumbnail" data-file-type="${doc.file_type || 'pdf'}">
                 <img src="${API_BASE}/documents/${doc.id}/thumbnail" 

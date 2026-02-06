@@ -37,7 +37,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Crimson+Pro:wght@400;500;600&family=JetBrains+Mono:wght@400;500&family=Source+Sans+3:wght@300;400;500;600;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="/static/styles.css?v=29">
+    <link rel="stylesheet" href="/static/styles.css?v=30">
     
     <!-- Structured Data (JSON-LD) -->
     <script type="application/ld+json">
@@ -154,6 +154,18 @@
                                 <option value="video">🎬 Video</option>
                             </select>
                         </div>
+                        <div class="option-group">
+                            <label>Exclude:</label>
+                            <div class="exclude-dropdown-container">
+                                <button type="button" id="search-exclude-toggle" class="exclude-toggle-btn">
+                                    None ▼
+                                </button>
+                                <div id="search-exclude-menu" class="exclude-menu hidden">
+                                    <div id="search-exclude-options" class="exclude-options"></div>
+                                    <button type="button" class="clear-exclusions-btn" onclick="clearExclusions()">Clear All</button>
+                                </div>
+                            </div>
+                        </div>
                     </div>
                     
                     <!-- Search Syntax Help -->
@@ -261,6 +273,15 @@
                     <option value="image">🖼️ Images</option>
                     <option value="video">🎬 Video</option>
                 </select>
+                <div class="exclude-dropdown-container">
+                    <button id="browse-exclude-toggle" class="exclude-toggle-btn">
+                        Exclude ▼
+                    </button>
+                    <div id="browse-exclude-menu" class="exclude-menu hidden">
+                        <div id="browse-exclude-options" class="exclude-options"></div>
+                        <button type="button" class="clear-exclusions-btn" onclick="clearExclusions()">Clear All</button>
+                    </div>
+                </div>
                 <div class="pagination-info">
                     <span id="browse-count"></span>
                 </div>
@@ -570,7 +591,7 @@
     </footer>
 
     <script src="https://www.google.com/recaptcha/api.js?render=6Lf9EDYsAAAAANDlA_xYFIM7Ylccgmc24LhZgDIr"></script>
-    <script src="/static/app.js?v=29"></script></invoke>
+    <script src="/static/app.js?v=30"></script></invoke>
 </body>
 </html>
 

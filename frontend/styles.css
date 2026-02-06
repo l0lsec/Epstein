@@ -1249,6 +1249,99 @@ body {
     margin-left: auto;
 }
 
+/* Exclude Dropdown - matches existing select/dropdown styling */
+.exclude-dropdown-container {
+    position: relative;
+    display: inline-block;
+}
+
+.exclude-toggle-btn {
+    /* Matches .browse-filters select and .option-group select */
+    padding: var(--space-sm) var(--space-lg);
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--text-primary);
+    font-family: var(--font-body);
+    font-size: 0.9rem;
+    cursor: pointer;
+    transition: border-color var(--transition-fast), box-shadow var(--transition-fast);
+}
+
+.exclude-toggle-btn:hover {
+    border-color: var(--border-light);
+}
+
+.exclude-toggle-btn:focus {
+    outline: none;
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px var(--accent-glow);
+}
+
+.exclude-toggle-btn.active {
+    /* Matches .modal-tab.active styling */
+    background: var(--accent-glow);
+    border-color: var(--accent-dim);
+    color: var(--accent);
+}
+
+.exclude-menu {
+    position: absolute;
+    top: 100%;
+    left: 0;
+    margin-top: var(--space-xs);
+    background: var(--bg-secondary);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: var(--space-md);
+    z-index: 100;
+    min-width: 220px;
+    max-height: 300px;
+    overflow-y: auto;
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
+}
+
+.exclude-menu.hidden { display: none; }
+
+.exclude-options label {
+    display: flex;
+    align-items: center;
+    gap: var(--space-sm);
+    padding: var(--space-sm) var(--space-xs);
+    cursor: pointer;
+    font-size: 0.9rem;
+    color: var(--text-primary);
+    border-radius: 4px;
+    transition: background var(--transition-fast);
+}
+
+.exclude-options label:hover {
+    background: var(--bg-hover);
+}
+
+.exclude-options input[type="checkbox"] {
+    accent-color: var(--accent);
+}
+
+.clear-exclusions-btn {
+    width: 100%;
+    margin-top: var(--space-md);
+    padding: var(--space-sm);
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--text-secondary);
+    border-radius: 6px;
+    font-family: var(--font-body);
+    font-size: 0.85rem;
+    cursor: pointer;
+    transition: all var(--transition-fast);
+}
+
+.clear-exclusions-btn:hover {
+    border-color: var(--danger);
+    color: var(--danger);
+}
+
 .documents-grid {
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));

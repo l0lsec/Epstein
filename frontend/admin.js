@@ -2465,8 +2465,15 @@ async function submitKeyword() {
         });
         
         if (!response.ok) {
-            const data = await response.json();
-            throw new Error(data.detail || 'Failed to save keyword');
+            let errorMessage = 'Failed to save keyword';
+            const text = await response.text();
+            try {
+                const data = JSON.parse(text);
+                errorMessage = data.detail || errorMessage;
+            } catch (e) {
+                errorMessage = text || `Server error (${response.status})`;
+            }
+            throw new Error(errorMessage);
         }
         
         closeKeywordModal();
