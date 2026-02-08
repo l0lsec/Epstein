@@ -79,8 +79,17 @@ async function init() {
     // Check for ?doc= parameter to auto-open a shared document
     const urlParams = new URLSearchParams(window.location.search);
     const docId = urlParams.get('doc');
-    if (docId) {
+    if (docId && /^[a-zA-Z0-9_\-]+$/.test(docId)) {
         setTimeout(() => openDocument(docId), 100);
+    }
+    
+    // Check for ?q= parameter to auto-run a shared search
+    const searchQuery = urlParams.get('q');
+    if (searchQuery && searchQuery.length <= 500) {
+        setTimeout(() => {
+            elements.searchInput.value = searchQuery;
+            performSearch();
+        }, 200);
     }
 }
 
@@ -100,7 +109,7 @@ function applyCategoriesToDropdowns() {
         c => !state.excludedCategories.includes(c.category)
     );
     const categoryOptions = visibleCategories.map(c =>
-        `<option value="${c.category}">${c.category} (${c.count})</option>`
+        `<option value="${escapeHtml(c.category)}">${escapeHtml(c.category)} (${c.count})</option>`
     ).join('');
     const currentBrowseCategory = elements.browseCategory?.value;
     const currentSearchCategory = elements.searchCategory?.value;
@@ -501,6 +510,32 @@ function setupEventListeners() {
         });
     }
     
+    // Search share button
+    const searchShareBtn = document.getElementById('search-share-btn');
+    const searchShareMenu = document.getElementById('search-share-menu');
+    
+    if (searchShareBtn && searchShareMenu) {
+        searchShareBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            searchShareMenu.classList.toggle('hidden');
+        });
+        
+        // Close search share menu when clicking outside
+        document.addEventListener('click', (e) => {
+            if (!searchShareBtn.contains(e.target) && !searchShareMenu.contains(e.target)) {
+                searchShareMenu.classList.add('hidden');
+            }
+        });
+        
+        // Search share option clicks
+        searchShareMenu.querySelectorAll('.share-option').forEach(option => {
+            option.addEventListener('click', () => {
+                handleSearchShare(option.dataset.platform);
+                searchShareMenu.classList.add('hidden');
+            });
+        });
+    }
+    
     // Feedback form - use event delegation for reliability
     document.addEventListener('submit', (e) => {
         if (e.target && e.target.id === 'feedback-form') {
@@ -699,7 +734,7 @@ async function loadCategories(keyword = null) {
         
         // Populate category dropdowns with visible categories only
         const categoryOptions = visibleCategories.map(c => 
-            `<option value="${c.category}">${c.category} (${c.count})</option>`
+            `<option value="${escapeHtml(c.category)}">${escapeHtml(c.category)} (${c.count})</option>`
         ).join('');
         
         // Preserve current selection
@@ -733,10 +768,10 @@ function renderExcludeDropdowns() {
     const html = state.categories.map(c => `
         <label>
             <input type="checkbox" 
-                   value="${c.category}" 
-                   ${state.excludedCategories.includes(c.category) ? 'checked' : ''}
-                   onchange="toggleCategoryExclusion('${c.category.replace(/'/g, "\\'")}')">
-            ${c.category}
+                   value="${escapeHtml(c.category)}" 
+                   data-category="${escapeHtml(c.category)}"
+                   ${state.excludedCategories.includes(c.category) ? 'checked' : ''}>
+            ${escapeHtml(c.category)}
         </label>
     `).join('');
     
@@ -744,6 +779,16 @@ function renderExcludeDropdowns() {
     const browseOptions = document.getElementById('browse-exclude-options');
     if (searchOptions) searchOptions.innerHTML = html;
     if (browseOptions) browseOptions.innerHTML = html;
+    
+    // Attach change handlers via data attributes instead of inline onchange
+    [searchOptions, browseOptions].forEach(container => {
+        if (!container) return;
+        container.querySelectorAll('input[type="checkbox"][data-category]').forEach(cb => {
+            cb.addEventListener('change', () => {
+                toggleCategoryExclusion(cb.dataset.category);
+            });
+        });
+    });
     
     updateExcludeButtons();
 }
@@ -1492,7 +1537,7 @@ function updateSearchFilterCounts(facets) {
         
         let categoryOptions = `<option value="">All File Sets (${formatNumber(totalResults)})</option>`;
         categoryOptions += facets.categories.map(c => 
-            `<option value="${c.category}"${c.category === currentCategory ? ' selected' : ''}>${c.category} (${formatNumber(c.count)})</option>`
+            `<option value="${escapeHtml(c.category)}"${c.category === currentCategory ? ' selected' : ''}>${escapeHtml(c.category)} (${formatNumber(c.count)})</option>`
         ).join('');
         
         elements.searchCategory.innerHTML = categoryOptions;
@@ -1766,8 +1811,8 @@ async function openDocument(docId, index = -1) {
         // Populate modal
         elements.modalTitle.textContent = doc.filename;
         elements.modalMeta.innerHTML = `
-            <span>📁 ${doc.category}</span>
-            ${doc.subcategory ? `<span>📂 ${doc.subcategory}</span>` : ''}
+            <span>📁 ${escapeHtml(doc.category)}</span>
+            ${doc.subcategory ? `<span>📂 ${escapeHtml(doc.subcategory)}</span>` : ''}
             <span>${fileIcon} ${fileType.toUpperCase()}</span>
             ${doc.page_count ? `<span>📄 ${doc.page_count} pages</span>` : ''}
             <span>📝 ${formatNumber(doc.char_count || 0)} characters</span>
@@ -1796,7 +1841,7 @@ async function openDocument(docId, index = -1) {
                     mediaViewer.innerHTML = `
                         <div class="ios-pdf-fallback">
                             <div class="pdf-icon">📄</div>
-                            <h3>${doc.filename}</h3>
+                            <h3>${escapeHtml(doc.filename)}</h3>
                             <p class="pdf-info">${doc.page_count || ''} ${doc.page_count ? 'pages' : ''}</p>
                             <p class="ios-pdf-message">For the best experience, open the PDF directly with the link below.</p>
                             <a href="${fileUrl}" target="_blank" class="ios-pdf-open-btn">
@@ -2426,6 +2471,87 @@ function handleShare(platform) {
         }
     } else {
         // Desktop or no app URL - open web version
+        window.open(webUrl, '_blank', 'width=600,height=400,menubar=no,toolbar=no');
+    }
+}
+
+/**
+ * Handle sharing search results to social platforms
+ */
+function handleSearchShare(platform) {
+    if (!state.lastSearchParams || !state.lastSearchParams.query) return;
+    
+    const query = state.lastSearchParams.query;
+    const totalResults = state.searchTotal || 0;
+    const siteUrl = 'https://epsteinfta.com';
+    const shareUrl = `${siteUrl}/?q=${encodeURIComponent(query)}`;
+    
+    const shareText = `I found ${totalResults} results for "${query}" on the Epstein Library Files Public Archive`;
+    
+    const isMobile = isMobileDevice();
+    let webUrl = '';
+    let appUrl = '';
+    let intentUrl = '';
+    
+    switch (platform) {
+        case 'facebook':
+            webUrl = `https://www.facebook.com/sharer/sharer.php?u=${encodeURIComponent(shareUrl)}&quote=${encodeURIComponent(shareText)}`;
+            appUrl = `fb://share/?link=${encodeURIComponent(shareUrl)}`;
+            intentUrl = `intent://share/?link=${encodeURIComponent(shareUrl)}#Intent;package=com.facebook.katana;scheme=fb;end`;
+            break;
+        case 'twitter':
+            webUrl = `https://twitter.com/intent/tweet?url=${encodeURIComponent(shareUrl)}&text=${encodeURIComponent(shareText)}`;
+            appUrl = null;
+            intentUrl = null;
+            break;
+        case 'linkedin':
+            webUrl = `https://www.linkedin.com/shareArticle?mini=true&url=${encodeURIComponent(shareUrl)}&title=${encodeURIComponent('Epstein Files: Search Results')}&summary=${encodeURIComponent(shareText)}&source=${encodeURIComponent('Epstein Files Archive')}`;
+            appUrl = `linkedin://shareArticle?url=${encodeURIComponent(shareUrl)}&title=${encodeURIComponent(shareText)}`;
+            intentUrl = `intent://shareArticle?url=${encodeURIComponent(shareUrl)}&title=${encodeURIComponent(shareText)}#Intent;package=com.linkedin.android;scheme=linkedin;end`;
+            break;
+        case 'threads':
+            webUrl = `https://www.threads.net/intent/post?text=${encodeURIComponent(shareText + ' ' + shareUrl)}`;
+            appUrl = `https://www.threads.net/intent/post?text=${encodeURIComponent(shareText + ' ' + shareUrl)}`;
+            intentUrl = `intent://post?text=${encodeURIComponent(shareText + ' ' + shareUrl)}#Intent;package=com.instagram.barcelona;scheme=threads;end`;
+            break;
+        case 'email':
+            const emailSubject = `Epstein Files: Search results for "${query}"`;
+            const emailBody = `${shareText}\n\nView the results here: ${shareUrl}`;
+            window.location.href = `mailto:?subject=${encodeURIComponent(emailSubject)}&body=${encodeURIComponent(emailBody)}`;
+            return;
+        case 'copy':
+            copyToClipboard(shareUrl).then(success => {
+                if (success) {
+                    const copyBtn = document.querySelector('#search-share-menu .share-option[data-platform="copy"]');
+                    if (copyBtn) {
+                        const originalText = copyBtn.innerHTML;
+                        copyBtn.innerHTML = `
+                            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M20 6L9 17l-5-5"/>
+                            </svg>
+                            Copied!
+                        `;
+                        setTimeout(() => {
+                            copyBtn.innerHTML = originalText;
+                        }, 2000);
+                    }
+                }
+            });
+            return;
+        default:
+            return;
+    }
+    
+    // On mobile, try to launch the native app
+    if (isMobile && (appUrl || intentUrl)) {
+        if (isIOS()) {
+            window.location.href = appUrl;
+        } else if (isAndroid() && intentUrl) {
+            window.location.href = intentUrl;
+        } else {
+            openNativeAppOrFallback(appUrl, webUrl, intentUrl);
+        }
+    } else {
         window.open(webUrl, '_blank', 'width=600,height=400,menubar=no,toolbar=no');
     }
 }

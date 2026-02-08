@@ -876,6 +876,18 @@ body {
     color: var(--text-muted);
 }
 
+/* Results Header Actions (Share + Export) */
+.results-header-actions {
+    display: flex;
+    align-items: center;
+    gap: var(--space-sm);
+    margin-left: auto;
+}
+
+.search-share-dropdown {
+    margin-left: 0;
+}
+
 /* Export CSV Button */
 .export-btn {
     padding: var(--space-xs) var(--space-md);

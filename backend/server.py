@@ -6,6 +6,7 @@ FastAPI backend for document search and LLM-powered analysis
 import os
 import json
 import asyncio
+from html import escape as html_escape
 from pathlib import Path
 from typing import Optional, List
 from contextlib import asynccontextmanager
@@ -788,8 +789,11 @@ async def root(doc: str = None):
         if document:
             try:
                 html = index_path.read_text()
-                thumbnail_url = f"https://epsteinfta.com/api/documents/{doc}/thumbnail"
-                filename = document.get("filename", "Document")
+                # Escape user-controlled values to prevent XSS via OG tag injection
+                doc_escaped = html_escape(doc, quote=True)
+                filename_raw = document.get("filename", "Document")
+                filename_escaped = html_escape(filename_raw, quote=True)
+                thumbnail_url = f"https://epsteinfta.com/api/documents/{doc_escaped}/thumbnail"
                 
                 # Replace og:image tags with document thumbnail
                 html = html.replace(
@@ -799,12 +803,12 @@ async def root(doc: str = None):
                 # Replace og:title with document name
                 html = html.replace(
                     'content="Epstein Files Library Archive | Public Document Search"',
-                    f'content="{filename} | Epstein Files Archive"'
+                    f'content="{filename_escaped} | Epstein Files Archive"'
                 )
                 # Replace twitter:title as well
                 html = html.replace(
                     'content="Epstein Files Library Archive | Public Document Search">',
-                    f'content="{filename} | Epstein Files Archive">'
+                    f'content="{filename_escaped} | Epstein Files Archive">'
                 )
                 
                 return HTMLResponse(content=html)
