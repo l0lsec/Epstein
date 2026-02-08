@@ -6,8 +6,10 @@ Handles SQLite for metadata, full-text search, and vector search
 import os
 import re
 import json
+import hashlib
 import sqlite3
 import pickle
+import threading
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 from contextlib import contextmanager
@@ -24,25 +26,22 @@ class Database:
     
     def __init__(self, db_path: str):
         self.db_path = db_path
+        # Persistent connection – PRAGMAs are set once, not per call
+        self._conn = sqlite3.connect(db_path, timeout=30.0, check_same_thread=False)
+        self._conn.row_factory = sqlite3.Row
+        self._conn.execute("PRAGMA journal_mode=WAL")      # Write-ahead logging: concurrent reads during writes
+        self._conn.execute("PRAGMA busy_timeout=5000")     # Wait 5 seconds if locked instead of failing
+        self._conn.execute("PRAGMA synchronous=NORMAL")    # Faster commits, safe with WAL
+        self._conn.execute("PRAGMA cache_size=-64000")     # 64MB cache (negative = KB)
+        self._conn.execute("PRAGMA temp_store=MEMORY")     # Temp tables in memory
+        self._lock = threading.Lock()
         self._init_db()
     
     @contextmanager
     def get_connection(self):
-        # Connection with 30 second timeout to handle high concurrency
-        conn = sqlite3.connect(self.db_path, timeout=30.0)
-        conn.row_factory = sqlite3.Row
-        
-        # SQLite optimizations for high-concurrency workloads
-        conn.execute("PRAGMA journal_mode=WAL")      # Write-ahead logging: concurrent reads during writes
-        conn.execute("PRAGMA busy_timeout=5000")     # Wait 5 seconds if locked instead of failing
-        conn.execute("PRAGMA synchronous=NORMAL")    # Faster commits, safe with WAL
-        conn.execute("PRAGMA cache_size=-64000")     # 64MB cache (negative = KB)
-        conn.execute("PRAGMA temp_store=MEMORY")     # Temp tables in memory
-        
-        try:
-            yield conn
-        finally:
-            conn.close()
+        """Return the persistent connection under a lock (thread-safe, no open/close overhead)."""
+        with self._lock:
+            yield self._conn
     
     def _init_db(self):
         """Initialize database schema"""
@@ -221,6 +220,24 @@ class Database:
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_documents_hidden ON documents(is_hidden)")
                 conn.commit()
                 print("✅ Added is_hidden column to documents table")
+            
+            # Migration: Normalize is_hidden NULLs to 0 for clean index equality scans
+            conn.execute("UPDATE documents SET is_hidden = 0 WHERE is_hidden IS NULL")
+            conn.commit()
+            
+            # Covering index for browse pagination: includes ALL columns selected by the
+            # browse query so SQLite can serve it entirely from the index without touching
+            # the main table (which has huge full_text blobs that make row lookups slow).
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_browse_covering "
+                "ON documents(is_hidden, filename, id, path, category, subcategory, "
+                "file_type, page_count, char_count, duration_seconds)"
+            )
+            conn.commit()
+            
+            # Drop the old narrower index — the covering index supersedes it
+            conn.execute("DROP INDEX IF EXISTS idx_documents_hidden_filename")
+            conn.commit()
     
     def rebuild_fts(self, progress_callback=None):
         """Rebuild the FTS5 index to fix sync issues.
@@ -535,29 +552,92 @@ class Database:
                 "file_types": file_types
             }
     
-    def get_document(self, doc_id: str, include_hidden: bool = True) -> Optional[Dict[str, Any]]:
+    def get_document(self, doc_id: str, include_hidden: bool = True, include_full_text: bool = True) -> Optional[Dict[str, Any]]:
         """Get a single document by ID
         
         Args:
             doc_id: The document ID
             include_hidden: If False, returns None for hidden documents or documents in hidden categories
+            include_full_text: If False, omits full_text (faster and smaller for list/search use)
         """
         with self.get_connection() as conn:
-            if include_hidden:
-                cursor = conn.execute(
-                    "SELECT * FROM documents WHERE id = ?", (doc_id,)
-                )
+            if include_full_text:
+                if include_hidden:
+                    cursor = conn.execute(
+                        "SELECT * FROM documents WHERE id = ?", (doc_id,)
+                    )
+                else:
+                    cursor = conn.execute("""
+                        SELECT d.* 
+                        FROM documents d
+                        LEFT JOIN hidden_categories hc ON d.category = hc.category
+                        WHERE d.id = ? 
+                          AND (d.is_hidden IS NULL OR d.is_hidden = 0)
+                          AND hc.category IS NULL
+                    """, (doc_id,))
             else:
-                cursor = conn.execute("""
-                    SELECT d.* 
-                    FROM documents d
-                    LEFT JOIN hidden_categories hc ON d.category = hc.category
-                    WHERE d.id = ? 
-                      AND (d.is_hidden IS NULL OR d.is_hidden = 0)
-                      AND hc.category IS NULL
-                """, (doc_id,))
+                cols = "d.id, d.filename, d.original_filename, d.path, d.category, d.subcategory, d.file_type, d.page_count, d.char_count, d.duration_seconds, d.document_date, d.created_at"
+                if include_hidden:
+                    cursor = conn.execute(
+                        f"SELECT {cols} FROM documents d WHERE d.id = ?", (doc_id,)
+                    )
+                else:
+                    cursor = conn.execute(f"""
+                        SELECT {cols}
+                        FROM documents d
+                        LEFT JOIN hidden_categories hc ON d.category = hc.category
+                        WHERE d.id = ? 
+                          AND (d.is_hidden IS NULL OR d.is_hidden = 0)
+                          AND hc.category IS NULL
+                    """, (doc_id,))
             row = cursor.fetchone()
             return dict(row) if row else None
+    
+    def get_document_full_text(self, doc_id: str, include_hidden: bool = False) -> Optional[str]:
+        """Get only full_text for a document (for lazy loading; avoids sending full doc)."""
+        doc = self.get_document(doc_id, include_hidden=include_hidden, include_full_text=True)
+        return doc.get("full_text") if doc else None
+    
+    def get_subcategory_counts(self, category: Optional[str] = None, include_hidden: bool = False) -> List[Dict[str, Any]]:
+        """Get subcategory counts, optionally for a single category. Lighter than get_stats()."""
+        with self.get_connection() as conn:
+            if include_hidden:
+                if category:
+                    cursor = conn.execute("""
+                        SELECT category, subcategory, COUNT(*) as count
+                        FROM documents
+                        WHERE category = ?
+                        GROUP BY category, subcategory
+                        ORDER BY category, count DESC
+                    """, (category,))
+                else:
+                    cursor = conn.execute("""
+                        SELECT category, subcategory, COUNT(*) as count
+                        FROM documents
+                        GROUP BY category, subcategory
+                        ORDER BY category, count DESC
+                    """)
+            else:
+                if category:
+                    cursor = conn.execute("""
+                        SELECT d.category, d.subcategory, COUNT(*) as count
+                        FROM documents d
+                        LEFT JOIN hidden_categories hc ON d.category = hc.category
+                        WHERE (d.is_hidden IS NULL OR d.is_hidden = 0) AND hc.category IS NULL
+                          AND d.category = ?
+                        GROUP BY d.category, d.subcategory
+                        ORDER BY d.category, count DESC
+                    """, (category,))
+                else:
+                    cursor = conn.execute("""
+                        SELECT d.category, d.subcategory, COUNT(*) as count
+                        FROM documents d
+                        LEFT JOIN hidden_categories hc ON d.category = hc.category
+                        WHERE (d.is_hidden IS NULL OR d.is_hidden = 0) AND hc.category IS NULL
+                        GROUP BY d.category, d.subcategory
+                        ORDER BY d.category, count DESC
+                    """)
+            return [dict(row) for row in cursor]
     
     def get_stats(self) -> Dict[str, Any]:
         """Get database statistics"""
@@ -690,7 +770,7 @@ class Database:
                 
                 # Visibility filter
                 if not include_hidden:
-                    conditions.append("(d.is_hidden IS NULL OR d.is_hidden = 0)")
+                    conditions.append("d.is_hidden = 0")
                     conditions.append("hc.category IS NULL")
             else:
                 sql = """
@@ -701,7 +781,7 @@ class Database:
                 
                 # Visibility filter
                 if not include_hidden:
-                    conditions.append("(d.is_hidden IS NULL OR d.is_hidden = 0)")
+                    conditions.append("d.is_hidden = 0")
                     conditions.append("hc.category IS NULL")
             
             if category:
@@ -738,6 +818,56 @@ class Database:
             
             cursor = conn.execute(sql, params)
             return [dict(row) for row in cursor]
+    
+    def get_all_documents_with_total(
+        self,
+        limit: int = 100,
+        offset: int = 0,
+        category: Optional[str] = None,
+        subcategory: Optional[str] = None,
+        file_type: Optional[str] = None,
+        filename: Optional[str] = None,
+        include_hidden: bool = False,
+    ) -> tuple:
+        """Get one page of documents and total count in one query (no keyword/search).
+        
+        Returns (documents_list, total_count). Uses COUNT(*) OVER() for a single round-trip.
+        Use only when keyword and search are not set; otherwise use get_all_documents + count_documents.
+        """
+        with self.get_connection() as conn:
+            params = []
+            conditions = []
+            sql = """
+                SELECT d.id, d.filename, d.path, d.category, d.subcategory, d.file_type,
+                       d.page_count, d.char_count, d.duration_seconds, d.is_hidden,
+                       COUNT(*) OVER() AS _total
+                FROM documents d
+                LEFT JOIN hidden_categories hc ON d.category = hc.category
+            """
+            if not include_hidden:
+                conditions.append("d.is_hidden = 0")
+                conditions.append("hc.category IS NULL")
+            if category:
+                conditions.append("d.category = ?")
+                params.append(category)
+            if subcategory:
+                conditions.append("d.subcategory = ?")
+                params.append(subcategory)
+            if file_type:
+                conditions.append("d.file_type = ?")
+                params.append(file_type)
+            if filename:
+                conditions.append("LOWER(d.filename) LIKE LOWER(?)")
+                params.append(f"%{filename}%")
+            if conditions:
+                sql += " WHERE " + " AND ".join(conditions)
+            sql += " ORDER BY d.filename LIMIT ? OFFSET ?"
+            params.extend([limit, offset])
+            cursor = conn.execute(sql, params)
+            rows = [dict(row) for row in cursor]
+            total = int(rows[0]["_total"]) if rows else 0
+            docs = [{k: v for k, v in r.items() if k != "_total"} for r in rows]
+            return (docs, total)
     
     def count_documents(self, category: Optional[str] = None,
                         subcategory: Optional[str] = None,
@@ -869,6 +999,13 @@ class Database:
             doc_id = doc.get("id")
             if doc_id is None:
                 continue  # skip docs without id (should not happen if build_index sets it)
+            # Derive filename from path when missing (legacy JSON may only have path)
+            path = doc.get("path", "")
+            filename = doc.get("filename")
+            if not filename and path:
+                filename = Path(path).name
+            if not filename:
+                filename = "unknown"
             # Extract date from email headers if not already provided
             document_date = doc.get("document_date")
             if not document_date:
@@ -878,9 +1015,9 @@ class Database:
             
             prepared_docs.append((
                 doc_id,
-                doc["filename"],
-                doc.get("original_filename", doc["filename"]),
-                doc["path"],
+                filename,
+                doc.get("original_filename", filename),
+                path,
                 doc.get("category", "Unknown"),
                 doc.get("subcategory", ""),
                 doc.get("file_type", "pdf"),
@@ -904,6 +1041,12 @@ class Database:
         """Get set of all document IDs currently in the database"""
         with self.get_connection() as conn:
             cursor = conn.execute("SELECT id FROM documents")
+            return {row[0] for row in cursor.fetchall()}
+    
+    def get_indexed_paths(self) -> set:
+        """Get set of all document paths currently in the database (for path-based deduplication)."""
+        with self.get_connection() as conn:
+            cursor = conn.execute("SELECT path FROM documents")
             return {row[0] for row in cursor.fetchall()}
     
     # =========================================================================
@@ -1877,6 +2020,24 @@ class VectorStore:
         """Get set of already indexed document IDs"""
         return {m.get("doc_id") for m in self.metadata if m.get("doc_id")}
     
+    def remove_doc_ids(self, doc_ids: set) -> int:
+        """Remove embeddings for the given document IDs. Returns number removed."""
+        if not doc_ids:
+            return 0
+        kept_embeddings = []
+        kept_metadata = []
+        removed = 0
+        for i, m in enumerate(self.metadata):
+            if m.get("doc_id") in doc_ids:
+                removed += 1
+            else:
+                kept_embeddings.append(self.embeddings[i])
+                kept_metadata.append(m)
+        self.embeddings = kept_embeddings
+        self.metadata = kept_metadata
+        self._save()
+        return removed
+    
     def add_document(self, doc_id: str, text: str, metadata: Dict[str, Any]):
         """Add a document to the vector store"""
         model = self._get_model()
@@ -2042,18 +2203,58 @@ def build_index(base_path: str, force: bool = False,
         print("No documents to index.")
         return
     
-    # Get already indexed document IDs (skip unless force)
+    # Deduplicate by path: same logical file can appear under old (absolute-path) and new (relative-path) hash
+    def _canonical_doc_hash(path: str, base: Path) -> Optional[str]:
+        try:
+            full = base / path
+            if full.exists():
+                size = full.stat().st_size
+                return hashlib.md5(f"{path}_{size}".encode()).hexdigest()
+        except Exception:
+            pass
+        return None
+    
+    path_to_entry = {}  # path -> (file_id, file_info)
+    no_path_entries = {}  # file_id -> file_info for entries without path
+    for file_id, file_info in all_files.items():
+        path = file_info.get("path")
+        if not path:
+            no_path_entries[file_id] = file_info
+            continue
+        canonical = _canonical_doc_hash(path, base_path)
+        if path not in path_to_entry:
+            path_to_entry[path] = (file_id, file_info)
+        else:
+            existing_id, existing_info = path_to_entry[path]
+            # Prefer file_id that equals canonical hash; otherwise keep first seen
+            if canonical and file_id == canonical:
+                path_to_entry[path] = (file_id, file_info)
+            elif canonical and existing_id == canonical:
+                pass  # keep existing
+            # else keep first (existing)
+    all_files_deduped = {fid: info for fid, info in path_to_entry.values()}
+    all_files_deduped.update(no_path_entries)
+    deduped_count = len(all_files) - len(all_files_deduped)
+    if deduped_count > 0:
+        print(f"  Deduplicated by path: {deduped_count} duplicate path(s) removed → {len(all_files_deduped)} unique documents")
+    
+    # Get already indexed document IDs and paths (skip unless force)
     existing_vector_ids = set()
     existing_db_ids = set()
+    existing_paths = set()
     if not force:
         existing_vector_ids = vector_store.get_indexed_doc_ids()
         existing_db_ids = db.get_indexed_doc_ids()
+        existing_paths = db.get_indexed_paths()
         print(f"  {len(existing_vector_ids)} documents already in vector store")
         print(f"  {len(existing_db_ids)} documents already in database")
     
-    # Filter to only new documents
-    to_index = {k: v for k, v in all_files.items() 
-                if force or k not in existing_vector_ids or k not in existing_db_ids}
+    # Filter to only new documents (by id and by path so we don't re-insert same path under different hash)
+    to_index = {
+        k: v for k, v in all_files_deduped.items()
+        if (force or k not in existing_vector_ids or k not in existing_db_ids)
+        and (force or v.get("path") not in existing_paths)
+    }
     
     if not to_index:
         print("✓ Index is up to date! No new documents to process.")
@@ -2061,7 +2262,7 @@ def build_index(base_path: str, force: bool = False,
         print(f"  Vector embeddings: {vector_store.get_count()}")
         return
     
-    print(f"Indexing {len(to_index)} new documents (skipping {len(all_files) - len(to_index)} already indexed)...")
+    print(f"Indexing {len(to_index)} new documents (skipping {len(all_files_deduped) - len(to_index)} already indexed)...")
     
     # Batches for efficient processing
     vector_batch = []
@@ -2084,6 +2285,12 @@ def build_index(base_path: str, force: bool = False,
         # Ensure doc has id (older extracted JSON may lack it)
         if "id" not in doc:
             doc["id"] = file_id
+        
+        # Ensure doc has path and filename (legacy or discovery-built JSON may lack them)
+        if "path" not in doc or doc.get("path") is None:
+            doc["path"] = file_info.get("path", "")
+        if "filename" not in doc or not doc["filename"]:
+            doc["filename"] = Path(doc.get("path", "")).name or "unknown"
         
         # Add to SQLite batch
         db_batch.append(doc)

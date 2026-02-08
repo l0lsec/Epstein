@@ -28,7 +28,9 @@ let state = {
     documentList: [],  // Current list of documents (from search or browse)
     documentIndex: -1,  // Current index within documentList
     // User category exclusion preferences (stored in localStorage)
-    excludedCategories: JSON.parse(localStorage.getItem('excludedCategories') || '[]')
+    excludedCategories: JSON.parse(localStorage.getItem('excludedCategories') || '[]'),
+    // Prefetched first browse page (from bootstrap), consumed once
+    _prefetchedBrowse: null
 };
 
 // DOM Elements
@@ -40,11 +42,33 @@ document.addEventListener('DOMContentLoaded', init);
 async function init() {
     cacheElements();
     setupEventListeners();
-    await loadStats();
-    await loadCategories();
-    await loadKeywords();
-    await loadPublicSettings();
-    await loadPinnedDocuments();
+    
+    // Single bootstrap request (stats + categories + keywords + settings) for faster load
+    try {
+        const bootstrapRes = await fetch(`${API_BASE}/bootstrap`);
+        if (bootstrapRes.ok) {
+            const data = await bootstrapRes.json();
+            state.stats = data.stats;
+            state.categories = (data.categories && data.categories.categories) ? data.categories.categories : [];
+            renderStats();
+            updateLLMStatus();
+            applyCategoriesToDropdowns();
+            applyKeywordsToDropdowns(data.keywords ? data.keywords.keywords : {});
+            applyPublicSettings(data.settings || {});
+            // Cache the prefetched first browse page so Browse tab is instant
+            if (data.browse && data.browse.documents) {
+                state._prefetchedBrowse = data.browse;
+            }
+            if (data.settings && data.settings.pinned_documents_enabled !== false) {
+                await loadPinnedDocuments(true);
+            }
+        } else {
+            await loadFallbackInit();
+        }
+    } catch (e) {
+        console.warn('Bootstrap failed, falling back to separate requests:', e);
+        await loadFallbackInit();
+    }
     
     // Set timestamp for spam protection
     const timestampField = document.getElementById('feedback-timestamp');
@@ -56,8 +80,84 @@ async function init() {
     const urlParams = new URLSearchParams(window.location.search);
     const docId = urlParams.get('doc');
     if (docId) {
-        // Small delay to ensure everything is loaded
         setTimeout(() => openDocument(docId), 100);
+    }
+}
+
+async function loadFallbackInit() {
+    await Promise.all([
+        loadStats(),
+        loadCategories(),
+        loadKeywords(),
+        loadPublicSettings()
+    ]);
+    await loadPinnedDocuments();
+}
+
+function applyCategoriesToDropdowns() {
+    if (!state.categories || !state.categories.length) return;
+    const visibleCategories = state.categories.filter(
+        c => !state.excludedCategories.includes(c.category)
+    );
+    const categoryOptions = visibleCategories.map(c =>
+        `<option value="${c.category}">${c.category} (${c.count})</option>`
+    ).join('');
+    const currentBrowseCategory = elements.browseCategory?.value;
+    const currentSearchCategory = elements.searchCategory?.value;
+    if (elements.searchCategory) {
+        elements.searchCategory.innerHTML = '<option value="">All File Sets</option>' + categoryOptions;
+    }
+    if (elements.browseCategory) {
+        elements.browseCategory.innerHTML = '<option value="">All File Sets</option>' + categoryOptions;
+    }
+    if (currentBrowseCategory && visibleCategories.some(c => c.category === currentBrowseCategory)) {
+        elements.browseCategory.value = currentBrowseCategory;
+    }
+    if (currentSearchCategory && visibleCategories.some(c => c.category === currentSearchCategory)) {
+        elements.searchCategory.value = currentSearchCategory;
+    }
+    renderExcludeDropdowns();
+}
+
+function applyKeywordsToDropdowns(keywords) {
+    if (!keywords || !elements.browseKeyword) return;
+    const categoryIcons = { 'People': '👤', 'Locations': '📍', 'Topics': '📋' };
+    let optionsHtml = '<option value="">All Topics</option>';
+    const categoryOrder = ['People', 'Locations', 'Topics'];
+    for (const category of categoryOrder) {
+        const items = keywords[category];
+        if (items && items.length > 0) {
+            const icon = categoryIcons[category] || '🏷️';
+            optionsHtml += `<optgroup label="${icon} ${category}">`;
+            for (const kw of items) {
+                const countText = kw.document_count > 0 ? ` (${formatNumber(kw.document_count)})` : '';
+                optionsHtml += `<option value="${escapeHtml(kw.search_term)}">${escapeHtml(kw.name)}${countText}</option>`;
+            }
+            optionsHtml += '</optgroup>';
+        }
+    }
+    for (const [category, items] of Object.entries(keywords)) {
+        if (!categoryOrder.includes(category) && items && items.length > 0) {
+            const icon = categoryIcons[category] || '🏷️';
+            optionsHtml += `<optgroup label="${icon} ${category}">`;
+            for (const kw of items) {
+                const countText = kw.document_count > 0 ? ` (${formatNumber(kw.document_count)})` : '';
+                optionsHtml += `<option value="${escapeHtml(kw.search_term)}">${escapeHtml(kw.name)}${countText}</option>`;
+            }
+            optionsHtml += '</optgroup>';
+        }
+    }
+    const currentValue = elements.browseKeyword.value;
+    elements.browseKeyword.innerHTML = optionsHtml;
+    if (currentValue) elements.browseKeyword.value = currentValue;
+}
+
+function applyPublicSettings(settings) {
+    if (settings.ask_ai_enabled === false) {
+        const askNavBtn = document.querySelector('.nav-btn[data-view="ask"]');
+        const askView = document.getElementById('ask-view');
+        if (askNavBtn) askNavBtn.style.display = 'none';
+        if (askView) askView.style.display = 'none';
     }
 }
 
@@ -797,17 +897,18 @@ async function loadPublicSettings() {
 }
 
 // Load and display pinned documents on homepage
-async function loadPinnedDocuments() {
+// skipSettingsCheck: when true (e.g. from bootstrap), skip fetching /settings and assume pinned is enabled
+async function loadPinnedDocuments(skipSettingsCheck = false) {
     try {
-        // Check if pinned documents feature is enabled
-        const settingsResponse = await fetch(`${API_BASE}/settings`);
-        if (settingsResponse.ok) {
-            const settings = await settingsResponse.json();
-            if (settings.pinned_documents_enabled === false) {
-                // Remove existing pinned documents bar if it exists
-                const existingBar = document.getElementById('pinned-documents-bar');
-                if (existingBar) existingBar.remove();
-                return; // Don't show pinned documents bar
+        if (!skipSettingsCheck) {
+            const settingsResponse = await fetch(`${API_BASE}/settings`);
+            if (settingsResponse.ok) {
+                const settings = await settingsResponse.json();
+                if (settings.pinned_documents_enabled === false) {
+                    const existingBar = document.getElementById('pinned-documents-bar');
+                    if (existingBar) existingBar.remove();
+                    return;
+                }
             }
         }
         
@@ -1508,6 +1609,23 @@ function renderSearchPageNumbers(totalPages) {
 
 async function loadDocuments() {
     const offset = state.browsePage * state.browseLimit;
+    const noFilters = !state.browseCategory && !state.browseSubcategory &&
+                      !state.browseFileType && !state.browseFilename && !state.browseKeyword;
+    
+    // Fast path: use prefetched first page from bootstrap (no network round-trip)
+    if (state._prefetchedBrowse && offset === 0 && noFilters) {
+        const data = state._prefetchedBrowse;
+        state._prefetchedBrowse = null;  // Consume once
+        renderDocuments(data);
+        return;
+    }
+    
+    // Instant visual feedback: dim the grid and block interaction while loading
+    if (elements.documentsGrid) {
+        elements.documentsGrid.style.opacity = '0.5';
+        elements.documentsGrid.style.pointerEvents = 'none';
+        elements.documentsGrid.style.transition = 'opacity 0.15s ease';
+    }
     
     try {
         const params = new URLSearchParams({
@@ -1544,6 +1662,12 @@ async function loadDocuments() {
     } catch (error) {
         console.error('Error loading documents:', error);
         elements.documentsGrid.innerHTML = '<p class="error">Failed to load documents.</p>';
+    } finally {
+        // Restore grid visibility whether fetch succeeded or failed
+        if (elements.documentsGrid) {
+            elements.documentsGrid.style.opacity = '1';
+            elements.documentsGrid.style.pointerEvents = '';
+        }
     }
 }
 
@@ -1616,10 +1740,12 @@ function renderDocuments(data) {
 
 async function openDocument(docId, index = -1) {
     try {
-        const response = await fetch(`${API_BASE}/documents/${docId}`);
+        // Request metadata only for faster modal open (full_text loaded on demand when user opens Text tab)
+        const response = await fetch(`${API_BASE}/documents/${docId}?include_text=false`);
         if (!response.ok) throw new Error('Document not found');
         
         const doc = await response.json();
+        doc._fullTextLoaded = !!(doc.full_text); // If server sent full_text (e.g. include_text=true), mark loaded
         state.currentDocument = doc;
         
         // Track document index for navigation
@@ -1647,7 +1773,7 @@ async function openDocument(docId, index = -1) {
             <span>📝 ${formatNumber(doc.char_count || 0)} characters</span>
         `;
         
-        elements.modalText.textContent = doc.full_text || 'No text content available.';
+        elements.modalText.textContent = ''; // Full text loaded on demand when user opens Text Content tab
         elements.modalSummary.innerHTML = '<p class="loading">Click to load AI summary...</p>';
         
         // Get file URL for viewer
@@ -1876,12 +2002,35 @@ async function switchModalTab(tabName) {
         content.classList.toggle('active', content.id === `modal-${tabName}-tab`);
     });
     
+    // Load full text on demand when user opens Text Content tab
+    if (tabName === 'document' && state.currentDocument && !state.currentDocument._fullTextLoaded) {
+        await loadDocumentFullText(state.currentDocument.id);
+    }
+    
     // Load summary if switching to summary tab
     if (tabName === 'summary' && state.currentDocument) {
         const summaryEl = elements.modalSummary;
         if (summaryEl.querySelector('.loading')) {
             await loadDocumentSummary(state.currentDocument.id);
         }
+    }
+}
+
+async function loadDocumentFullText(docId) {
+    if (!elements.modalText) return;
+    elements.modalText.textContent = 'Loading text...';
+    try {
+        const response = await fetch(`${API_BASE}/documents/${docId}/text`);
+        if (!response.ok) throw new Error('Failed to load text');
+        const data = await response.json();
+        if (state.currentDocument && state.currentDocument.id === docId) {
+            state.currentDocument.full_text = data.full_text;
+            state.currentDocument._fullTextLoaded = true;
+            elements.modalText.textContent = data.full_text || 'No text content available.';
+        }
+    } catch (e) {
+        console.error('Error loading document text:', e);
+        elements.modalText.textContent = 'Failed to load text content.';
     }
 }
 

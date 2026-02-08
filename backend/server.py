@@ -91,6 +91,8 @@ class ResponseCache:
 # Cache instances with different TTLs
 _stats_cache = ResponseCache(ttl_seconds=30)  # Stats cached for 30 seconds
 _categories_cache = ResponseCache(ttl_seconds=60)  # Categories cached for 60 seconds
+_bootstrap_cache = ResponseCache(ttl_seconds=30)  # Bootstrap (stats+categories+keywords+settings) for 30s
+_maintenance_cache = ResponseCache(ttl_seconds=5)  # Maintenance/status-page check (avoids DB hit per request)
 
 async def lookup_ip_geo(ip: str) -> dict:
     """Look up geolocation for an IP address using ip-api.com"""
@@ -398,9 +400,12 @@ async def maintenance_check(request: Request, call_next):
     # First check: .maintenance file exists (indexing in progress)
     if MAINTENANCE_LOCK.exists():
         show_maintenance = True
-    # Second check: custom status page enabled in database settings
+    # Second check: custom status page enabled in database settings (cached to avoid DB hit per request)
     elif db:
-        status_enabled = db.get_setting("status_page_enabled", "false")
+        status_enabled = _maintenance_cache.get("status_page_enabled")
+        if status_enabled is None:
+            status_enabled = db.get_setting("status_page_enabled", "false")
+            _maintenance_cache.set("status_page_enabled", status_enabled)
         if status_enabled == "true":
             show_maintenance = True
     
@@ -958,6 +963,74 @@ async def get_stats(response: Response) -> StatsResponse:
     return result
 
 
+@app.get("/api/bootstrap")
+async def get_bootstrap(response: Response):
+    """Single request for initial page load: stats, categories, keywords, and public settings.
+    Reduces 4 round-trips to 1 for faster first paint."""
+    if not db:
+        raise HTTPException(status_code=503, detail="Database not initialized")
+    
+    cached = _bootstrap_cache.get("bootstrap")
+    if cached:
+        response.headers["X-Cache"] = "HIT"
+        response.headers["Cache-Control"] = "public, max-age=30, s-maxage=30"
+        return cached
+    
+    # Build bootstrap in one go
+    stats = db.get_stats()
+    stats_response = StatsResponse(
+        total_documents=stats["total_documents"],
+        total_pages=stats["total_pages"],
+        by_category=stats["by_category"],
+        by_subcategory=stats["by_subcategory"],
+        by_file_type=stats.get("by_file_type", []),
+        vector_chunks=vector_store.get_count() if vector_store else 0,
+        llm_available=llm.is_available() if llm else False,
+    )
+    categories = db.get_category_counts(keyword=None, include_hidden=False)
+    keywords_list = db.get_keywords(active_only=True)
+    grouped_keywords = {}
+    for kw in keywords_list:
+        cat = kw["category"]
+        if cat not in grouped_keywords:
+            grouped_keywords[cat] = []
+        grouped_keywords[cat].append({
+            "name": kw["name"],
+            "search_term": kw["search_term"],
+            "document_count": kw["document_count"],
+        })
+    settings = db.get_all_settings()
+    public_settings = {
+        "ask_ai_enabled": settings.get("ask_ai_enabled", "true") == "true",
+        "pinned_documents_enabled": settings.get("pinned_documents_enabled", "true") == "true",
+    }
+    
+    # Prefetch first browse page so the Browse tab is instant
+    browse_limit = 24
+    browse_docs, browse_total = db.get_all_documents_with_total(
+        limit=browse_limit, offset=0, include_hidden=False
+    )
+    # Cache the unfiltered total for subsequent page requests
+    _categories_cache.set("docs_total_unfiltered", browse_total)
+    
+    result = {
+        "stats": stats_response,
+        "categories": {"categories": categories},
+        "keywords": {"keywords": grouped_keywords},
+        "settings": public_settings,
+        "browse": {
+            "total": browse_total,
+            "limit": browse_limit,
+            "offset": 0,
+            "documents": browse_docs,
+        },
+    }
+    _bootstrap_cache.set("bootstrap", result)
+    response.headers["X-Cache"] = "MISS"
+    response.headers["Cache-Control"] = "public, max-age=30, s-maxage=30"
+    return result
+
+
 @app.get("/api/index/status")
 async def get_index_status() -> IndexStatusResponse:
     """Get the current indexing status"""
@@ -1128,6 +1201,7 @@ async def get_subcategories(category: Optional[str] = None):
     """Get subcategories, optionally filtered by category
     
     Note: Returns empty list if the category is hidden.
+    Uses a dedicated lightweight query instead of full stats.
     """
     if not db:
         raise HTTPException(status_code=503, detail="Database not initialized")
@@ -1136,15 +1210,12 @@ async def get_subcategories(category: Optional[str] = None):
     if category and db.is_category_hidden(category):
         return {"subcategories": []}
     
-    stats = db.get_stats()
-    subcategories = stats["by_subcategory"]
-    
+    subcategories = db.get_subcategory_counts(category=category, include_hidden=False)
+    # Normalize to list of {subcategory, count} for the requested category only
     if category:
-        subcategories = [s for s in subcategories if s.get("category") == category]
+        subcategories = [{"subcategory": s["subcategory"], "count": s["count"]} for s in subcategories if s.get("subcategory")]
     else:
-        # Filter out hidden categories from the list
-        hidden_categories = {hc["category"] for hc in db.get_hidden_categories()}
-        subcategories = [s for s in subcategories if s.get("category") not in hidden_categories]
+        subcategories = [{"subcategory": s["subcategory"], "count": s["count"]} for s in subcategories if s.get("subcategory")]
     
     return {"subcategories": subcategories}
 
@@ -1381,7 +1452,8 @@ async def search(search_request: SearchRequest, request: Request) -> dict:
                 # Verify document exists and is visible (not hidden)
                 if not db.is_document_visible(doc_id):
                     continue
-                doc = db.get_document(doc_id)
+                # Use metadata-only to avoid loading full_text for every result
+                doc = db.get_document(doc_id, include_full_text=False)
                 if doc:
                     text = r.get("text", "")
                     results.append({
@@ -1494,9 +1566,31 @@ async def list_documents(
             response.headers["Cache-Control"] = "public, max-age=30, s-maxage=30"
             return cached
     
-    # Exclude hidden documents and hidden categories from public view
-    docs = db.get_all_documents(limit=limit, offset=offset, category=category, subcategory=subcategory, file_type=file_type, filename=filename, keyword=keyword, search=search, include_hidden=False)
-    total = db.count_documents(category=category, subcategory=subcategory, file_type=file_type, filename=filename, keyword=keyword, include_hidden=False)
+    # Unfiltered browse: no category, subcategory, file_type, filename, keyword, search
+    unfiltered = not category and not subcategory and not file_type and not filename and not keyword and not search
+    
+    if unfiltered:
+        # Single query for list + total (get_all_documents_with_total); cache total for later pages
+        cached_total = _categories_cache.get("docs_total_unfiltered")
+        if cached_total is not None:
+            docs = db.get_all_documents(limit=limit, offset=offset, include_hidden=False)
+            total = cached_total
+        else:
+            docs, total = db.get_all_documents_with_total(
+                limit=limit, offset=offset, include_hidden=False
+            )
+            _categories_cache.set("docs_total_unfiltered", total)
+    elif not keyword and not search:
+        # Filtered but no FTS: still use single query for list + total
+        docs, total = db.get_all_documents_with_total(
+            limit=limit, offset=offset,
+            category=category, subcategory=subcategory, file_type=file_type, filename=filename,
+            include_hidden=False,
+        )
+    else:
+        # Keyword or search: keep two-call path (FTS join)
+        docs = db.get_all_documents(limit=limit, offset=offset, category=category, subcategory=subcategory, file_type=file_type, filename=filename, keyword=keyword, search=search, include_hidden=False)
+        total = db.count_documents(category=category, subcategory=subcategory, file_type=file_type, filename=filename, keyword=keyword, include_hidden=False)
     
     result = {
         "total": total,
@@ -1570,8 +1664,15 @@ async def export_documents(
 
 
 @app.get("/api/documents/{doc_id}")
-async def get_document(doc_id: str, request: Request):
+async def get_document(
+    doc_id: str,
+    request: Request,
+    include_text: bool = Query(True, description="Include full_text in response (set false for faster modal open)"),
+):
     """Get a specific document by ID
+    
+    Use include_text=false for faster loading when only metadata is needed (e.g. opening modal).
+    Fetch full text via GET /api/documents/{doc_id}/text when user opens the Text Content tab.
     
     Note: Returns 404 for hidden documents or documents in hidden categories.
     """
@@ -1581,7 +1682,7 @@ async def get_document(doc_id: str, request: Request):
         raise HTTPException(status_code=503, detail="Database not initialized")
     
     # Check if document is visible (not hidden and category not hidden)
-    doc = db.get_document(doc_id, include_hidden=False)
+    doc = db.get_document(doc_id, include_hidden=False, include_full_text=include_text)
     if not doc:
         security_logger.log_security_event(
             event_type="document_not_found",
@@ -1604,6 +1705,22 @@ async def get_document(doc_id: str, request: Request):
     )
     
     return doc
+
+
+@app.get("/api/documents/{doc_id}/text")
+async def get_document_text(doc_id: str, request: Request):
+    """Get only the full text of a document (for lazy loading in modal).
+    
+    Note: Returns 404 for hidden documents or documents in hidden categories.
+    """
+    if not db:
+        raise HTTPException(status_code=503, detail="Database not initialized")
+    
+    full_text = db.get_document_full_text(doc_id, include_hidden=False)
+    if full_text is None:
+        raise HTTPException(status_code=404, detail="Document not found")
+    
+    return {"full_text": full_text}
 
 
 @app.get("/api/documents/{doc_id}/file")
@@ -1881,55 +1998,79 @@ def create_placeholder_thumbnail(file_type: str, output_path: Path) -> bool:
         return False
 
 
+def _generate_thumbnail_sync(
+    file_path: Path,
+    file_type: str,
+    thumbnail_path: Path,
+    base_path: Path,
+) -> None:
+    """Synchronous thumbnail generation (run in thread pool to avoid blocking)."""
+    if not file_path.exists():
+        create_placeholder_thumbnail("document", thumbnail_path)
+        return
+    if file_type == "pdf":
+        if not generate_pdf_thumbnail(file_path, thumbnail_path):
+            create_placeholder_thumbnail("document", thumbnail_path)
+    elif file_type == "image":
+        if not generate_image_thumbnail(file_path, thumbnail_path):
+            create_placeholder_thumbnail("image", thumbnail_path)
+    elif file_type == "audio":
+        create_placeholder_thumbnail("audio", thumbnail_path)
+    elif file_type == "video":
+        if not generate_video_thumbnail(file_path, thumbnail_path):
+            create_placeholder_thumbnail("video", thumbnail_path)
+    else:
+        create_placeholder_thumbnail("document", thumbnail_path)
+
+
 @app.get("/api/documents/{doc_id}/thumbnail")
 async def get_document_thumbnail(doc_id: str, request: Request):
     """Get a thumbnail preview of a document
     
+    Thumbnail generation runs in a thread pool so the event loop is not blocked.
     Note: Returns 404 for hidden documents or documents in hidden categories.
     """
     if not db:
         raise HTTPException(status_code=503, detail="Database not initialized")
     
-    # Check if document is visible (not hidden and category not hidden)
-    doc = db.get_document(doc_id, include_hidden=False)
-    if not doc:
-        raise HTTPException(status_code=404, detail="Document not found")
-    
     # Ensure thumbnails directory exists
     THUMBNAILS_PATH.mkdir(exist_ok=True)
     
-    # Check for cached thumbnail
     thumbnail_path = THUMBNAILS_PATH / f"{doc_id}.jpg"
     
-    if not thumbnail_path.exists():
-        # Generate thumbnail based on file type
-        file_path = (BASE_PATH / doc["path"]).resolve()
-        file_type = doc.get("file_type", "pdf")
-        
-        # Security check - ensure file is within BASE_PATH
-        if not str(file_path).startswith(str(BASE_PATH.resolve())):
-            raise HTTPException(status_code=403, detail="Access denied")
-        
-        if not file_path.exists():
-            # File missing - create placeholder
-            create_placeholder_thumbnail("document", thumbnail_path)
-        elif file_type == "pdf":
-            # Generate PDF thumbnail
-            if not generate_pdf_thumbnail(file_path, thumbnail_path):
-                # Fallback to placeholder if PDF rendering fails
-                create_placeholder_thumbnail("document", thumbnail_path)
-        elif file_type == "image":
-            # Generate image thumbnail
-            if not generate_image_thumbnail(file_path, thumbnail_path):
-                create_placeholder_thumbnail("image", thumbnail_path)
-        elif file_type == "audio":
-            create_placeholder_thumbnail("audio", thumbnail_path)
-        elif file_type == "video":
-            # Try to extract actual frame from video
-            if not generate_video_thumbnail(file_path, thumbnail_path):
-                create_placeholder_thumbnail("video", thumbnail_path)
-        else:
-            create_placeholder_thumbnail("document", thumbnail_path)
+    # Fast path: if the thumbnail already exists on disk, serve it immediately
+    # without querying the database. The browse list already verified visibility
+    # when it returned this doc_id, so a redundant DB check is unnecessary.
+    if thumbnail_path.exists():
+        return FileResponse(
+            path=thumbnail_path,
+            media_type="image/jpeg",
+            headers={
+                'Cache-Control': 'public, max-age=86400',  # Cache for 24 hours
+            }
+        )
+    
+    # Cache miss – need to generate the thumbnail. Verify visibility first.
+    doc = db.get_document(doc_id, include_hidden=False, include_full_text=False)
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found")
+    
+    file_path = (BASE_PATH / doc["path"]).resolve()
+    file_type = doc.get("file_type", "pdf")
+    
+    if not str(file_path).startswith(str(BASE_PATH.resolve())):
+        raise HTTPException(status_code=403, detail="Access denied")
+    
+    # Run thumbnail generation in thread pool to avoid blocking the event loop
+    loop = asyncio.get_event_loop()
+    await loop.run_in_executor(
+        None,
+        _generate_thumbnail_sync,
+        file_path,
+        file_type,
+        thumbnail_path,
+        BASE_PATH,
+    )
     
     if thumbnail_path.exists():
         return FileResponse(
@@ -3371,6 +3512,7 @@ async def update_status_page(status: StatusPageUpdate, request: Request, x_api_k
     
     # Update settings
     db.set_setting("status_page_enabled", "true" if status.enabled else "false")
+    _maintenance_cache.invalidate("status_page_enabled")  # Clear cached value
     db.set_setting("status_page_title", status.title or "Under Maintenance")
     db.set_setting("status_page_message", status.message or "")
     db.set_setting("status_page_timeline", status.timeline or "")
@@ -3416,6 +3558,7 @@ async def disable_status_page(request: Request, x_api_key: str = Header(None)):
     client_ip, request_id = get_client_info(request)
     
     db.set_setting("status_page_enabled", "false")
+    _maintenance_cache.invalidate("status_page_enabled")  # Clear cached value
     db.set_setting("status_page_started", "")
     
     security_logger.log_security_event(

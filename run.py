@@ -10,6 +10,7 @@ import sys
 import subprocess
 import shutil
 import json
+import hashlib
 from pathlib import Path
 from datetime import datetime
 from dotenv import load_dotenv
@@ -746,6 +747,8 @@ Adding new files (PDFs, audio, video):
 Database maintenance:
   python run.py fix-fts                                  # Rebuild FTS5 full-text search index
   python run.py cleanup-db                               # Remove orphaned/duplicate entries
+  python run.py cleanup-duplicates                       # Remove duplicate documents (same path)
+  python run.py rebuild-db                                # Replace corrupted DB/vector store and re-index
 
 Supported formats:
   Documents: .pdf
@@ -760,7 +763,7 @@ Data Sources:
     )
     
     parser.add_argument("command", nargs="?", default="all",
-                        choices=["setup", "extract", "index", "server", "all", "add", "download", "fix-fts", "cleanup-db", "generate-thumbnails"],
+                        choices=["setup", "extract", "index", "server", "all", "add", "download", "fix-fts", "cleanup-db", "cleanup-duplicates", "rebuild-db", "generate-thumbnails"],
                         help="Command to run")
     parser.add_argument("source", nargs="?", default=None,
                         help="Source path for 'add' command (file or directory)")
@@ -1033,6 +1036,148 @@ Data Sources:
         
         conn.close()
         print("\n✅ Database cleanup complete!")
+        sys.exit(0)
+    
+    # Handle cleanup-duplicates command (remove duplicate rows with same path)
+    if args.command == "cleanup-duplicates":
+        import sqlite3
+        print("\n" + "="*60)
+        print("CLEANUP DUPLICATES - One row per path")
+        print("="*60)
+        
+        db_path = BASE_PATH / "epstein.db"
+        if not db_path.exists():
+            print("✗ Database not found. Run 'python run.py setup' first.")
+            sys.exit(1)
+        
+        def _canonical_doc_hash(path: str, base: Path) -> str:
+            try:
+                full = base / path
+                if full.exists():
+                    size = full.stat().st_size
+                    return hashlib.md5(f"{path}_{size}".encode()).hexdigest()
+            except Exception:
+                pass
+            return ""
+        
+        conn = sqlite3.connect(str(db_path))
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute("SELECT id, path FROM documents")
+        rows = cursor.fetchall()
+        conn.close()
+        
+        # Group by path
+        from collections import defaultdict
+        path_to_ids = defaultdict(list)
+        for row in rows:
+            path_to_ids[row["path"]].append(row["id"])
+        
+        # For each path with duplicates, choose one to keep (prefer canonical hash id)
+        ids_to_remove = []
+        for path, ids in path_to_ids.items():
+            if len(ids) <= 1:
+                continue
+            canonical = _canonical_doc_hash(path, BASE_PATH)
+            if canonical and canonical in ids:
+                keep_id = canonical
+            else:
+                keep_id = ids[0]
+            for doc_id in ids:
+                if doc_id != keep_id:
+                    ids_to_remove.append(doc_id)
+        
+        if not ids_to_remove:
+            print("✓ No duplicate paths found. Database already has one row per path.")
+            sys.exit(0)
+        
+        print(f"  Found {len(ids_to_remove)} duplicate row(s) to remove (keeping one per path).")
+        confirm = input("  Proceed? [y/N]: ")
+        if confirm.lower() != 'y':
+            print("  Skipped.")
+            sys.exit(0)
+        
+        # Check database integrity before making changes
+        conn = sqlite3.connect(str(db_path))
+        try:
+            r = conn.execute("PRAGMA integrity_check").fetchone()
+            if r[0] != "ok":
+                print(f"  ✗ Database integrity check failed: {r[0]}")
+                print("  Fix or restore epstein.db (e.g. from backup, or try sqlite3 .recover) then run again.")
+                conn.close()
+                sys.exit(1)
+        finally:
+            conn.close()
+        
+        sys.path.insert(0, str(BACKEND_PATH))
+        from database import Database, VectorStore
+        
+        db = Database(str(db_path))
+        vector_store = VectorStore(str(BASE_PATH / "vector_store"))
+        
+        # Delete in batches to avoid one huge transaction (reduces risk of corruption)
+        batch_size = 5000
+        ids_actually_removed = []
+        failed_batches = 0
+        with db.get_connection() as conn:
+            for i in range(0, len(ids_to_remove), batch_size):
+                batch = ids_to_remove[i : i + batch_size]
+                placeholders = ",".join("?" * len(batch))
+                try:
+                    conn.execute(f"DELETE FROM documents WHERE id IN ({placeholders})", batch)
+                    conn.execute(f"DELETE FROM summaries WHERE document_id IN ({placeholders})", batch)
+                    conn.execute(f"DELETE FROM pinned_documents WHERE document_id IN ({placeholders})", batch)
+                    conn.commit()
+                    ids_actually_removed.extend(batch)
+                except sqlite3.DatabaseError as e:
+                    failed_batches += 1
+                    conn.rollback()
+                    print(f"  ⚠ Batch {i // batch_size + 1} failed ({e}); skipping.")
+        
+        removed_vectors = vector_store.remove_doc_ids(set(ids_actually_removed))
+        print(f"  ✓ Removed {len(ids_actually_removed)} duplicate document row(s) from database")
+        if failed_batches:
+            print(f"  ⚠ {failed_batches} batch(es) skipped due to database errors (run PRAGMA integrity_check; recover or restore epstein.db then run again)")
+        print(f"  ✓ Removed {removed_vectors} embedding(s) from vector store")
+        print("\n✅ Cleanup complete!")
+        sys.exit(0)
+    
+    # Handle rebuild-db command (remove corrupted DB and optionally vector store; then re-index)
+    if args.command == "rebuild-db":
+        print("\n" + "="*60)
+        print("REBUILD DATABASE - Fresh DB and re-index from extracted_text")
+        print("="*60)
+        
+        extracted_dir = BASE_PATH / "extracted_text"
+        if not extracted_dir.exists():
+            print("✗ extracted_text/ not found. Run extract first (e.g. python run.py extract).")
+            sys.exit(1)
+        index_file = extracted_dir / "index.json"
+        if not index_file.exists():
+            print("✗ extracted_text/index.json not found. Run extract first.")
+            sys.exit(1)
+        
+        db_path = BASE_PATH / "epstein.db"
+        vector_dir = BASE_PATH / "vector_store"
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        
+        if db_path.exists():
+            backup_db = BASE_PATH / f"epstein.db.corrupt_{ts}"
+            db_path.rename(backup_db)
+            print(f"  ✓ Renamed epstein.db → {backup_db.name}")
+        else:
+            print("  (no existing epstein.db)")
+        
+        if vector_dir.exists():
+            backup_vec = BASE_PATH / f"vector_store.old_{ts}"
+            vector_dir.rename(backup_vec)
+            print(f"  ✓ Renamed vector_store/ → {backup_vec.name}")
+        else:
+            print("  (no existing vector_store)")
+        
+        print("\n  Next: run index to populate the new database from extracted_text:")
+        print("    python run.py index")
+        print("\n  This will take a while (one row per document, embeddings for searchable docs).")
         sys.exit(0)
     
     # Handle generate-thumbnails command

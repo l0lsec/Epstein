@@ -52,3 +52,5 @@ mlx_models/
 deploy_extracted_data.sh
 .maintenance
 .maintenance
+vector_store.old_20260206_184659/embeddings.pkl
+vector_store.old_20260206_184659/metadata.pkl
