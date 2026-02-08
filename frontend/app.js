@@ -2308,8 +2308,14 @@ function openNativeAppOrFallback(appUrl, webUrl, intentUrl) {
     };
     document.addEventListener('visibilitychange', handleVisibility);
     
-    // Try to open the native app
-    window.location.href = urlToTry;
+    // Use a hidden anchor click instead of window.location.href
+    // This triggers Universal Links / App Links more reliably
+    const a = document.createElement('a');
+    a.href = urlToTry;
+    a.style.display = 'none';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
     
     // After a short delay, check if we're still here and fall back to web
     setTimeout(() => {
@@ -2320,7 +2326,7 @@ function openNativeAppOrFallback(appUrl, webUrl, intentUrl) {
         if (!didNavigate && !document.hidden) {
             window.open(webUrl, '_blank', 'width=600,height=400,menubar=no,toolbar=no');
         }
-    }, 2000);
+    }, 1500);
 }
 
 /**
@@ -2372,11 +2378,16 @@ function handleShare(platform) {
         case 'threads':
             // Threads Web Intent URL (combines text and URL in single text param)
             webUrl = `https://www.threads.net/intent/post?text=${encodeURIComponent(shareText + ' ' + shareUrl)}`;
-            // iOS deep link
-            appUrl = `threads://post?text=${encodeURIComponent(shareText + ' ' + shareUrl)}`;
-            // Android Intent (Threads package is com.instagram.barcelona)
+            // iOS: use Universal Link (https URL that iOS intercepts to open the app)
+            appUrl = `https://www.threads.net/intent/post?text=${encodeURIComponent(shareText + ' ' + shareUrl)}`;
+            // Android Intent (Threads package: com.instagram.barcelona)
             intentUrl = `intent://post?text=${encodeURIComponent(shareText + ' ' + shareUrl)}#Intent;package=com.instagram.barcelona;scheme=threads;end`;
             break;
+        case 'email':
+            const emailSubject = `Epstein Files: ${doc.filename}`;
+            const emailBody = `${shareText}\n\nView the document here: ${shareUrl}`;
+            window.location.href = `mailto:?subject=${encodeURIComponent(emailSubject)}&body=${encodeURIComponent(emailBody)}`;
+            return;
         case 'copy':
             copyToClipboard(shareUrl).then(success => {
                 if (success) {
@@ -2401,9 +2412,18 @@ function handleShare(platform) {
             return;
     }
     
-    // On mobile with a valid app URL, try to open native app first
-    if (isMobile && appUrl) {
-        openNativeAppOrFallback(appUrl, webUrl, intentUrl);
+    // On mobile, try to launch the native app
+    if (isMobile && (appUrl || intentUrl)) {
+        if (isIOS()) {
+            // On iOS, navigate directly to the Universal Link URL
+            // iOS will open the Threads app if installed, otherwise loads the web page
+            window.location.href = appUrl;
+        } else if (isAndroid() && intentUrl) {
+            // Android Intent is the most reliable way to launch apps
+            window.location.href = intentUrl;
+        } else {
+            openNativeAppOrFallback(appUrl, webUrl, intentUrl);
+        }
     } else {
         // Desktop or no app URL - open web version
         window.open(webUrl, '_blank', 'width=600,height=400,menubar=no,toolbar=no');
