@@ -619,7 +619,8 @@ def parse_boolean_query(query: str) -> dict:
             if token in phrase_map:
                 is_excluded, phrase = phrase_map[token]
                 if is_excluded:
-                    processed_tokens.append(f'NOT "{phrase}"')
+                    processed_tokens.append('NOT')
+                    processed_tokens.append(f'"{phrase}"')
                 else:
                     processed_tokens.append(f'"{phrase}"')
             i += 1
@@ -632,7 +633,8 @@ def parse_boolean_query(query: str) -> dict:
             term = re.sub(r'[^\w*]', '', term)
             if term:
                 excluded_terms.append(term)
-                processed_tokens.append(f'NOT {term}')
+                processed_tokens.append('NOT')
+                processed_tokens.append(term)
             i += 1
             continue
         
@@ -685,11 +687,10 @@ def parse_boolean_query(query: str) -> dict:
     # Clean up any double spaces
     fts_query = re.sub(r'\s+', ' ', fts_query).strip()
     
-    # Handle edge case: query is only exclusions (prepend * to match all then exclude)
-    if fts_query.startswith('NOT ') and not any(t.upper() not in ['NOT', 'AND', 'OR'] and not t.upper().startswith('NOT ') for t in processed_tokens):
-        # All tokens are NOT terms - this won't work in FTS5, need a workaround
-        # We'll handle this by returning an empty result indicator
-        pass
+    # Handle edge case: query is only exclusions (e.g., "-Maxwell") - FTS5 can't handle NOT without a positive term
+    if not required_terms and not phrases and excluded_terms:
+        # Exclusion-only query - return empty fts_query so the caller can handle gracefully
+        fts_query = ''
     
     return {
         'fts_query': fts_query,
