@@ -1821,6 +1821,20 @@ async function openDocument(docId, index = -1) {
         elements.modalText.textContent = ''; // Full text loaded on demand when user opens Text Content tab
         elements.modalSummary.innerHTML = '<p class="loading">Click to load AI summary...</p>';
         
+        // Show/hide DOJ original document link
+        const dojLink = document.getElementById('doj-original-link');
+        if (dojLink) {
+            const dojMatch = doc.category === 'DOJ Disclosures' && doc.subcategory
+                ? doc.subcategory.match(/^Data Set (\d+)$/)
+                : null;
+            if (dojMatch) {
+                dojLink.href = `https://www.justice.gov/epstein/files/DataSet%20${dojMatch[1]}/${encodeURIComponent(doc.filename)}`;
+                dojLink.style.display = '';
+            } else {
+                dojLink.style.display = 'none';
+            }
+        }
+        
         // Get file URL for viewer
         const fileUrl = `${API_BASE}/documents/${docId}/file`;
         

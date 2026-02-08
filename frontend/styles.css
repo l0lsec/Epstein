@@ -2088,6 +2088,13 @@ body {
     color: var(--accent);
 }
 
+a.modal-tab.doj-link {
+    text-decoration: none;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+}
+
 /* Share Dropdown */
 .share-dropdown {
     position: relative;
