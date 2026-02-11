@@ -40,18 +40,21 @@ trap 'error "Deploy failed at line $LINENO. Aborting."' ERR
 DRY_RUN=false
 ROLLBACK=false
 FORCE_RESTART=false
+DEPLOY_ALL=false
 
 for arg in "$@"; do
     case "$arg" in
         --dry-run)       DRY_RUN=true ;;
         --rollback)      ROLLBACK=true ;;
         --force-restart) FORCE_RESTART=true ;;
+        --all)           DEPLOY_ALL=true ;;
         -h|--help)
-            echo "Usage: ./deploy.sh [--dry-run] [--rollback] [--force-restart]"
+            echo "Usage: ./deploy.sh [--dry-run] [--rollback] [--force-restart] [--all]"
             echo ""
             echo "  --dry-run        Show what would be deployed without doing it"
             echo "  --rollback       Restore the previous deploy backup and restart"
             echo "  --force-restart  Force a service restart even for frontend-only deploys"
+            echo "  --all            Deploy all code files regardless of what changed"
             exit 0
             ;;
         *) error "Unknown flag: $arg"; exit 1 ;;
@@ -95,13 +98,40 @@ fi
 # ─── Detect changed files ───────────────────────────────────────────────────
 info "Detecting changed files..."
 
-# Get files that differ from what's on origin/main (staged + unstaged + untracked code files)
-CHANGED_FILES=$(git diff --name-only origin/main 2>/dev/null || git diff --name-only HEAD)
+CURRENT_SHA=$(git rev-parse HEAD)
 
-# Also include untracked files that are in deployable directories
-UNTRACKED=$(git ls-files --others --exclude-standard -- backend/ frontend/ scripts/ run.py requirements.txt 2>/dev/null || true)
-if [ -n "$UNTRACKED" ]; then
-    CHANGED_FILES=$(printf "%s\n%s" "$CHANGED_FILES" "$UNTRACKED" | sort -u)
+if [ "$DEPLOY_ALL" = true ]; then
+    info "Deploying ALL code files (--all flag)"
+    CHANGED_FILES=$(git ls-files -- backend/ frontend/ scripts/ run.py requirements.txt)
+else
+    # Fetch the last deployed commit SHA from the server
+    LAST_DEPLOYED_SHA=$(ssh "${SSH_TARGET}" "cat ${REMOTE_DIR}/.deploy-sha 2>/dev/null" || true)
+
+    if [ -z "$LAST_DEPLOYED_SHA" ]; then
+        info "No previous deploy marker found on server — deploying all code files"
+        CHANGED_FILES=$(git ls-files -- backend/ frontend/ scripts/ run.py requirements.txt)
+    elif [ "$LAST_DEPLOYED_SHA" = "$CURRENT_SHA" ]; then
+        # Same commit — check for uncommitted local changes
+        CHANGED_FILES=$(git diff --name-only HEAD 2>/dev/null || true)
+        UNTRACKED=$(git ls-files --others --exclude-standard -- backend/ frontend/ scripts/ run.py requirements.txt 2>/dev/null || true)
+        if [ -n "$UNTRACKED" ]; then
+            CHANGED_FILES=$(printf "%s\n%s" "$CHANGED_FILES" "$UNTRACKED" | sort -u)
+        fi
+        if [ -z "$CHANGED_FILES" ]; then
+            warn "Already deployed commit ${CURRENT_SHA:0:7} and no local changes. Nothing to do."
+            exit 0
+        fi
+    else
+        info "Last deployed: ${LAST_DEPLOYED_SHA:0:7} -> Current: ${CURRENT_SHA:0:7}"
+        # Diff between last deployed commit and current HEAD + any uncommitted changes
+        CHANGED_FILES=$(git diff --name-only "$LAST_DEPLOYED_SHA" HEAD 2>/dev/null || git ls-files -- backend/ frontend/ scripts/ run.py requirements.txt)
+        # Also include uncommitted changes on top of HEAD
+        UNCOMMITTED=$(git diff --name-only HEAD 2>/dev/null || true)
+        UNTRACKED=$(git ls-files --others --exclude-standard -- backend/ frontend/ scripts/ run.py requirements.txt 2>/dev/null || true)
+        if [ -n "$UNCOMMITTED" ] || [ -n "$UNTRACKED" ]; then
+            CHANGED_FILES=$(printf "%s\n%s\n%s" "$CHANGED_FILES" "$UNCOMMITTED" "$UNTRACKED" | sort -u)
+        fi
+    fi
 fi
 
 # Filter to only files in deployable directories
@@ -307,6 +337,12 @@ ssh "${SSH_TARGET}" bash -s -- "$NEEDS_RESTART" "$( [ -n "$REQS_CHANGED" ] && ec
 INSTALL_EOF
 
 success "Files installed on server"
+
+# ─── Record deployed commit SHA on server ────────────────────────────────────
+if [ "$DRY_RUN" = false ]; then
+    ssh "${SSH_TARGET}" "echo '${CURRENT_SHA}' > ${REMOTE_DIR}/.deploy-sha"
+    success "Recorded deploy marker: ${CURRENT_SHA:0:7}"
+fi
 
 # ─── Summary ─────────────────────────────────────────────────────────────────
 echo ""
