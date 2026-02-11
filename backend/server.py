@@ -3757,6 +3757,8 @@ async def hide_document(doc_id: str, request: Request, x_api_key: str = Header(N
     if success:
         # Invalidate caches
         _categories_cache.clear()
+        _stats_cache.clear()
+        _bootstrap_cache.clear()
         
         security_logger.log_system_event(
             "document_hidden",
@@ -3787,6 +3789,8 @@ async def unhide_document(doc_id: str, request: Request, x_api_key: str = Header
     if success:
         # Invalidate caches
         _categories_cache.clear()
+        _stats_cache.clear()
+        _bootstrap_cache.clear()
         
         security_logger.log_system_event(
             "document_unhidden",
@@ -3796,6 +3800,183 @@ async def unhide_document(doc_id: str, request: Request, x_api_key: str = Header
         return {"success": True, "message": f"Document '{doc.get('filename', doc_id)}' is now visible"}
     
     raise HTTPException(status_code=500, detail="Failed to unhide document")
+
+
+# =========================================================================
+# Bulk Document Visibility Endpoints
+# =========================================================================
+
+class BulkHideRequest(BaseModel):
+    document_ids: List[str]
+
+class BulkHideByPatternRequest(BaseModel):
+    filename_pattern: str
+
+class BulkHideByFilenamesRequest(BaseModel):
+    filenames: List[str]
+    action: str = "hide"  # "hide" or "unhide"
+
+
+@app.post("/api/admin/documents/bulk-hide")
+async def bulk_hide_documents(body: BulkHideRequest, request: Request, x_api_key: str = Header(None)):
+    """Hide multiple documents at once (requires admin authentication)"""
+    is_authorized, error = verify_admin_access(request, x_api_key)
+    if not is_authorized:
+        raise HTTPException(status_code=401, detail=error)
+    
+    if not db:
+        raise HTTPException(status_code=503, detail="Database not initialized")
+    
+    if not body.document_ids:
+        raise HTTPException(status_code=400, detail="No document IDs provided")
+    
+    if len(body.document_ids) > 1000:
+        raise HTTPException(status_code=400, detail="Maximum 1000 documents per bulk operation")
+    
+    hidden_count = db.bulk_hide_documents(body.document_ids)
+    
+    # Invalidate all caches
+    _categories_cache.clear()
+    _stats_cache.clear()
+    _bootstrap_cache.clear()
+    
+    security_logger.log_system_event(
+        "bulk_documents_hidden",
+        f"Bulk hide: {hidden_count} documents hidden out of {len(body.document_ids)} requested"
+    )
+    
+    return {
+        "success": True,
+        "hidden_count": hidden_count,
+        "requested_count": len(body.document_ids),
+        "message": f"Successfully hidden {hidden_count} document(s)"
+    }
+
+
+@app.post("/api/admin/documents/bulk-unhide")
+async def bulk_unhide_documents(body: BulkHideRequest, request: Request, x_api_key: str = Header(None)):
+    """Unhide multiple documents at once (requires admin authentication)"""
+    is_authorized, error = verify_admin_access(request, x_api_key)
+    if not is_authorized:
+        raise HTTPException(status_code=401, detail=error)
+    
+    if not db:
+        raise HTTPException(status_code=503, detail="Database not initialized")
+    
+    if not body.document_ids:
+        raise HTTPException(status_code=400, detail="No document IDs provided")
+    
+    if len(body.document_ids) > 1000:
+        raise HTTPException(status_code=400, detail="Maximum 1000 documents per bulk operation")
+    
+    unhidden_count = db.bulk_unhide_documents(body.document_ids)
+    
+    # Invalidate all caches
+    _categories_cache.clear()
+    _stats_cache.clear()
+    _bootstrap_cache.clear()
+    
+    security_logger.log_system_event(
+        "bulk_documents_unhidden",
+        f"Bulk unhide: {unhidden_count} documents unhidden out of {len(body.document_ids)} requested"
+    )
+    
+    return {
+        "success": True,
+        "unhidden_count": unhidden_count,
+        "requested_count": len(body.document_ids),
+        "message": f"Successfully unhidden {unhidden_count} document(s)"
+    }
+
+
+@app.post("/api/admin/documents/bulk-hide-by-pattern")
+async def bulk_hide_by_pattern(body: BulkHideByPatternRequest, request: Request, x_api_key: str = Header(None)):
+    """Hide all documents matching a filename pattern (requires admin authentication)"""
+    is_authorized, error = verify_admin_access(request, x_api_key)
+    if not is_authorized:
+        raise HTTPException(status_code=401, detail=error)
+    
+    if not db:
+        raise HTTPException(status_code=503, detail="Database not initialized")
+    
+    if not body.filename_pattern or not body.filename_pattern.strip():
+        raise HTTPException(status_code=400, detail="Filename pattern is required")
+    
+    # Convert user-friendly wildcard (*) to SQL LIKE pattern (%)
+    pattern = body.filename_pattern.strip().replace('*', '%')
+    # Ensure there is at least one wildcard or it's a specific filename
+    if '%' not in pattern:
+        pattern = f"%{pattern}%"
+    
+    hidden_count = db.hide_documents_by_filename_pattern(pattern)
+    
+    # Invalidate all caches
+    _categories_cache.clear()
+    _stats_cache.clear()
+    _bootstrap_cache.clear()
+    
+    security_logger.log_system_event(
+        "bulk_documents_hidden_by_pattern",
+        f"Bulk hide by pattern '{body.filename_pattern}': {hidden_count} documents hidden"
+    )
+    
+    return {
+        "success": True,
+        "hidden_count": hidden_count,
+        "pattern": body.filename_pattern,
+        "message": f"Successfully hidden {hidden_count} document(s) matching '{body.filename_pattern}'"
+    }
+
+
+@app.post("/api/admin/documents/bulk-hide-by-filenames")
+async def bulk_hide_by_filenames(body: BulkHideByFilenamesRequest, request: Request, x_api_key: str = Header(None)):
+    """Hide or unhide documents by filename list (CSV paste/upload support)"""
+    is_authorized, error = verify_admin_access(request, x_api_key)
+    if not is_authorized:
+        raise HTTPException(status_code=401, detail=error)
+    
+    if not db:
+        raise HTTPException(status_code=503, detail="Database not initialized")
+    
+    if not body.filenames:
+        raise HTTPException(status_code=400, detail="No filenames provided")
+    
+    if len(body.filenames) > 5000:
+        raise HTTPException(status_code=400, detail="Maximum 5000 filenames per bulk operation")
+    
+    if body.action not in ("hide", "unhide"):
+        raise HTTPException(status_code=400, detail="Action must be 'hide' or 'unhide'")
+    
+    if body.action == "hide":
+        result = db.bulk_hide_by_filenames(body.filenames)
+        count_key = "hidden_count"
+        event_type = "bulk_documents_hidden_by_filenames"
+    else:
+        result = db.bulk_unhide_by_filenames(body.filenames)
+        count_key = "unhidden_count"
+        event_type = "bulk_documents_unhidden_by_filenames"
+    
+    affected_count = result.get(count_key, 0)
+    
+    # Invalidate all caches
+    _categories_cache.clear()
+    _stats_cache.clear()
+    _bootstrap_cache.clear()
+    
+    security_logger.log_system_event(
+        event_type,
+        f"Bulk {body.action} by filenames: {affected_count} documents affected, "
+        f"{len(result.get('not_found', []))} not found, "
+        f"{len(body.filenames)} total submitted"
+    )
+    
+    return {
+        "success": True,
+        "action": body.action,
+        **result,
+        "submitted_count": len(body.filenames),
+        "message": f"Successfully {'hidden' if body.action == 'hide' else 'unhidden'} {affected_count} document(s)"
+    }
 
 
 @app.get("/api/admin/hidden-categories")
@@ -3847,6 +4028,8 @@ async def hide_category(category: str, request: Request, x_api_key: str = Header
     if success:
         # Invalidate caches
         _categories_cache.clear()
+        _stats_cache.clear()
+        _bootstrap_cache.clear()
         
         security_logger.log_system_event(
             "category_hidden",
@@ -3876,6 +4059,8 @@ async def unhide_category(category: str, request: Request, x_api_key: str = Head
     if success:
         # Invalidate caches
         _categories_cache.clear()
+        _stats_cache.clear()
+        _bootstrap_cache.clear()
         
         security_logger.log_system_event(
             "category_unhidden",

@@ -2819,9 +2819,481 @@ window.exportMissingDocs = exportMissingDocs;
 let hiddenDocumentsData = [];
 let categoryVisibilityData = [];
 
+// Bulk selection state
+let selectedSearchDocIds = new Set();
+let selectedHiddenDocIds = new Set();
+let lastSearchResults = [];
+
+function updateBulkActionBar() {
+    const bar = document.getElementById('visibility-bulk-actions');
+    if (!bar) return;
+    
+    const count = selectedSearchDocIds.size;
+    if (count === 0) {
+        bar.style.display = 'none';
+        return;
+    }
+    
+    // Count how many selected are hidden vs visible
+    const selectedHiddenCount = lastSearchResults.filter(d => selectedSearchDocIds.has(d.id) && d.is_hidden === 1).length;
+    const selectedVisibleCount = count - selectedHiddenCount;
+    
+    bar.style.display = 'flex';
+    bar.innerHTML = `
+        <span style="font-size: 0.85rem; font-weight: 500;">${count} selected</span>
+        <div style="display: flex; gap: var(--space-xs);">
+            ${selectedVisibleCount > 0 ? `
+                <button class="btn btn-sm btn-danger" onclick="bulkHideSelected()">
+                    <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/>
+                        <line x1="1" y1="1" x2="23" y2="23"/>
+                    </svg>
+                    Hide Selected (${selectedVisibleCount})
+                </button>
+            ` : ''}
+            ${selectedHiddenCount > 0 ? `
+                <button class="btn btn-sm" onclick="bulkUnhideSelected()">
+                    <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/>
+                        <circle cx="12" cy="12" r="3"/>
+                    </svg>
+                    Unhide Selected (${selectedHiddenCount})
+                </button>
+            ` : ''}
+        </div>
+    `;
+}
+
+function toggleSearchDocSelection(docId) {
+    if (selectedSearchDocIds.has(docId)) {
+        selectedSearchDocIds.delete(docId);
+    } else {
+        selectedSearchDocIds.add(docId);
+    }
+    updateBulkActionBar();
+    // Update checkbox visual state without re-rendering entire list
+    const cb = document.getElementById(`search-cb-${docId}`);
+    if (cb) cb.checked = selectedSearchDocIds.has(docId);
+}
+
+function toggleSelectAllSearch() {
+    const allCheckbox = document.getElementById('search-select-all');
+    if (!allCheckbox) return;
+    
+    if (allCheckbox.checked) {
+        lastSearchResults.forEach(doc => selectedSearchDocIds.add(doc.id));
+    } else {
+        lastSearchResults.forEach(doc => selectedSearchDocIds.delete(doc.id));
+    }
+    // Update individual checkboxes
+    lastSearchResults.forEach(doc => {
+        const cb = document.getElementById(`search-cb-${doc.id}`);
+        if (cb) cb.checked = selectedSearchDocIds.has(doc.id);
+    });
+    updateBulkActionBar();
+}
+
+async function bulkHideSelected() {
+    const visibleIds = lastSearchResults
+        .filter(d => selectedSearchDocIds.has(d.id) && d.is_hidden !== 1)
+        .map(d => d.id);
+    
+    if (visibleIds.length === 0) return;
+    
+    if (!confirm(`Are you sure you want to hide ${visibleIds.length} document(s)?\n\nThese documents will become inaccessible to the public.`)) {
+        return;
+    }
+    
+    try {
+        const response = await authFetch(`${window.location.origin}/api/admin/documents/bulk-hide`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ document_ids: visibleIds })
+        });
+        
+        if (!response.ok) {
+            const data = await response.json();
+            throw new Error(data.detail || 'Bulk hide failed');
+        }
+        
+        const result = await response.json();
+        selectedSearchDocIds.clear();
+        updateBulkActionBar();
+        
+        // Show result feedback
+        showBulkFeedback(`Successfully hidden ${result.hidden_count} document(s)`);
+        
+        // Refresh both lists
+        searchDocumentsForVisibility();
+        loadHiddenDocuments();
+    } catch (error) {
+        console.error('Error bulk hiding documents:', error);
+        alert('Error: ' + error.message);
+    }
+}
+
+async function bulkUnhideSelected() {
+    const hiddenIds = lastSearchResults
+        .filter(d => selectedSearchDocIds.has(d.id) && d.is_hidden === 1)
+        .map(d => d.id);
+    
+    if (hiddenIds.length === 0) return;
+    
+    if (!confirm(`Are you sure you want to unhide ${hiddenIds.length} document(s)?`)) {
+        return;
+    }
+    
+    try {
+        const response = await authFetch(`${window.location.origin}/api/admin/documents/bulk-unhide`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ document_ids: hiddenIds })
+        });
+        
+        if (!response.ok) {
+            const data = await response.json();
+            throw new Error(data.detail || 'Bulk unhide failed');
+        }
+        
+        const result = await response.json();
+        selectedSearchDocIds.clear();
+        updateBulkActionBar();
+        
+        showBulkFeedback(`Successfully unhidden ${result.unhidden_count} document(s)`);
+        
+        searchDocumentsForVisibility();
+        loadHiddenDocuments();
+    } catch (error) {
+        console.error('Error bulk unhiding documents:', error);
+        alert('Error: ' + error.message);
+    }
+}
+
+function showBulkFeedback(message) {
+    const feedbackEl = document.getElementById('visibility-bulk-feedback');
+    if (!feedbackEl) return;
+    
+    feedbackEl.textContent = message;
+    feedbackEl.style.display = 'block';
+    setTimeout(() => { feedbackEl.style.display = 'none'; }, 5000);
+}
+
+// --- Hidden Documents List with Bulk Unhide ---
+
+function updateHiddenBulkBar() {
+    const bar = document.getElementById('hidden-bulk-actions');
+    if (!bar) return;
+    
+    const count = selectedHiddenDocIds.size;
+    if (count === 0) {
+        bar.style.display = 'none';
+        return;
+    }
+    
+    bar.style.display = 'flex';
+    bar.innerHTML = `
+        <span style="font-size: 0.85rem; font-weight: 500;">${count} selected</span>
+        <button class="btn btn-sm" onclick="bulkUnhideFromHiddenList()">
+            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/>
+                <circle cx="12" cy="12" r="3"/>
+            </svg>
+            Unhide Selected (${count})
+        </button>
+    `;
+}
+
+function toggleHiddenDocSelection(docId) {
+    if (selectedHiddenDocIds.has(docId)) {
+        selectedHiddenDocIds.delete(docId);
+    } else {
+        selectedHiddenDocIds.add(docId);
+    }
+    updateHiddenBulkBar();
+    const cb = document.getElementById(`hidden-cb-${docId}`);
+    if (cb) cb.checked = selectedHiddenDocIds.has(docId);
+}
+
+function toggleSelectAllHidden() {
+    const allCheckbox = document.getElementById('hidden-select-all');
+    if (!allCheckbox) return;
+    
+    if (allCheckbox.checked) {
+        hiddenDocumentsData.forEach(doc => selectedHiddenDocIds.add(doc.id));
+    } else {
+        selectedHiddenDocIds.clear();
+    }
+    hiddenDocumentsData.forEach(doc => {
+        const cb = document.getElementById(`hidden-cb-${doc.id}`);
+        if (cb) cb.checked = selectedHiddenDocIds.has(doc.id);
+    });
+    updateHiddenBulkBar();
+}
+
+async function bulkUnhideFromHiddenList() {
+    const ids = Array.from(selectedHiddenDocIds);
+    if (ids.length === 0) return;
+    
+    if (!confirm(`Are you sure you want to unhide ${ids.length} document(s)?`)) {
+        return;
+    }
+    
+    try {
+        const response = await authFetch(`${window.location.origin}/api/admin/documents/bulk-unhide`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ document_ids: ids })
+        });
+        
+        if (!response.ok) {
+            const data = await response.json();
+            throw new Error(data.detail || 'Bulk unhide failed');
+        }
+        
+        const result = await response.json();
+        selectedHiddenDocIds.clear();
+        updateHiddenBulkBar();
+        
+        showBulkFeedback(`Successfully unhidden ${result.unhidden_count} document(s)`);
+        loadHiddenDocuments();
+        searchDocumentsForVisibility();
+    } catch (error) {
+        console.error('Error bulk unhiding documents:', error);
+        alert('Error: ' + error.message);
+    }
+}
+
+// --- Bulk Hide by Filename Pattern ---
+
+async function previewPatternHide() {
+    const input = document.getElementById('visibility-pattern-input');
+    const pattern = input ? input.value.trim() : '';
+    const resultsEl = document.getElementById('pattern-preview-results');
+    if (!resultsEl) return;
+    
+    if (!pattern) {
+        resultsEl.innerHTML = '<div style="padding: var(--space-sm); color: var(--text-muted); text-align: center; font-size: 0.85rem;">Enter a filename pattern to preview matches</div>';
+        return;
+    }
+    
+    resultsEl.innerHTML = '<div class="loading"><span class="spinner"></span>Searching...</div>';
+    
+    try {
+        // Use existing search endpoint to preview
+        const searchTerm = pattern.replace(/\*/g, '');
+        const response = await authFetch(`${window.location.origin}/api/admin/documents-visibility?search=${encodeURIComponent(searchTerm)}&limit=100`);
+        if (!response.ok) throw new Error('Preview failed');
+        const data = await response.json();
+        
+        const docs = data.documents || [];
+        const visibleDocs = docs.filter(d => d.is_hidden !== 1);
+        
+        if (docs.length === 0) {
+            resultsEl.innerHTML = '<div style="padding: var(--space-sm); color: var(--text-muted); text-align: center; font-size: 0.85rem;">No documents match this pattern</div>';
+            return;
+        }
+        
+        resultsEl.innerHTML = `
+            <div style="padding: var(--space-sm) var(--space-md); font-size: 0.85rem; color: var(--text-muted); border-bottom: 1px solid var(--border);">
+                ${docs.length} match${docs.length !== 1 ? 'es' : ''} found (${visibleDocs.length} currently visible)
+            </div>
+            <div style="max-height: 200px; overflow-y: auto;">
+                ${docs.map(doc => `
+                    <div style="padding: var(--space-xs) var(--space-md); border-bottom: 1px solid var(--border); font-size: 0.8rem; ${doc.is_hidden === 1 ? 'background: var(--danger-dim); opacity: 0.7;' : ''}">
+                        <span style="font-family: var(--font-mono);">${doc.is_hidden === 1 ? '🔒 ' : ''}${escapeHtml(doc.filename)}</span>
+                        <span style="color: var(--text-muted);"> - ${escapeHtml(doc.category || '')}</span>
+                    </div>
+                `).join('')}
+            </div>
+            ${visibleDocs.length > 0 ? `
+                <div style="padding: var(--space-sm) var(--space-md); border-top: 1px solid var(--border);">
+                    <button class="btn btn-sm btn-danger" onclick="executePatternHide()">
+                        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/>
+                            <line x1="1" y1="1" x2="23" y2="23"/>
+                        </svg>
+                        Hide All ${visibleDocs.length} Matching Document(s)
+                    </button>
+                </div>
+            ` : ''}
+        `;
+    } catch (error) {
+        console.error('Error previewing pattern:', error);
+        resultsEl.innerHTML = '<div style="padding: var(--space-sm); color: var(--danger); text-align: center; font-size: 0.85rem;">Preview failed</div>';
+    }
+}
+
+async function executePatternHide() {
+    const input = document.getElementById('visibility-pattern-input');
+    const pattern = input ? input.value.trim() : '';
+    
+    if (!pattern) return;
+    
+    if (!confirm(`Are you sure you want to hide all documents matching "${pattern}"?\n\nMatching documents will become inaccessible to the public.`)) {
+        return;
+    }
+    
+    try {
+        const response = await authFetch(`${window.location.origin}/api/admin/documents/bulk-hide-by-pattern`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ filename_pattern: pattern })
+        });
+        
+        if (!response.ok) {
+            const data = await response.json();
+            throw new Error(data.detail || 'Bulk hide by pattern failed');
+        }
+        
+        const result = await response.json();
+        showBulkFeedback(`Successfully hidden ${result.hidden_count} document(s) matching "${pattern}"`);
+        
+        // Refresh
+        previewPatternHide();
+        loadHiddenDocuments();
+        searchDocumentsForVisibility();
+    } catch (error) {
+        console.error('Error hiding by pattern:', error);
+        alert('Error: ' + error.message);
+    }
+}
+
+// --- CSV Paste / Upload Bulk Actions ---
+
+function parseCsvFilenames(text) {
+    // Split into rows by newlines first (preserves CSV column structure)
+    const rows = text.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+    const filenames = [];
+    
+    for (const row of rows) {
+        // Check if this row has commas (CSV format) or is a plain filename
+        let filename;
+        if (row.includes(',')) {
+            // CSV row: extract the first column only, ignore Category/Subcategory/DOJ URL etc.
+            filename = row.split(',')[0].trim().replace(/^["']|["']$/g, '');
+        } else if (row.includes(';')) {
+            // Semicolon-delimited: take first column
+            filename = row.split(';')[0].trim().replace(/^["']|["']$/g, '');
+        } else {
+            // Plain filename (one per line)
+            filename = row.trim().replace(/^["']|["']$/g, '');
+        }
+        
+        if (!filename) continue;
+        // Skip header rows
+        if (/^(filename|file_name|file|name|document|id)$/i.test(filename)) continue;
+        filenames.push(filename);
+    }
+    
+    return [...new Set(filenames)]; // Deduplicate
+}
+
+function handleCsvFileUpload(input) {
+    const file = input.files[0];
+    if (!file) return;
+    
+    const reader = new FileReader();
+    reader.onload = function(e) {
+        const text = e.target.result;
+        const textarea = document.getElementById('csv-bulk-textarea');
+        if (textarea) {
+            textarea.value = text;
+        }
+        updateCsvCount();
+    };
+    reader.readAsText(file);
+    // Reset input so same file can be re-selected
+    input.value = '';
+}
+
+function updateCsvCount() {
+    const textarea = document.getElementById('csv-bulk-textarea');
+    const countEl = document.getElementById('csv-bulk-count');
+    if (!textarea || !countEl) return;
+    
+    const filenames = parseCsvFilenames(textarea.value);
+    countEl.textContent = filenames.length > 0 ? `${filenames.length} filename(s) detected` : '';
+}
+
+async function executeCsvBulkAction() {
+    const textarea = document.getElementById('csv-bulk-textarea');
+    const actionSelect = document.getElementById('csv-bulk-action');
+    const resultsEl = document.getElementById('csv-bulk-results');
+    
+    if (!textarea || !actionSelect) return;
+    
+    const filenames = parseCsvFilenames(textarea.value);
+    const action = actionSelect.value;
+    
+    if (filenames.length === 0) {
+        if (resultsEl) resultsEl.innerHTML = '<div style="padding: var(--space-sm); color: var(--warning); font-size: 0.85rem;">No valid filenames found. Paste filenames one per line or comma-separated.</div>';
+        return;
+    }
+    
+    const actionLabel = action === 'hide' ? 'hide' : 'unhide';
+    if (!confirm(`Are you sure you want to ${actionLabel} ${filenames.length} document(s)?\n\nFirst few filenames:\n${filenames.slice(0, 5).join('\n')}${filenames.length > 5 ? '\n...' : ''}`)) {
+        return;
+    }
+    
+    if (resultsEl) resultsEl.innerHTML = '<div class="loading"><span class="spinner"></span>Processing...</div>';
+    
+    try {
+        const response = await authFetch(`${window.location.origin}/api/admin/documents/bulk-hide-by-filenames`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ filenames, action })
+        });
+        
+        if (!response.ok) {
+            const data = await response.json();
+            throw new Error(data.detail || `Bulk ${actionLabel} failed`);
+        }
+        
+        const result = await response.json();
+        const affectedCount = result.hidden_count || result.unhidden_count || 0;
+        const notFound = result.not_found || [];
+        const alreadyState = result.already_hidden || result.already_visible || [];
+        
+        let html = `<div style="padding: var(--space-sm); font-size: 0.85rem; border: 1px solid var(--border); border-radius: 6px; background: var(--bg-tertiary);">`;
+        html += `<div style="color: var(--success, #10b981); font-weight: 500; margin-bottom: var(--space-xs);">Successfully ${action === 'hide' ? 'hidden' : 'unhidden'} ${affectedCount} document(s)</div>`;
+        
+        if (alreadyState.length > 0) {
+            html += `<div style="color: var(--text-muted); margin-bottom: var(--space-xs);">${alreadyState.length} already ${action === 'hide' ? 'hidden' : 'visible'}</div>`;
+        }
+        
+        if (notFound.length > 0) {
+            html += `<details style="margin-top: var(--space-xs);">`;
+            html += `<summary style="color: var(--warning); cursor: pointer;">${notFound.length} filename(s) not found in database</summary>`;
+            html += `<div style="max-height: 150px; overflow-y: auto; margin-top: var(--space-xs); padding: var(--space-xs); background: var(--bg-secondary); border-radius: 4px; font-family: var(--font-mono); font-size: 0.75rem;">`;
+            html += notFound.map(f => escapeHtml(f)).join('<br>');
+            html += `</div></details>`;
+        }
+        
+        html += `</div>`;
+        if (resultsEl) resultsEl.innerHTML = html;
+        
+        showBulkFeedback(`${action === 'hide' ? 'Hidden' : 'Unhidden'} ${affectedCount} document(s) from CSV`);
+        loadHiddenDocuments();
+        searchDocumentsForVisibility();
+    } catch (error) {
+        console.error(`Error bulk ${actionLabel}:`, error);
+        if (resultsEl) resultsEl.innerHTML = `<div style="padding: var(--space-sm); color: var(--danger); font-size: 0.85rem;">Error: ${escapeHtml(error.message)}</div>`;
+    }
+}
+
+// Update count as user types in the textarea
+document.addEventListener('DOMContentLoaded', function() {
+    const textarea = document.getElementById('csv-bulk-textarea');
+    if (textarea) {
+        textarea.addEventListener('input', updateCsvCount);
+    }
+});
+
+// --- Core Load/Render Functions ---
+
 async function loadHiddenDocuments() {
     try {
-        const response = await authFetch(`${window.location.origin}/api/admin/hidden-documents?limit=100`);
+        const response = await authFetch(`${window.location.origin}/api/admin/hidden-documents?limit=500`);
         if (!response.ok) throw new Error('Failed to load hidden documents');
         const data = await response.json();
         
@@ -2830,6 +3302,12 @@ async function loadHiddenDocuments() {
         // Update count
         const countEl = document.getElementById('hidden-docs-count');
         if (countEl) countEl.textContent = data.total || 0;
+        
+        // Clear selection for docs no longer in the list
+        const currentIds = new Set(hiddenDocumentsData.map(d => d.id));
+        for (const id of selectedHiddenDocIds) {
+            if (!currentIds.has(id)) selectedHiddenDocIds.delete(id);
+        }
         
         renderHiddenDocuments();
     } catch (error) {
@@ -2853,13 +3331,21 @@ function renderHiddenDocuments() {
                 <p>No documents are currently hidden</p>
             </div>
         `;
+        updateHiddenBulkBar();
         return;
     }
     
+    const allSelected = hiddenDocumentsData.length > 0 && hiddenDocumentsData.every(d => selectedHiddenDocIds.has(d.id));
+    
     el.innerHTML = `
+        <div style="display: flex; align-items: center; gap: var(--space-sm); padding: var(--space-sm) var(--space-md); border-bottom: 1px solid var(--border); background: var(--bg-tertiary);">
+            <input type="checkbox" id="hidden-select-all" onchange="toggleSelectAllHidden()" ${allSelected ? 'checked' : ''} style="cursor: pointer;">
+            <label for="hidden-select-all" style="font-size: 0.8rem; color: var(--text-muted); cursor: pointer;">Select All (${hiddenDocumentsData.length})</label>
+        </div>
         <div style="max-height: 300px; overflow-y: auto;">
             ${hiddenDocumentsData.map(doc => `
-                <div style="display: flex; align-items: center; justify-content: space-between; padding: var(--space-sm) var(--space-md); border-bottom: 1px solid var(--border);">
+                <div style="display: flex; align-items: center; gap: var(--space-sm); padding: var(--space-sm) var(--space-md); border-bottom: 1px solid var(--border);">
+                    <input type="checkbox" id="hidden-cb-${escapeHtml(doc.id)}" onchange="toggleHiddenDocSelection('${escapeHtml(doc.id)}')" ${selectedHiddenDocIds.has(doc.id) ? 'checked' : ''} style="cursor: pointer; flex-shrink: 0;">
                     <div style="flex: 1; min-width: 0;">
                         <div style="font-family: var(--font-mono); font-size: 0.85rem; color: var(--text-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;" title="${escapeHtml(doc.filename)}">
                             ${escapeHtml(doc.filename)}
@@ -2879,6 +3365,7 @@ function renderHiddenDocuments() {
             `).join('')}
         </div>
     `;
+    updateHiddenBulkBar();
 }
 
 async function searchDocumentsForVisibility() {
@@ -2889,6 +3376,9 @@ async function searchDocumentsForVisibility() {
     if (!resultsEl) return;
     
     if (!query) {
+        lastSearchResults = [];
+        selectedSearchDocIds.clear();
+        updateBulkActionBar();
         resultsEl.innerHTML = '<div style="padding: var(--space-md); color: var(--text-muted); text-align: center;">Search for documents to manage their visibility</div>';
         return;
     }
@@ -2896,19 +3386,39 @@ async function searchDocumentsForVisibility() {
     resultsEl.innerHTML = '<div class="loading"><span class="spinner"></span>Searching...</div>';
     
     try {
-        const response = await authFetch(`${window.location.origin}/api/admin/documents-visibility?search=${encodeURIComponent(query)}&limit=50`);
+        const response = await authFetch(`${window.location.origin}/api/admin/documents-visibility?search=${encodeURIComponent(query)}&limit=200`);
         if (!response.ok) throw new Error('Search failed');
         const data = await response.json();
         
         if (!data.documents || data.documents.length === 0) {
+            lastSearchResults = [];
+            selectedSearchDocIds.clear();
+            updateBulkActionBar();
             resultsEl.innerHTML = '<div style="padding: var(--space-md); color: var(--text-muted); text-align: center;">No documents found</div>';
             return;
         }
         
-        resultsEl.innerHTML = data.documents.map(doc => {
+        lastSearchResults = data.documents;
+        
+        // Prune selection: remove IDs no longer in results
+        const resultIds = new Set(data.documents.map(d => d.id));
+        for (const id of selectedSearchDocIds) {
+            if (!resultIds.has(id)) selectedSearchDocIds.delete(id);
+        }
+        
+        const allSelected = lastSearchResults.length > 0 && lastSearchResults.every(d => selectedSearchDocIds.has(d.id));
+        
+        resultsEl.innerHTML = `
+            <div style="display: flex; align-items: center; gap: var(--space-sm); padding: var(--space-sm) var(--space-md); border-bottom: 1px solid var(--border); background: var(--bg-tertiary); position: sticky; top: 0; z-index: 1;">
+                <input type="checkbox" id="search-select-all" onchange="toggleSelectAllSearch()" ${allSelected ? 'checked' : ''} style="cursor: pointer;">
+                <label for="search-select-all" style="font-size: 0.8rem; color: var(--text-muted); cursor: pointer;">Select All (${data.documents.length})</label>
+            </div>
+        ` + data.documents.map(doc => {
             const isHidden = doc.is_hidden === 1;
+            const isSelected = selectedSearchDocIds.has(doc.id);
             return `
-                <div style="display: flex; align-items: center; justify-content: space-between; padding: var(--space-sm) var(--space-md); border-bottom: 1px solid var(--border); ${isHidden ? 'background: var(--danger-dim);' : ''}">
+                <div style="display: flex; align-items: center; gap: var(--space-sm); padding: var(--space-sm) var(--space-md); border-bottom: 1px solid var(--border); ${isHidden ? 'background: var(--danger-dim);' : ''}">
+                    <input type="checkbox" id="search-cb-${escapeHtml(doc.id)}" onchange="toggleSearchDocSelection('${escapeHtml(doc.id)}')" ${isSelected ? 'checked' : ''} style="cursor: pointer; flex-shrink: 0;">
                     <div style="flex: 1; min-width: 0;">
                         <div style="font-family: var(--font-mono); font-size: 0.85rem; color: var(--text-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;" title="${escapeHtml(doc.filename)}">
                             ${isHidden ? '🔒 ' : ''}${escapeHtml(doc.filename)}
@@ -2937,6 +3447,8 @@ async function searchDocumentsForVisibility() {
                 </div>
             `;
         }).join('');
+        
+        updateBulkActionBar();
         
     } catch (error) {
         console.error('Error searching documents:', error);
@@ -3091,6 +3603,17 @@ window.loadHiddenDocuments = loadHiddenDocuments;
 window.searchDocumentsForVisibility = searchDocumentsForVisibility;
 window.hideDocument = hideDocument;
 window.unhideDocument = unhideDocument;
+window.toggleSearchDocSelection = toggleSearchDocSelection;
+window.toggleSelectAllSearch = toggleSelectAllSearch;
+window.bulkHideSelected = bulkHideSelected;
+window.bulkUnhideSelected = bulkUnhideSelected;
+window.toggleHiddenDocSelection = toggleHiddenDocSelection;
+window.toggleSelectAllHidden = toggleSelectAllHidden;
+window.bulkUnhideFromHiddenList = bulkUnhideFromHiddenList;
+window.previewPatternHide = previewPatternHide;
+window.executePatternHide = executePatternHide;
+window.handleCsvFileUpload = handleCsvFileUpload;
+window.executeCsvBulkAction = executeCsvBulkAction;
 window.loadCategoryVisibility = loadCategoryVisibility;
 window.hideCategory = hideCategory;
 window.unhideCategory = unhideCategory;

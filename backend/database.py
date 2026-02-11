@@ -1863,6 +1863,165 @@ class Database:
             cursor = conn.execute("SELECT COUNT(*) FROM documents WHERE is_hidden = 1")
             return cursor.fetchone()[0]
     
+    def bulk_hide_documents(self, doc_ids: List[str]) -> int:
+        """Hide multiple documents from public view in a single query
+        
+        Args:
+            doc_ids: List of document IDs to hide (max 1000)
+        
+        Returns:
+            Number of documents actually updated
+        """
+        if not doc_ids:
+            return 0
+        doc_ids = doc_ids[:1000]  # Cap at 1000 for safety
+        with self.get_connection() as conn:
+            placeholders = ','.join('?' * len(doc_ids))
+            cursor = conn.execute(
+                f"UPDATE documents SET is_hidden = 1 WHERE id IN ({placeholders}) AND is_hidden = 0",
+                doc_ids
+            )
+            conn.commit()
+            return cursor.rowcount
+    
+    def bulk_unhide_documents(self, doc_ids: List[str]) -> int:
+        """Unhide multiple documents in a single query
+        
+        Args:
+            doc_ids: List of document IDs to unhide (max 1000)
+        
+        Returns:
+            Number of documents actually updated
+        """
+        if not doc_ids:
+            return 0
+        doc_ids = doc_ids[:1000]  # Cap at 1000 for safety
+        with self.get_connection() as conn:
+            placeholders = ','.join('?' * len(doc_ids))
+            cursor = conn.execute(
+                f"UPDATE documents SET is_hidden = 0 WHERE id IN ({placeholders}) AND is_hidden = 1",
+                doc_ids
+            )
+            conn.commit()
+            return cursor.rowcount
+    
+    def hide_documents_by_filename_pattern(self, pattern: str) -> int:
+        """Hide documents matching a filename pattern (SQL LIKE)
+        
+        Args:
+            pattern: SQL LIKE pattern (e.g., 'EFTA016883%')
+        
+        Returns:
+            Number of documents hidden
+        """
+        if not pattern or not pattern.strip():
+            return 0
+        with self.get_connection() as conn:
+            cursor = conn.execute(
+                "UPDATE documents SET is_hidden = 1 WHERE filename LIKE ? AND is_hidden = 0",
+                (pattern,)
+            )
+            conn.commit()
+            return cursor.rowcount
+    
+    def bulk_hide_by_filenames(self, filenames: List[str]) -> Dict[str, Any]:
+        """Hide documents by exact filename match (for CSV/bulk paste operations)
+        
+        Args:
+            filenames: List of filenames to hide (max 5000)
+        
+        Returns:
+            Dict with hidden_count, not_found filenames, and already_hidden filenames
+        """
+        if not filenames:
+            return {"hidden_count": 0, "not_found": [], "already_hidden": []}
+        filenames = filenames[:5000]  # Cap for safety
+        with self.get_connection() as conn:
+            not_found = []
+            already_hidden = []
+            to_hide_ids = []
+            
+            for fname in filenames:
+                fname = fname.strip()
+                if not fname:
+                    continue
+                cursor = conn.execute(
+                    "SELECT id, is_hidden FROM documents WHERE filename = ?",
+                    (fname,)
+                )
+                row = cursor.fetchone()
+                if not row:
+                    not_found.append(fname)
+                elif row["is_hidden"] == 1:
+                    already_hidden.append(fname)
+                else:
+                    to_hide_ids.append(row["id"])
+            
+            hidden_count = 0
+            if to_hide_ids:
+                placeholders = ','.join('?' * len(to_hide_ids))
+                cursor = conn.execute(
+                    f"UPDATE documents SET is_hidden = 1 WHERE id IN ({placeholders})",
+                    to_hide_ids
+                )
+                conn.commit()
+                hidden_count = cursor.rowcount
+            
+            return {
+                "hidden_count": hidden_count,
+                "not_found": not_found,
+                "already_hidden": already_hidden
+            }
+    
+    def bulk_unhide_by_filenames(self, filenames: List[str]) -> Dict[str, Any]:
+        """Unhide documents by exact filename match (for CSV/bulk paste operations)
+        
+        Args:
+            filenames: List of filenames to unhide (max 5000)
+        
+        Returns:
+            Dict with unhidden_count, not_found filenames, and already_visible filenames
+        """
+        if not filenames:
+            return {"unhidden_count": 0, "not_found": [], "already_visible": []}
+        filenames = filenames[:5000]
+        with self.get_connection() as conn:
+            not_found = []
+            already_visible = []
+            to_unhide_ids = []
+            
+            for fname in filenames:
+                fname = fname.strip()
+                if not fname:
+                    continue
+                cursor = conn.execute(
+                    "SELECT id, is_hidden FROM documents WHERE filename = ?",
+                    (fname,)
+                )
+                row = cursor.fetchone()
+                if not row:
+                    not_found.append(fname)
+                elif row["is_hidden"] != 1:
+                    already_visible.append(fname)
+                else:
+                    to_unhide_ids.append(row["id"])
+            
+            unhidden_count = 0
+            if to_unhide_ids:
+                placeholders = ','.join('?' * len(to_unhide_ids))
+                cursor = conn.execute(
+                    f"UPDATE documents SET is_hidden = 0 WHERE id IN ({placeholders})",
+                    to_unhide_ids
+                )
+                conn.commit()
+                unhidden_count = cursor.rowcount
+            
+            return {
+                "unhidden_count": unhidden_count,
+                "not_found": not_found,
+                "already_visible": already_visible
+            }
+    
     # =========================================================================
     # Category Visibility Methods
     # =========================================================================
