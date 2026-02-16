@@ -37,7 +37,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Crimson+Pro:wght@400;500;600&family=JetBrains+Mono:wght@400;500&family=Source+Sans+3:wght@300;400;500;600;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="/static/styles.css?v=36">
+    <link rel="stylesheet" href="/static/styles.css?v=37">
     
     <!-- Structured Data (JSON-LD) -->
     <script type="application/ld+json">
@@ -294,6 +294,11 @@
                 <div id="search-pagination" class="pagination hidden">
                     <button id="search-prev-page" class="page-btn" disabled>← Previous</button>
                     <div id="search-page-numbers" class="page-numbers"></div>
+                    <span class="go-to-page">
+                        <label for="search-page-input">Go to page</label>
+                        <input type="number" id="search-page-input" min="1" />
+                        <button type="button" id="search-go-page" class="page-btn">Go</button>
+                    </span>
                     <button id="search-next-page" class="page-btn">Next →</button>
                 </div>
             </div>
@@ -347,6 +352,11 @@
             <div class="pagination">
                 <button id="prev-page" class="page-btn" disabled>← Previous</button>
                 <span id="page-info"></span>
+                <span class="go-to-page">
+                    <label for="browse-page-input">Go to page</label>
+                    <input type="number" id="browse-page-input" min="1" />
+                    <button type="button" id="browse-go-page" class="page-btn">Go</button>
+                </span>
                 <button id="next-page" class="page-btn">Next →</button>
             </div>
         </section>
@@ -662,7 +672,7 @@
     </footer>
 
     <script src="https://www.google.com/recaptcha/api.js?render=6Lf9EDYsAAAAANDlA_xYFIM7Ylccgmc24LhZgDIr"></script>
-    <script src="/static/app.js?v=35"></script></invoke>
+    <script src="/static/app.js?v=36"></script></invoke>
 </body>
 </html>
 

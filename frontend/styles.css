@@ -1560,6 +1560,42 @@ body {
     font-size: 0.9rem;
 }
 
+.go-to-page {
+    display: flex;
+    align-items: center;
+    gap: var(--space-xs);
+}
+
+.go-to-page label {
+    color: var(--text-muted);
+    font-size: 0.875rem;
+    white-space: nowrap;
+}
+
+.go-to-page input[type="number"] {
+    width: 4em;
+    padding: var(--space-xs);
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    color: var(--text-primary);
+    font-size: 0.875rem;
+    text-align: center;
+    -moz-appearance: textfield;
+}
+
+.go-to-page input[type="number"]::-webkit-outer-spin-button,
+.go-to-page input[type="number"]::-webkit-inner-spin-button {
+    -webkit-appearance: none;
+    margin: 0;
+}
+
+.go-to-page input[type="number"]:focus {
+    outline: none;
+    border-color: var(--accent-dim);
+    box-shadow: 0 0 0 2px rgba(var(--accent-rgb, 99, 102, 241), 0.15);
+}
+
 /* Ask AI View */
 .ask-header {
     text-align: center;

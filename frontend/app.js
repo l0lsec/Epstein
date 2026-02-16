@@ -17,6 +17,7 @@ let state = {
     browseFileType: '',
     browseFilename: '',
     browseKeyword: '',
+    browseTotal: 0,
     searchSubcategory: '',
     currentDocument: null,
     // Search pagination state
@@ -193,6 +194,8 @@ function cacheElements() {
     elements.searchPrevPage = document.getElementById('search-prev-page');
     elements.searchNextPage = document.getElementById('search-next-page');
     elements.searchPageNumbers = document.getElementById('search-page-numbers');
+    elements.searchPageInput = document.getElementById('search-page-input');
+    elements.searchGoPage = document.getElementById('search-go-page');
     elements.statsGrid = document.getElementById('stats-grid');
     elements.statsDisplay = document.getElementById('stats-display');
     
@@ -207,6 +210,8 @@ function cacheElements() {
     elements.prevPage = document.getElementById('prev-page');
     elements.nextPage = document.getElementById('next-page');
     elements.pageInfo = document.getElementById('page-info');
+    elements.browsePageInput = document.getElementById('browse-page-input');
+    elements.browseGoPage = document.getElementById('browse-go-page');
     
     // Ask AI
     elements.askInput = document.getElementById('ask-input');
@@ -420,6 +425,16 @@ function setupEventListeners() {
         state.browsePage++;
         loadDocuments();
     });
+
+    // Browse go-to-page
+    if (elements.browseGoPage) {
+        elements.browseGoPage.addEventListener('click', goToBrowsePage);
+    }
+    if (elements.browsePageInput) {
+        elements.browsePageInput.addEventListener('keydown', e => {
+            if (e.key === 'Enter') { e.preventDefault(); goToBrowsePage(); }
+        });
+    }
     
     // Search pagination
     if (elements.searchPrevPage) {
@@ -434,6 +449,16 @@ function setupEventListeners() {
         elements.searchNextPage.addEventListener('click', () => {
             state.searchPage++;
             performSearchWithPagination();
+        });
+    }
+
+    // Search go-to-page
+    if (elements.searchGoPage) {
+        elements.searchGoPage.addEventListener('click', goToSearchPage);
+    }
+    if (elements.searchPageInput) {
+        elements.searchPageInput.addEventListener('keydown', e => {
+            if (e.key === 'Enter') { e.preventDefault(); goToSearchPage(); }
         });
     }
     
@@ -1467,6 +1492,11 @@ function renderSearchResults(data) {
             
             // Generate page number buttons
             renderSearchPageNumbers(totalPages);
+
+            if (elements.searchPageInput) {
+                elements.searchPageInput.max = Math.max(1, totalPages);
+                elements.searchPageInput.value = state.searchPage + 1;
+            }
         } else {
             elements.searchPagination.classList.add('hidden');
         }
@@ -1652,6 +1682,26 @@ function renderSearchPageNumbers(totalPages) {
     });
 }
 
+function goToSearchPage() {
+    const val = parseInt(elements.searchPageInput?.value, 10);
+    const totalPages = Math.max(1, Math.ceil(state.searchTotal / state.searchLimit));
+    if (isNaN(val)) return;
+    const clamped = Math.max(1, Math.min(val, totalPages));
+    if (clamped - 1 === state.searchPage) return;
+    state.searchPage = clamped - 1;
+    performSearchWithPagination();
+}
+
+function goToBrowsePage() {
+    const val = parseInt(elements.browsePageInput?.value, 10);
+    const totalPages = Math.max(1, Math.ceil(state.browseTotal / state.browseLimit));
+    if (isNaN(val)) return;
+    const clamped = Math.max(1, Math.min(val, totalPages));
+    if (clamped - 1 === state.browsePage) return;
+    state.browsePage = clamped - 1;
+    loadDocuments();
+}
+
 async function loadDocuments() {
     const offset = state.browsePage * state.browseLimit;
     const noFilters = !state.browseCategory && !state.browseSubcategory &&
@@ -1731,8 +1781,14 @@ function renderDocuments(data) {
     }
     elements.browseCount.textContent = countText;
     
+    state.browseTotal = data.total;
     const totalPages = Math.ceil(data.total / state.browseLimit);
     elements.pageInfo.textContent = `Page ${state.browsePage + 1} of ${Math.max(1, totalPages)}`;
+    
+    if (elements.browsePageInput) {
+        elements.browsePageInput.max = Math.max(1, totalPages);
+        elements.browsePageInput.value = state.browsePage + 1;
+    }
     
     elements.prevPage.disabled = state.browsePage === 0;
     // Disable next button if there are no more results to show
