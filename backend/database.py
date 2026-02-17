@@ -238,7 +238,81 @@ class Database:
             # Drop the old narrower index — the covering index supersedes it
             conn.execute("DROP INDEX IF EXISTS idx_documents_hidden_filename")
             conn.commit()
-    
+
+            # ── Telemetry events table ──
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS telemetry_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp TEXT NOT NULL,
+                    log_source TEXT NOT NULL,
+                    event_type TEXT NOT NULL,
+                    client_ip TEXT,
+                    method TEXT,
+                    path TEXT,
+                    status_code INTEGER,
+                    duration_ms REAL,
+                    severity TEXT,
+                    data TEXT
+                )
+            """)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_tel_timestamp ON telemetry_events(timestamp)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_tel_source_type ON telemetry_events(log_source, event_type)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_tel_event_type ON telemetry_events(event_type, timestamp)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_tel_ip ON telemetry_events(client_ip)")
+            conn.commit()
+
+    # ── Telemetry helpers ──
+
+    def insert_telemetry_event(self, timestamp: str, log_source: str, event_type: str,
+                                client_ip: str = None, method: str = None, path: str = None,
+                                status_code: int = None, duration_ms: float = None,
+                                severity: str = None, data: dict = None):
+        """Insert a single telemetry event."""
+        try:
+            with self.get_connection() as conn:
+                conn.execute(
+                    """INSERT INTO telemetry_events
+                       (timestamp, log_source, event_type, client_ip, method, path,
+                        status_code, duration_ms, severity, data)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (timestamp, log_source, event_type, client_ip, method, path,
+                     status_code, duration_ms, severity,
+                     json.dumps(data) if data else None)
+                )
+                conn.commit()
+        except Exception:
+            pass  # never let telemetry break the app
+
+    def insert_telemetry_batch(self, rows: list):
+        """Batch-insert telemetry rows. Each row is a tuple matching the column order."""
+        if not rows:
+            return 0
+        with self.get_connection() as conn:
+            conn.executemany(
+                """INSERT INTO telemetry_events
+                   (timestamp, log_source, event_type, client_ip, method, path,
+                    status_code, duration_ms, severity, data)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                rows
+            )
+            conn.commit()
+        return len(rows)
+
+    def query_telemetry(self, sql: str, params: tuple = ()) -> list:
+        """Run a read-only SQL query against the database and return list of dicts."""
+        with self.get_connection() as conn:
+            cursor = conn.execute(sql, params)
+            return [dict(row) for row in cursor.fetchall()]
+
+    def clear_telemetry(self, log_source: str = None):
+        """Delete telemetry rows, optionally filtered by log_source."""
+        with self.get_connection() as conn:
+            if log_source:
+                conn.execute("DELETE FROM telemetry_events WHERE log_source = ?", (log_source,))
+            else:
+                conn.execute("DELETE FROM telemetry_events")
+            conn.commit()
+
     def rebuild_fts(self, progress_callback=None):
         """Rebuild the FTS5 index to fix sync issues.
 

@@ -291,6 +291,8 @@ async function loadSearchData() {
     } catch (error) {
         console.error('Error loading search data:', error);
     }
+    loadSearchLog(1);
+    initSearchLogControls();
 }
 
 async function loadDocumentsData() {
@@ -885,6 +887,157 @@ function renderCategoryUsage(cats) {
             <span class="value">${formatNumber(count)}</span>
         </li>
     `).join('');
+}
+
+// ── Search Log (full list of individual queries) ──────────────────────
+let _searchLogPage = 1;
+let _searchLogData = null;
+let _searchLogControlsInit = false;
+
+function _getSearchLogFilters() {
+    const val = (id) => { const el = document.getElementById(id); return el ? el.value.trim() : ''; };
+    return {
+        q: val('slf-query'),
+        search_type: val('slf-type'),
+        category: val('slf-category'),
+        ip: val('slf-ip'),
+        min_results: val('slf-min-results'),
+        max_results: val('slf-max-results'),
+    };
+}
+
+function _buildSearchLogUrl(page, perPage) {
+    const f = _getSearchLogFilters();
+    let url = `${API_BASE}/search/log?page=${page}&per_page=${perPage}`;
+    if (f.q) url += `&q=${encodeURIComponent(f.q)}`;
+    if (f.search_type) url += `&search_type=${encodeURIComponent(f.search_type)}`;
+    if (f.category) url += `&category=${encodeURIComponent(f.category)}`;
+    if (f.ip) url += `&ip=${encodeURIComponent(f.ip)}`;
+    if (f.min_results) url += `&min_results=${encodeURIComponent(f.min_results)}`;
+    if (f.max_results) url += `&max_results=${encodeURIComponent(f.max_results)}`;
+    return url;
+}
+
+async function loadSearchLog(page) {
+    _searchLogPage = page || 1;
+    const body = document.getElementById('search-log-body');
+    body.innerHTML = '<tr><td colspan="6" style="padding:20px; text-align:center;"><span class="spinner"></span> Loading...</td></tr>';
+    try {
+        const url = _buildSearchLogUrl(_searchLogPage, 50);
+        const resp = await authFetch(url);
+        if (!resp.ok) throw new Error('Failed to load search log');
+        _searchLogData = await resp.json();
+        renderSearchLog(_searchLogData);
+    } catch (err) {
+        body.innerHTML = `<tr><td colspan="6" style="padding:20px; text-align:center; color:var(--text-secondary);">Error loading search log</td></tr>`;
+        console.error('Error loading search log:', err);
+    }
+}
+
+function renderSearchLog(data) {
+    const body = document.getElementById('search-log-body');
+    const info = document.getElementById('search-log-info');
+    const prevBtn = document.getElementById('search-log-prev');
+    const nextBtn = document.getElementById('search-log-next');
+
+    if (!data.searches || data.searches.length === 0) {
+        body.innerHTML = '<tr><td colspan="6" style="padding:20px; text-align:center; color:var(--text-secondary);">No search queries found</td></tr>';
+        info.textContent = '0 results';
+        prevBtn.disabled = true;
+        nextBtn.disabled = true;
+        return;
+    }
+
+    body.innerHTML = data.searches.map(s => {
+        const ts = s.timestamp ? new Date(s.timestamp) : null;
+        const timeStr = ts ? ts.toLocaleString() : '—';
+        const rc = s.result_count != null ? s.result_count : '—';
+        const rcStyle = s.result_count === 0 ? 'color:#e74c3c; font-weight:600;' : '';
+        return `<tr style="border-bottom:1px solid var(--border);">
+            <td style="padding:6px 10px; white-space:nowrap; color:var(--text-secondary);">${escapeHtml(timeStr)}</td>
+            <td style="padding:6px 10px; font-weight:500;" title="${escapeHtml(s.query || '')}">${escapeHtml(truncate(s.query || '—', 60))}</td>
+            <td style="padding:6px 10px;">${escapeHtml(s.search_type || '—')}</td>
+            <td style="padding:6px 10px; ${rcStyle}">${rc}</td>
+            <td style="padding:6px 10px;">${escapeHtml(s.category || '—')}</td>
+            <td style="padding:6px 10px; font-family:monospace; font-size:12px;">${escapeHtml(s.client_ip || '—')}</td>
+        </tr>`;
+    }).join('');
+
+    const start = (data.page - 1) * data.per_page + 1;
+    const end = Math.min(data.page * data.per_page, data.total);
+    info.textContent = `${formatNumber(start)}–${formatNumber(end)} of ${formatNumber(data.total)}`;
+    prevBtn.disabled = data.page <= 1;
+    nextBtn.disabled = data.page >= data.total_pages;
+}
+
+function initSearchLogControls() {
+    if (_searchLogControlsInit) return;
+    _searchLogControlsInit = true;
+
+    document.getElementById('search-log-prev').addEventListener('click', () => {
+        if (_searchLogPage > 1) loadSearchLog(_searchLogPage - 1);
+    });
+    document.getElementById('search-log-next').addEventListener('click', () => {
+        if (_searchLogData && _searchLogPage < _searchLogData.total_pages) loadSearchLog(_searchLogPage + 1);
+    });
+
+    let filterTimeout;
+    const debounceReload = () => {
+        clearTimeout(filterTimeout);
+        filterTimeout = setTimeout(() => loadSearchLog(1), 400);
+    };
+
+    // Text inputs: debounce on input
+    ['slf-query', 'slf-category', 'slf-ip'].forEach(id => {
+        const el = document.getElementById(id);
+        if (el) el.addEventListener('input', debounceReload);
+    });
+
+    // Number inputs: debounce on input
+    ['slf-min-results', 'slf-max-results'].forEach(id => {
+        const el = document.getElementById(id);
+        if (el) el.addEventListener('input', debounceReload);
+    });
+
+    // Dropdown: fire immediately on change
+    const typeEl = document.getElementById('slf-type');
+    if (typeEl) typeEl.addEventListener('change', () => loadSearchLog(1));
+
+    document.getElementById('search-log-export').addEventListener('click', () => {
+        exportSearchLog();
+    });
+}
+
+async function exportSearchLog() {
+    try {
+        let allRows = [];
+        let page = 1;
+        let totalPages = 1;
+        while (page <= totalPages) {
+            const url = _buildSearchLogUrl(page, 500);
+            const resp = await authFetch(url);
+            if (!resp.ok) break;
+            const d = await resp.json();
+            allRows = allRows.concat(d.searches);
+            totalPages = d.total_pages;
+            page++;
+            if (page > 200) break;
+        }
+        const header = 'Timestamp,Query,Type,Results,Category,IP';
+        const csvRows = allRows.map(s => {
+            const q = (s.query || '').replace(/"/g, '""');
+            return `"${s.timestamp || ''}","${q}","${s.search_type || ''}",${s.result_count != null ? s.result_count : ''},"${s.category || ''}","${s.client_ip || ''}"`;
+        });
+        const csv = header + '\n' + csvRows.join('\n');
+        const blob = new Blob([csv], { type: 'text/csv' });
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = `search_queries_${new Date().toISOString().slice(0,10)}.csv`;
+        a.click();
+    } catch (err) {
+        console.error('Export failed:', err);
+        alert('Export failed. Check console.');
+    }
 }
 
 function renderDocsStats(data) {

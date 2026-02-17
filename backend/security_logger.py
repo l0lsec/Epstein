@@ -692,7 +692,12 @@ class SecurityLogger:
         if self._initialized:
             return
         self._initialized = True
+        self._db = None  # set via set_database() after DB is ready
         self._setup_loggers()
+
+    def set_database(self, db):
+        """Attach a Database instance for telemetry dual-write."""
+        self._db = db
     
     def _setup_loggers(self):
         """Configure all security-related loggers"""
@@ -822,6 +827,25 @@ class SecurityLogger:
             event_type="http_request",
             **extra
         )
+
+        # Dual-write to database
+        if self._db:
+            try:
+                from datetime import datetime, timezone
+                self._db.insert_telemetry_event(
+                    timestamp=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+                    log_source="access", event_type="http_request",
+                    client_ip=client_ip, method=method, path=path,
+                    status_code=status_code, duration_ms=round(duration_ms, 2),
+                    data={"request_id": request_id,
+                          "user_agent": (user_agent[:200] if user_agent else None),
+                          "query_params": query_params, "response_size": response_size,
+                          "referer": extra.get("referer"), "session_id": extra.get("session_id"),
+                          "rate_limited": extra.get("rate_limited"),
+                          "rate_limit_pattern": extra.get("rate_limit_pattern")}
+                )
+            except Exception:
+                pass
         
         # Console output for visibility
         status_emoji = "✓" if status_code < 400 else "✗" if status_code >= 500 else "⚠"
@@ -858,6 +882,19 @@ class SecurityLogger:
             request_id=request_id,
             **details
         )
+
+        # Dual-write to database
+        if self._db:
+            try:
+                from datetime import datetime, timezone
+                self._db.insert_telemetry_event(
+                    timestamp=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+                    log_source="security", event_type=event_type,
+                    client_ip=client_ip, severity=severity,
+                    data={"message": message, "request_id": request_id, **details}
+                )
+            except Exception:
+                pass
         
         # Console output with color coding
         severity_emoji = {
@@ -975,6 +1012,20 @@ class SecurityLogger:
             request_id=request_id,
             **details
         )
+
+        # Dual-write to database
+        if self._db:
+            try:
+                from datetime import datetime, timezone
+                self._db.insert_telemetry_event(
+                    timestamp=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+                    log_source="audit", event_type="document_access",
+                    client_ip=client_ip,
+                    data={"document_id": document_id, "document_path": document_path,
+                          "action": action, "request_id": request_id, **details}
+                )
+            except Exception:
+                pass
         
         self.console_logger.info(
             f"📄 AUDIT | {action.upper()} | {client_ip} | {document_id}"
@@ -1007,6 +1058,20 @@ class SecurityLogger:
             request_id=request_id,
             **details
         )
+
+        # Dual-write to database
+        if self._db:
+            try:
+                from datetime import datetime, timezone
+                self._db.insert_telemetry_event(
+                    timestamp=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+                    log_source="audit", event_type="search_query",
+                    client_ip=client_ip,
+                    data={"query": safe_query, "search_type": search_type,
+                          "result_count": result_count, "request_id": request_id, **details}
+                )
+            except Exception:
+                pass
     
     def log_llm_query(
         self,
@@ -1030,6 +1095,20 @@ class SecurityLogger:
             request_id=request_id,
             **details
         )
+
+        # Dual-write to database
+        if self._db:
+            try:
+                from datetime import datetime, timezone
+                self._db.insert_telemetry_event(
+                    timestamp=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+                    log_source="audit", event_type="llm_query",
+                    client_ip=client_ip,
+                    data={"question": safe_question, "context_docs_count": context_docs_count,
+                          "request_id": request_id, **details}
+                )
+            except Exception:
+                pass
     
     def log_feedback_submission(
         self,
@@ -1051,6 +1130,20 @@ class SecurityLogger:
             request_id=request_id,
             **details
         )
+
+        # Dual-write to database
+        if self._db:
+            try:
+                from datetime import datetime, timezone
+                self._db.insert_telemetry_event(
+                    timestamp=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+                    log_source="audit", event_type="feedback_submission",
+                    client_ip=client_ip,
+                    data={"feedback_type": feedback_type, "feedback_id": feedback_id,
+                          "request_id": request_id, **details}
+                )
+            except Exception:
+                pass
     
     # === Error Logging ===
     
@@ -1076,6 +1169,21 @@ class SecurityLogger:
             traceback=traceback.format_exc(),
             **details
         )
+
+        # Dual-write to database
+        if self._db:
+            try:
+                from datetime import datetime, timezone
+                self._db.insert_telemetry_event(
+                    timestamp=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+                    log_source="error", event_type="application_error",
+                    client_ip=client_ip,
+                    data={"error_type": type(error).__name__, "error_message": str(error),
+                          "context": context, "request_id": request_id,
+                          "traceback": traceback.format_exc(), **details}
+                )
+            except Exception:
+                pass
         
         self.console_logger.error(f"❌ ERROR | {context} | {type(error).__name__}: {str(error)}")
     
@@ -1095,6 +1203,18 @@ class SecurityLogger:
             event_type=f"system_{event_type}",
             **details
         )
+
+        # Dual-write to database
+        if self._db:
+            try:
+                from datetime import datetime, timezone
+                self._db.insert_telemetry_event(
+                    timestamp=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+                    log_source="security", event_type=f"system_{event_type}",
+                    data={"message": message, **details}
+                )
+            except Exception:
+                pass
         
         self.console_logger.info(f"⚙️  SYSTEM | {event_type} | {message}")
     
@@ -1122,6 +1242,20 @@ class SecurityLogger:
             document_count=document_count,
             **details
         )
+
+        # Dual-write to database
+        if self._db:
+            try:
+                from datetime import datetime, timezone
+                self._db.insert_telemetry_event(
+                    timestamp=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+                    log_source="audit", event_type="index_operation",
+                    data={"operation": operation, "trigger": trigger,
+                          "duration_seconds": duration_seconds,
+                          "document_count": document_count, **details}
+                )
+            except Exception:
+                pass
 
 
 class RequestLoggingMiddleware(BaseHTTPMiddleware):

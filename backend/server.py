@@ -267,6 +267,7 @@ async def lifespan(app: FastAPI):
     # Initialize database
     if DB_PATH.exists():
         db = Database(str(DB_PATH))
+        security_logger.set_database(db)  # enable telemetry dual-write
         doc_count = db.get_stats()['total_documents']
         security_logger.log_system_event(
             "database_loaded",
@@ -1511,7 +1512,7 @@ async def search(search_request: SearchRequest, request: Request) -> dict:
         client_ip=client_ip,
         query=search_request.query,
         search_type=search_request.search_type,
-        result_count=len(results),
+        result_count=total_count,
         request_id=request_id,
         category=search_request.category,
         file_type=search_request.file_type
@@ -2335,72 +2336,16 @@ async def get_document_summary(doc_id: str, request: Request, regenerate: bool =
 LOG_DIR = BASE_PATH / "logs"
 
 
-def parse_log_file(log_path: Path, max_lines: int = 10000) -> List[dict]:
-    """Parse a JSON log file and return list of log entries"""
-    if not log_path.exists():
+def _tel(sql: str, params: tuple = ()) -> list:
+    """Shorthand: run a telemetry query against the database, return list of dicts."""
+    if not db:
         return []
-    
-    entries = []
-    try:
-        with open(log_path, 'r') as f:
-            lines = f.readlines()
-            # Get the last max_lines entries
-            for line in lines[-max_lines:]:
-                try:
-                    entry = json.loads(line.strip())
-                    entries.append(entry)
-                except json.JSONDecodeError:
-                    continue
-    except Exception:
-        pass
-    return entries
+    return db.query_telemetry(sql, params)
 
 
-def get_time_buckets(entries: List[dict], bucket_minutes: int = 5, max_buckets: int = 288) -> dict:
-    """Group log entries into time buckets for charting"""
-    from collections import defaultdict
-    
-    buckets = defaultdict(lambda: {"count": 0, "errors": 0, "avg_duration": 0, "durations": []})
-    
-    for entry in entries:
-        try:
-            timestamp = entry.get("timestamp", "")
-            if not timestamp:
-                continue
-            
-            # Parse ISO timestamp
-            dt = datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
-            # Round to bucket
-            bucket_key = dt.replace(
-                minute=(dt.minute // bucket_minutes) * bucket_minutes,
-                second=0,
-                microsecond=0
-            ).isoformat()
-            
-            buckets[bucket_key]["count"] += 1
-            
-            if entry.get("status_code", 200) >= 400:
-                buckets[bucket_key]["errors"] += 1
-            
-            duration = entry.get("duration_ms")
-            if duration:
-                buckets[bucket_key]["durations"].append(duration)
-        except Exception:
-            continue
-    
-    # Calculate averages and sort
-    result = []
-    for key in sorted(buckets.keys())[-max_buckets:]:
-        bucket = buckets[key]
-        avg_duration = sum(bucket["durations"]) / len(bucket["durations"]) if bucket["durations"] else 0
-        result.append({
-            "time": key,
-            "requests": bucket["count"],
-            "errors": bucket["errors"],
-            "avg_duration_ms": round(avg_duration, 2)
-        })
-    
-    return result
+def _json_val(col: str, key: str) -> str:
+    """Build a json_extract expression for the data column."""
+    return f"json_extract({col}, '$.{key}')"
 
 
 @app.get("/admin")
@@ -2505,69 +2450,43 @@ async def admin_verify(request: Request, x_api_key: str = Header(None)):
 @app.get("/api/admin/telemetry/overview")
 async def get_telemetry_overview(request: Request, x_api_key: str = Header(None)):
     """Get overview telemetry statistics (requires admin authentication)"""
-    # Verify admin access
     is_authorized, error = verify_admin_access(request, x_api_key)
     if not is_authorized:
         raise HTTPException(status_code=401, detail=error)
-    
-    # Parse access logs
-    access_entries = parse_log_file(LOG_DIR / "access.log", max_lines=50000)
-    security_entries = parse_log_file(LOG_DIR / "security.log", max_lines=10000)
-    audit_entries = parse_log_file(LOG_DIR / "audit.log", max_lines=10000)
-    error_entries = parse_log_file(LOG_DIR / "error.log", max_lines=1000)
-    
-    # Calculate time periods
+
     now = datetime.utcnow()
     hour_ago = (now - timedelta(hours=1)).isoformat()
     day_ago = (now - timedelta(days=1)).isoformat()
-    
-    # Filter entries by time
-    last_hour = [e for e in access_entries if e.get("timestamp", "") >= hour_ago]
-    last_day = [e for e in access_entries if e.get("timestamp", "") >= day_ago]
-    
-    # Calculate metrics
-    total_requests = len(access_entries)
-    requests_last_hour = len(last_hour)
-    requests_last_day = len(last_day)
-    
-    # Status code breakdown
-    status_codes = {}
-    for entry in access_entries:
-        code = str(entry.get("status_code", "unknown"))
-        status_codes[code] = status_codes.get(code, 0) + 1
-    
-    # Error rate
-    errors = sum(1 for e in access_entries if e.get("status_code", 200) >= 400)
-    error_rate = (errors / total_requests * 100) if total_requests > 0 else 0
-    
-    # Average response time
-    durations = [e.get("duration_ms", 0) for e in access_entries if e.get("duration_ms")]
-    avg_duration = sum(durations) / len(durations) if durations else 0
-    
-    # Unique IPs
-    unique_ips = len(set(e.get("client_ip", "") for e in access_entries))
-    unique_ips_hour = len(set(e.get("client_ip", "") for e in last_hour))
-    
-    # Top endpoints
-    endpoint_counts = {}
-    for entry in access_entries:
-        path = entry.get("path", "")
-        endpoint_counts[path] = endpoint_counts.get(path, 0) + 1
-    top_endpoints = sorted(endpoint_counts.items(), key=lambda x: x[1], reverse=True)[:10]
-    
-    # Security events count
-    security_events = len(security_entries)
-    security_high = len([e for e in security_entries if e.get("severity") in ["high", "critical"]])
-    
-    # Rate limited requests
-    rate_limited = len([e for e in access_entries if e.get("rate_limited")])
-    
-    # Get session stats from security logger
+
+    r = lambda sql, p=(): (_tel(sql, p) or [{}])[0]
+
+    total_requests = r("SELECT COUNT(*) AS c FROM telemetry_events WHERE log_source='access'").get("c", 0)
+    requests_last_hour = r("SELECT COUNT(*) AS c FROM telemetry_events WHERE log_source='access' AND timestamp>=?", (hour_ago,)).get("c", 0)
+    requests_last_day = r("SELECT COUNT(*) AS c FROM telemetry_events WHERE log_source='access' AND timestamp>=?", (day_ago,)).get("c", 0)
+
+    avg_row = r("SELECT AVG(duration_ms) AS a FROM telemetry_events WHERE log_source='access' AND duration_ms IS NOT NULL")
+    avg_duration = avg_row.get("a") or 0
+
+    err_count = r("SELECT COUNT(*) AS c FROM telemetry_events WHERE log_source='access' AND status_code>=400").get("c", 0)
+    error_rate = (err_count / total_requests * 100) if total_requests > 0 else 0
+
+    unique_ips = r("SELECT COUNT(DISTINCT client_ip) AS c FROM telemetry_events WHERE log_source='access'").get("c", 0)
+    unique_ips_hour = r("SELECT COUNT(DISTINCT client_ip) AS c FROM telemetry_events WHERE log_source='access' AND timestamp>=?", (hour_ago,)).get("c", 0)
+
+    status_rows = _tel("SELECT CAST(status_code AS TEXT) AS code, COUNT(*) AS c FROM telemetry_events WHERE log_source='access' GROUP BY status_code")
+    status_codes = {row["code"]: row["c"] for row in status_rows}
+
+    top_ep = _tel("SELECT path, COUNT(*) AS c FROM telemetry_events WHERE log_source='access' AND path IS NOT NULL GROUP BY path ORDER BY c DESC LIMIT 10")
+
+    sec_total = r("SELECT COUNT(*) AS c FROM telemetry_events WHERE log_source='security'").get("c", 0)
+    sec_high = r("SELECT COUNT(*) AS c FROM telemetry_events WHERE log_source='security' AND severity IN ('high','critical')").get("c", 0)
+
+    rate_limited = r(f"SELECT COUNT(*) AS c FROM telemetry_events WHERE log_source='access' AND {_json_val('data','rate_limited')} IS NOT NULL").get("c", 0)
+    error_count = r("SELECT COUNT(*) AS c FROM telemetry_events WHERE log_source='error'").get("c", 0)
+
     from security_logger import get_session_stats, get_blocked_ips, get_blocked_sessions
     session_stats = get_session_stats()
-    blocked_ips_count = len(get_blocked_ips())
-    blocked_sessions_count = len(get_blocked_sessions())
-    
+
     return {
         "generated_at": now.isoformat(),
         "overview": {
@@ -2578,17 +2497,17 @@ async def get_telemetry_overview(request: Request, x_api_key: str = Header(None)
             "error_rate_percent": round(error_rate, 2),
             "unique_visitors": unique_ips,
             "unique_visitors_hour": unique_ips_hour,
-            "security_events": security_events,
-            "security_events_high": security_high,
+            "security_events": sec_total,
+            "security_events_high": sec_high,
             "rate_limited_requests": rate_limited,
-            "error_count": len(error_entries)
+            "error_count": error_count
         },
         "status_codes": status_codes,
-        "top_endpoints": [{"path": p, "count": c} for p, c in top_endpoints],
+        "top_endpoints": [{"path": row["path"], "count": row["c"]} for row in top_ep],
         "sessions": {
             "active_sessions": session_stats.get("active_sessions", 0),
-            "blocked_sessions": blocked_sessions_count,
-            "blocked_ips": blocked_ips_count
+            "blocked_sessions": len(get_blocked_sessions()),
+            "blocked_ips": len(get_blocked_ips())
         }
     }
 
@@ -2596,80 +2515,68 @@ async def get_telemetry_overview(request: Request, x_api_key: str = Header(None)
 @app.get("/api/admin/telemetry/requests")
 async def get_request_telemetry(
     request: Request,
-    timeframe: str = "1h",  # 1h, 6h, 24h, 7d
+    timeframe: str = "1h",
     x_api_key: str = Header(None)
 ):
     """Get request telemetry with time series data (requires admin authentication)"""
     is_authorized, error = verify_admin_access(request, x_api_key)
     if not is_authorized:
         raise HTTPException(status_code=401, detail=error)
-    
-    # Parse access logs
-    access_entries = parse_log_file(LOG_DIR / "access.log", max_lines=100000)
-    
+
     now = datetime.utcnow()
-    
-    # Determine time filter
-    if timeframe == "1h":
-        cutoff = (now - timedelta(hours=1)).isoformat()
-        bucket_minutes = 1
-    elif timeframe == "6h":
-        cutoff = (now - timedelta(hours=6)).isoformat()
-        bucket_minutes = 5
-    elif timeframe == "24h":
-        cutoff = (now - timedelta(hours=24)).isoformat()
-        bucket_minutes = 15
-    elif timeframe == "7d":
-        cutoff = (now - timedelta(days=7)).isoformat()
-        bucket_minutes = 60
-    else:
-        cutoff = (now - timedelta(hours=1)).isoformat()
-        bucket_minutes = 1
-    
-    filtered = [e for e in access_entries if e.get("timestamp", "") >= cutoff]
-    
-    # Get time series
-    time_series = get_time_buckets(filtered, bucket_minutes=bucket_minutes)
-    
+    tf_map = {"1h": (1, 1), "6h": (6, 5), "24h": (24, 15), "7d": (168, 60)}
+    hours, bucket_min = tf_map.get(timeframe, (1, 1))
+    cutoff = (now - timedelta(hours=hours)).isoformat()
+
+    total_row = _tel("SELECT COUNT(*) AS c FROM telemetry_events WHERE log_source='access' AND timestamp>=?", (cutoff,))
+    total = total_row[0]["c"] if total_row else 0
+
+    # Time series buckets via SQL
+    fmt = f"strftime('%Y-%m-%dT%H:', timestamp) || printf('%02d', (CAST(strftime('%M', timestamp) AS INTEGER) / {bucket_min}) * {bucket_min}) || ':00'"
+    ts_rows = _tel(
+        f"SELECT {fmt} AS bucket, COUNT(*) AS requests, "
+        f"SUM(CASE WHEN status_code>=400 THEN 1 ELSE 0 END) AS errors, "
+        f"AVG(duration_ms) AS avg_dur "
+        f"FROM telemetry_events WHERE log_source='access' AND timestamp>=? "
+        f"GROUP BY bucket ORDER BY bucket", (cutoff,))
+    time_series = [{"time": r["bucket"], "requests": r["requests"], "errors": r["errors"],
+                     "avg_duration_ms": round(r["avg_dur"] or 0, 2)} for r in ts_rows]
+
     # Method breakdown
-    methods = {}
-    for entry in filtered:
-        method = entry.get("method", "UNKNOWN")
-        methods[method] = methods.get(method, 0) + 1
-    
+    method_rows = _tel("SELECT method, COUNT(*) AS c FROM telemetry_events WHERE log_source='access' AND timestamp>=? GROUP BY method", (cutoff,))
+    methods = {r["method"] or "UNKNOWN": r["c"] for r in method_rows}
+
     # Response time distribution
-    durations = [e.get("duration_ms", 0) for e in filtered if e.get("duration_ms")]
-    duration_buckets = {
-        "0-50ms": len([d for d in durations if d < 50]),
-        "50-100ms": len([d for d in durations if 50 <= d < 100]),
-        "100-500ms": len([d for d in durations if 100 <= d < 500]),
-        "500ms-1s": len([d for d in durations if 500 <= d < 1000]),
-        "1s-5s": len([d for d in durations if 1000 <= d < 5000]),
-        "5s+": len([d for d in durations if d >= 5000])
-    }
-    
-    # Get recent requests with details (last 50)
-    recent_requests = []
-    for entry in filtered[-50:]:
-        recent_requests.append({
-            "timestamp": entry.get("timestamp"),
-            "client_ip": entry.get("client_ip", "unknown"),
-            "path": entry.get("path", ""),
-            "method": entry.get("method", ""),
-            "status_code": entry.get("status_code"),
-            "user_agent": entry.get("user_agent", "")[:150],
-            "duration_ms": entry.get("duration_ms")
-        })
-    recent_requests.reverse()  # Most recent first
-    
-    # Enrich with geolocation data
+    dur_rows = _tel(
+        "SELECT "
+        "SUM(CASE WHEN duration_ms<50 THEN 1 ELSE 0 END) AS d0, "
+        "SUM(CASE WHEN duration_ms>=50 AND duration_ms<100 THEN 1 ELSE 0 END) AS d1, "
+        "SUM(CASE WHEN duration_ms>=100 AND duration_ms<500 THEN 1 ELSE 0 END) AS d2, "
+        "SUM(CASE WHEN duration_ms>=500 AND duration_ms<1000 THEN 1 ELSE 0 END) AS d3, "
+        "SUM(CASE WHEN duration_ms>=1000 AND duration_ms<5000 THEN 1 ELSE 0 END) AS d4, "
+        "SUM(CASE WHEN duration_ms>=5000 THEN 1 ELSE 0 END) AS d5 "
+        "FROM telemetry_events WHERE log_source='access' AND timestamp>=? AND duration_ms IS NOT NULL", (cutoff,))
+    d = dur_rows[0] if dur_rows else {}
+    duration_buckets = {"0-50ms": d.get("d0") or 0, "50-100ms": d.get("d1") or 0,
+                        "100-500ms": d.get("d2") or 0, "500ms-1s": d.get("d3") or 0,
+                        "1s-5s": d.get("d4") or 0, "5s+": d.get("d5") or 0}
+
+    # Recent 50 requests
+    recent_rows = _tel(
+        f"SELECT timestamp, client_ip, path, method, status_code, duration_ms, "
+        f"{_json_val('data','user_agent')} AS user_agent "
+        f"FROM telemetry_events WHERE log_source='access' AND timestamp>=? "
+        f"ORDER BY timestamp DESC LIMIT 50", (cutoff,))
+    recent_requests = [{"timestamp": r["timestamp"], "client_ip": r["client_ip"] or "unknown",
+                         "path": r["path"] or "", "method": r["method"] or "",
+                         "status_code": r["status_code"], "duration_ms": r["duration_ms"],
+                         "user_agent": (r["user_agent"] or "")[:150]} for r in recent_rows]
+
     await enrich_with_geo(recent_requests, 'client_ip', limit=30)
-    
+
     return {
-        "timeframe": timeframe,
-        "total_requests": len(filtered),
-        "time_series": time_series,
-        "methods": methods,
+        "timeframe": timeframe, "total_requests": total,
+        "time_series": time_series, "methods": methods,
         "response_time_distribution": duration_buckets,
         "recent_requests": recent_requests
     }
@@ -2681,53 +2588,113 @@ async def get_search_telemetry(request: Request, x_api_key: str = Header(None)):
     is_authorized, error = verify_admin_access(request, x_api_key)
     if not is_authorized:
         raise HTTPException(status_code=401, detail=error)
-    
-    audit_entries = parse_log_file(LOG_DIR / "audit.log", max_lines=50000)
-    
-    # Filter search queries
-    search_entries = [e for e in audit_entries if e.get("event_type") == "search_query"]
-    
-    # Search type breakdown
-    search_types = {}
-    for entry in search_entries:
-        st = entry.get("search_type", "unknown")
-        search_types[st] = search_types.get(st, 0) + 1
-    
-    # Top search queries
-    query_counts = {}
-    for entry in search_entries:
-        query = entry.get("query", "")[:100]  # Truncate
-        if query:
-            query_counts[query] = query_counts.get(query, 0) + 1
-    top_queries = sorted(query_counts.items(), key=lambda x: x[1], reverse=True)[:20]
-    
-    # Category filter usage
-    category_usage = {}
-    for entry in search_entries:
-        cat = entry.get("category")
-        if cat:
-            category_usage[cat] = category_usage.get(cat, 0) + 1
-    
-    # File type filter usage
-    file_type_usage = {}
-    for entry in search_entries:
-        ft = entry.get("file_type")
-        if ft:
-            file_type_usage[ft] = file_type_usage.get(ft, 0) + 1
-    
-    # Results statistics
-    result_counts = [e.get("result_count", 0) for e in search_entries]
-    avg_results = sum(result_counts) / len(result_counts) if result_counts else 0
-    zero_result_searches = len([r for r in result_counts if r == 0])
-    
+
+    jv = lambda k: _json_val('data', k)
+
+    total_row = _tel("SELECT COUNT(*) AS c FROM telemetry_events WHERE event_type='search_query'")
+    total = total_row[0]["c"] if total_row else 0
+
+    st_rows = _tel(f"SELECT {jv('search_type')} AS st, COUNT(*) AS c FROM telemetry_events WHERE event_type='search_query' GROUP BY st")
+    search_types = {r["st"] or "unknown": r["c"] for r in st_rows}
+
+    tq_rows = _tel(f"SELECT SUBSTR({jv('query')},1,100) AS q, COUNT(*) AS c FROM telemetry_events WHERE event_type='search_query' AND {jv('query')} IS NOT NULL GROUP BY q ORDER BY c DESC LIMIT 20")
+    top_queries = [{"query": r["q"], "count": r["c"]} for r in tq_rows]
+
+    cat_rows = _tel(f"SELECT {jv('category')} AS cat, COUNT(*) AS c FROM telemetry_events WHERE event_type='search_query' AND {jv('category')} IS NOT NULL GROUP BY cat")
+    category_usage = {r["cat"]: r["c"] for r in cat_rows}
+
+    ft_rows = _tel(f"SELECT {jv('file_type')} AS ft, COUNT(*) AS c FROM telemetry_events WHERE event_type='search_query' AND {jv('file_type')} IS NOT NULL GROUP BY ft")
+    file_type_usage = {r["ft"]: r["c"] for r in ft_rows}
+
+    avg_row = _tel(f"SELECT AVG(CAST({jv('result_count')} AS REAL)) AS a, SUM(CASE WHEN CAST({jv('result_count')} AS INTEGER)=0 THEN 1 ELSE 0 END) AS z FROM telemetry_events WHERE event_type='search_query'")
+    a = avg_row[0] if avg_row else {}
+
     return {
-        "total_searches": len(search_entries),
+        "total_searches": total,
         "search_types": search_types,
-        "top_queries": [{"query": q, "count": c} for q, c in top_queries],
+        "top_queries": top_queries,
         "category_usage": category_usage,
         "file_type_usage": file_type_usage,
-        "avg_results_per_search": round(avg_results, 2),
-        "zero_result_searches": zero_result_searches
+        "avg_results_per_search": round(a.get("a") or 0, 2),
+        "zero_result_searches": a.get("z") or 0
+    }
+
+
+@app.get("/api/admin/telemetry/search/log")
+async def get_search_log(
+    request: Request,
+    x_api_key: str = Header(None),
+    page: int = Query(1, ge=1),
+    per_page: int = Query(50, ge=1, le=500),
+    q: str = Query(None, description="Filter by query text"),
+    search_type: str = Query(None, description="Exact match on search type"),
+    category: str = Query(None, description="Exact match on category"),
+    ip: str = Query(None, description="Partial match on client IP"),
+    min_results: int = Query(None, description="Minimum result count"),
+    max_results: int = Query(None, description="Maximum result count"),
+):
+    """Get paginated list of individual search queries (requires admin authentication)"""
+    is_authorized, error = verify_admin_access(request, x_api_key)
+    if not is_authorized:
+        raise HTTPException(status_code=401, detail=error)
+
+    jv = lambda k: _json_val('data', k)
+    offset = (page - 1) * per_page
+
+    where = "event_type='search_query'"
+    params: list = []
+    if q:
+        where += f" AND {jv('query')} LIKE ?"
+        params.append(f"%{q}%")
+    if search_type:
+        where += f" AND {jv('search_type')} = ?"
+        params.append(search_type)
+    if category:
+        where += f" AND {jv('category')} = ?"
+        params.append(category)
+    if ip:
+        where += " AND client_ip LIKE ?"
+        params.append(f"%{ip}%")
+    if min_results is not None:
+        where += f" AND CAST({jv('result_count')} AS INTEGER) >= ?"
+        params.append(min_results)
+    if max_results is not None:
+        where += f" AND CAST({jv('result_count')} AS INTEGER) <= ?"
+        params.append(max_results)
+
+    count_row = _tel(f"SELECT COUNT(*) AS c FROM telemetry_events WHERE {where}", tuple(params))
+    total = count_row[0]["c"] if count_row else 0
+
+    rows = _tel(
+        f"SELECT timestamp, client_ip, "
+        f"{jv('query')} AS query, "
+        f"{jv('search_type')} AS search_type, "
+        f"{jv('result_count')} AS result_count, "
+        f"{jv('category')} AS category, "
+        f"{jv('file_type')} AS file_type "
+        f"FROM telemetry_events WHERE {where} "
+        f"ORDER BY timestamp DESC LIMIT ? OFFSET ?",
+        tuple(params) + (per_page, offset)
+    )
+
+    searches = []
+    for r in rows:
+        searches.append({
+            "timestamp": r.get("timestamp"),
+            "client_ip": r.get("client_ip"),
+            "query": r.get("query"),
+            "search_type": r.get("search_type"),
+            "result_count": int(r.get("result_count") or 0),
+            "category": r.get("category"),
+            "file_type": r.get("file_type"),
+        })
+
+    return {
+        "searches": searches,
+        "total": total,
+        "page": page,
+        "per_page": per_page,
+        "total_pages": (total + per_page - 1) // per_page if per_page else 0,
     }
 
 
@@ -2737,39 +2704,28 @@ async def get_document_telemetry(request: Request, x_api_key: str = Header(None)
     is_authorized, error = verify_admin_access(request, x_api_key)
     if not is_authorized:
         raise HTTPException(status_code=401, detail=error)
-    
-    audit_entries = parse_log_file(LOG_DIR / "audit.log", max_lines=50000)
-    
-    # Filter document access
-    doc_entries = [e for e in audit_entries if e.get("event_type") == "document_access"]
-    
-    # Access type breakdown
-    access_types = {}
-    for entry in doc_entries:
-        action = entry.get("action", "unknown")
-        access_types[action] = access_types.get(action, 0) + 1
-    
-    # Top accessed documents
-    doc_counts = {}
-    for entry in doc_entries:
-        filename = entry.get("filename", "")
-        if filename:
-            doc_counts[filename] = doc_counts.get(filename, 0) + 1
-    top_docs = sorted(doc_counts.items(), key=lambda x: x[1], reverse=True)[:20]
-    
-    # File type distribution
-    file_types = {}
-    for entry in doc_entries:
-        ft = entry.get("file_type", ".pdf")
-        file_types[ft] = file_types.get(ft, 0) + 1
-    
-    # Total data served (approximate)
-    total_bytes = sum(e.get("file_size_bytes", 0) for e in doc_entries)
-    
+
+    jv = lambda k: _json_val('data', k)
+
+    total_row = _tel("SELECT COUNT(*) AS c FROM telemetry_events WHERE event_type='document_access'")
+    total = total_row[0]["c"] if total_row else 0
+
+    at_rows = _tel(f"SELECT {jv('action')} AS a, COUNT(*) AS c FROM telemetry_events WHERE event_type='document_access' GROUP BY a")
+    access_types = {r["a"] or "unknown": r["c"] for r in at_rows}
+
+    td_rows = _tel(f"SELECT {jv('filename')} AS fn, COUNT(*) AS c FROM telemetry_events WHERE event_type='document_access' AND {jv('filename')} IS NOT NULL GROUP BY fn ORDER BY c DESC LIMIT 20")
+    top_docs = [{"filename": r["fn"], "count": r["c"]} for r in td_rows]
+
+    ft_rows = _tel(f"SELECT {jv('file_type')} AS ft, COUNT(*) AS c FROM telemetry_events WHERE event_type='document_access' GROUP BY ft")
+    file_types = {(r["ft"] or ".pdf"): r["c"] for r in ft_rows}
+
+    bytes_row = _tel(f"SELECT COALESCE(SUM(CAST({jv('file_size_bytes')} AS INTEGER)),0) AS b FROM telemetry_events WHERE event_type='document_access'")
+    total_bytes = bytes_row[0]["b"] if bytes_row else 0
+
     return {
-        "total_document_accesses": len(doc_entries),
+        "total_document_accesses": total,
         "access_types": access_types,
-        "top_documents": [{"filename": f, "count": c} for f, c in top_docs],
+        "top_documents": top_docs,
         "file_types": file_types,
         "total_data_served_mb": round(total_bytes / (1024 * 1024), 2)
     }
@@ -2781,34 +2737,21 @@ async def get_ai_telemetry(request: Request, x_api_key: str = Header(None)):
     is_authorized, error = verify_admin_access(request, x_api_key)
     if not is_authorized:
         raise HTTPException(status_code=401, detail=error)
-    
-    audit_entries = parse_log_file(LOG_DIR / "audit.log", max_lines=50000)
-    
-    # Filter LLM queries
-    llm_entries = [e for e in audit_entries if e.get("event_type") == "llm_query"]
-    
-    # Summary generation
-    summary_entries = [e for e in audit_entries 
-                       if e.get("event_type") == "document_access" 
-                       and e.get("action") in ["summary_generate", "summary_cached"]]
-    
-    # Top questions
-    question_counts = {}
-    for entry in llm_entries:
-        question = entry.get("question", "")[:100]
-        if question:
-            question_counts[question] = question_counts.get(question, 0) + 1
-    top_questions = sorted(question_counts.items(), key=lambda x: x[1], reverse=True)[:15]
-    
-    # Streaming vs non-streaming
-    streaming_count = len([e for e in llm_entries if e.get("streaming")])
-    
+
+    jv = lambda k: _json_val('data', k)
+
+    llm_total = (_tel("SELECT COUNT(*) AS c FROM telemetry_events WHERE event_type='llm_query'") or [{}])[0].get("c", 0)
+    sum_total = (_tel(f"SELECT COUNT(*) AS c FROM telemetry_events WHERE event_type='document_access' AND {jv('action')} IN ('summary_generate','summary_cached')") or [{}])[0].get("c", 0)
+    streaming = (_tel(f"SELECT COUNT(*) AS c FROM telemetry_events WHERE event_type='llm_query' AND {jv('streaming')}=1") or [{}])[0].get("c", 0)
+
+    tq_rows = _tel(f"SELECT SUBSTR({jv('question')},1,100) AS q, COUNT(*) AS c FROM telemetry_events WHERE event_type='llm_query' AND {jv('question')} IS NOT NULL GROUP BY q ORDER BY c DESC LIMIT 15")
+
     return {
-        "total_ai_queries": len(llm_entries),
-        "total_summaries": len(summary_entries),
-        "streaming_queries": streaming_count,
-        "non_streaming_queries": len(llm_entries) - streaming_count,
-        "top_questions": [{"question": q, "count": c} for q, c in top_questions]
+        "total_ai_queries": llm_total,
+        "total_summaries": sum_total,
+        "streaming_queries": streaming,
+        "non_streaming_queries": llm_total - streaming,
+        "top_questions": [{"question": r["q"], "count": r["c"]} for r in tq_rows]
     }
 
 
@@ -2818,58 +2761,35 @@ async def get_security_telemetry(request: Request, x_api_key: str = Header(None)
     is_authorized, error = verify_admin_access(request, x_api_key)
     if not is_authorized:
         raise HTTPException(status_code=401, detail=error)
-    
-    security_entries = parse_log_file(LOG_DIR / "security.log", max_lines=10000)
-    
-    # Event type breakdown
-    event_types = {}
-    for entry in security_entries:
-        et = entry.get("event_type", "unknown")
-        event_types[et] = event_types.get(et, 0) + 1
-    
-    # Severity breakdown
-    severities = {}
-    for entry in security_entries:
-        sev = entry.get("severity", "unknown")
-        severities[sev] = severities.get(sev, 0) + 1
-    
-    # Recent high-severity events
-    high_severity = [
-        {
-            "timestamp": e.get("timestamp"),
-            "event_type": e.get("event_type"),
-            "message": e.get("message", "")[:200],
-            "client_ip": e.get("client_ip")
-        }
-        for e in security_entries 
-        if e.get("severity") in ["high", "critical"]
-    ][-20:]
-    
-    # Rate limit violations
-    rate_limit_events = [e for e in security_entries if e.get("event_type") == "rate_limit_exceeded"]
-    
-    # Suspicious activity
-    suspicious = [e for e in security_entries if e.get("event_type") == "suspicious_activity"]
-    
-    # IPs with most security events
-    ip_events = {}
-    for entry in security_entries:
-        ip = entry.get("client_ip")
-        if ip:
-            ip_events[ip] = ip_events.get(ip, 0) + 1
-    top_ips = sorted(ip_events.items(), key=lambda x: x[1], reverse=True)[:10]
-    
-    # Get blocked IPs and sessions
+
+    jv = lambda k: _json_val('data', k)
+
+    total = (_tel("SELECT COUNT(*) AS c FROM telemetry_events WHERE log_source='security'") or [{}])[0].get("c", 0)
+
+    et_rows = _tel("SELECT event_type, COUNT(*) AS c FROM telemetry_events WHERE log_source='security' GROUP BY event_type")
+    event_types = {r["event_type"]: r["c"] for r in et_rows}
+
+    sev_rows = _tel("SELECT severity, COUNT(*) AS c FROM telemetry_events WHERE log_source='security' GROUP BY severity")
+    severities = {(r["severity"] or "unknown"): r["c"] for r in sev_rows}
+
+    hs_rows = _tel(f"SELECT timestamp, event_type, SUBSTR({jv('message')},1,200) AS message, client_ip FROM telemetry_events WHERE log_source='security' AND severity IN ('high','critical') ORDER BY timestamp DESC LIMIT 20")
+    high_severity = [{"timestamp": r["timestamp"], "event_type": r["event_type"], "message": r["message"] or "", "client_ip": r["client_ip"]} for r in hs_rows]
+
+    rl = (_tel("SELECT COUNT(*) AS c FROM telemetry_events WHERE event_type='rate_limit_exceeded'") or [{}])[0].get("c", 0)
+    sa = (_tel("SELECT COUNT(*) AS c FROM telemetry_events WHERE event_type='suspicious_activity'") or [{}])[0].get("c", 0)
+
+    ip_rows = _tel("SELECT client_ip, COUNT(*) AS c FROM telemetry_events WHERE log_source='security' AND client_ip IS NOT NULL GROUP BY client_ip ORDER BY c DESC LIMIT 10")
+
     from security_logger import get_blocked_ips, get_blocked_sessions
-    
+
     return {
-        "total_security_events": len(security_entries),
+        "total_security_events": total,
         "event_types": event_types,
         "severities": severities,
         "recent_high_severity": high_severity,
-        "rate_limit_violations": len(rate_limit_events),
-        "suspicious_activities": len(suspicious),
-        "top_ips_by_events": [{"ip": ip, "count": c} for ip, c in top_ips],
+        "rate_limit_violations": rl,
+        "suspicious_activities": sa,
+        "top_ips_by_events": [{"ip": r["client_ip"], "count": r["c"]} for r in ip_rows],
         "blocked_ips": list(get_blocked_ips()),
         "blocked_sessions": len(get_blocked_sessions())
     }
@@ -2881,34 +2801,22 @@ async def get_error_telemetry(request: Request, x_api_key: str = Header(None)):
     is_authorized, error = verify_admin_access(request, x_api_key)
     if not is_authorized:
         raise HTTPException(status_code=401, detail=error)
-    
-    error_entries = parse_log_file(LOG_DIR / "error.log", max_lines=1000)
-    
-    # Error type breakdown
-    error_types = {}
-    for entry in error_entries:
-        et = entry.get("error_type", "unknown")
-        error_types[et] = error_types.get(et, 0) + 1
-    
-    # Context breakdown (where errors occur)
-    contexts = {}
-    for entry in error_entries:
-        ctx = entry.get("context", "unknown")
-        contexts[ctx] = contexts.get(ctx, 0) + 1
-    
-    # Recent errors
-    recent_errors = [
-        {
-            "timestamp": e.get("timestamp"),
-            "error_type": e.get("error_type"),
-            "context": e.get("context"),
-            "message": e.get("error_message", "")[:200]
-        }
-        for e in error_entries
-    ][-20:]
-    
+
+    jv = lambda k: _json_val('data', k)
+
+    total = (_tel("SELECT COUNT(*) AS c FROM telemetry_events WHERE log_source='error'") or [{}])[0].get("c", 0)
+
+    et_rows = _tel(f"SELECT {jv('error_type')} AS et, COUNT(*) AS c FROM telemetry_events WHERE log_source='error' GROUP BY et")
+    error_types = {(r["et"] or "unknown"): r["c"] for r in et_rows}
+
+    ctx_rows = _tel(f"SELECT {jv('context')} AS ctx, COUNT(*) AS c FROM telemetry_events WHERE log_source='error' GROUP BY ctx")
+    contexts = {(r["ctx"] or "unknown"): r["c"] for r in ctx_rows}
+
+    rec_rows = _tel(f"SELECT timestamp, {jv('error_type')} AS error_type, {jv('context')} AS context, SUBSTR({jv('error_message')},1,200) AS message FROM telemetry_events WHERE log_source='error' ORDER BY timestamp DESC LIMIT 20")
+    recent_errors = [{"timestamp": r["timestamp"], "error_type": r["error_type"], "context": r["context"], "message": r["message"] or ""} for r in rec_rows]
+
     return {
-        "total_errors": len(error_entries),
+        "total_errors": total,
         "error_types": error_types,
         "error_contexts": contexts,
         "recent_errors": recent_errors
@@ -2921,87 +2829,62 @@ async def get_visitor_telemetry(request: Request, x_api_key: str = Header(None))
     is_authorized, error = verify_admin_access(request, x_api_key)
     if not is_authorized:
         raise HTTPException(status_code=401, detail=error)
-    
-    access_entries = parse_log_file(LOG_DIR / "access.log", max_lines=100000)
-    
+
+    jv = lambda k: _json_val('data', k)
     now = datetime.utcnow()
     day_ago = (now - timedelta(days=1)).isoformat()
     week_ago = (now - timedelta(days=7)).isoformat()
-    
-    # Filter by time
-    last_day = [e for e in access_entries if e.get("timestamp", "") >= day_ago]
-    last_week = [e for e in access_entries if e.get("timestamp", "") >= week_ago]
-    
-    # Unique IPs per day (last 7 days)
-    from collections import defaultdict
-    daily_visitors = defaultdict(set)
-    for entry in last_week:
-        try:
-            ts = entry.get("timestamp", "")
-            if ts:
-                date = ts[:10]  # YYYY-MM-DD
-                ip = entry.get("client_ip", "")
-                if ip:
-                    daily_visitors[date].add(ip)
-        except Exception:
-            continue
-    
-    daily_unique = sorted([
-        {"date": date, "unique_visitors": len(ips)}
-        for date, ips in daily_visitors.items()
-    ], key=lambda x: x["date"])
-    
-    # User agents
+
+    uv_today = (_tel("SELECT COUNT(DISTINCT client_ip) AS c FROM telemetry_events WHERE log_source='access' AND timestamp>=?", (day_ago,)) or [{}])[0].get("c", 0)
+    uv_week = (_tel("SELECT COUNT(DISTINCT client_ip) AS c FROM telemetry_events WHERE log_source='access' AND timestamp>=?", (week_ago,)) or [{}])[0].get("c", 0)
+
+    # Daily unique visitors (last 7 days)
+    dv_rows = _tel("SELECT SUBSTR(timestamp,1,10) AS d, COUNT(DISTINCT client_ip) AS c FROM telemetry_events WHERE log_source='access' AND timestamp>=? GROUP BY d ORDER BY d", (week_ago,))
+    daily_unique = [{"date": r["d"], "unique_visitors": r["c"]} for r in dv_rows]
+
+    # Browser breakdown (user_agent is in data JSON)
+    ua_rows = _tel(f"SELECT {jv('user_agent')} AS ua FROM telemetry_events WHERE log_source='access' AND timestamp>=? AND {jv('user_agent')} IS NOT NULL", (day_ago,))
     user_agents = {}
-    for entry in last_day:
-        ua = entry.get("user_agent", "")[:100]
-        if ua:
-            # Simplify user agent
-            if "Chrome" in ua:
-                browser = "Chrome"
-            elif "Firefox" in ua:
-                browser = "Firefox"
-            elif "Safari" in ua:
-                browser = "Safari"
-            elif "curl" in ua:
-                browser = "curl/CLI"
-            elif "bot" in ua.lower() or "spider" in ua.lower():
-                browser = "Bot/Crawler"
-            else:
-                browser = "Other"
-            user_agents[browser] = user_agents.get(browser, 0) + 1
-    
+    for r in ua_rows:
+        ua = (r["ua"] or "")[:100]
+        if not ua:
+            continue
+        if "Chrome" in ua:
+            browser = "Chrome"
+        elif "Firefox" in ua:
+            browser = "Firefox"
+        elif "Safari" in ua:
+            browser = "Safari"
+        elif "curl" in ua:
+            browser = "curl/CLI"
+        elif "bot" in ua.lower() or "spider" in ua.lower():
+            browser = "Bot/Crawler"
+        else:
+            browser = "Other"
+        user_agents[browser] = user_agents.get(browser, 0) + 1
+
     # Referrers
+    ref_rows = _tel(f"SELECT {jv('referer')} AS ref FROM telemetry_events WHERE log_source='access' AND timestamp>=? AND {jv('referer')} IS NOT NULL", (day_ago,))
     referrers = {}
-    for entry in last_day:
-        ref = entry.get("referer", "")
+    for r in ref_rows:
+        ref = r["ref"] or ""
         if ref and "localhost" not in ref and "127.0.0.1" not in ref:
-            # Extract domain
             try:
                 from urllib.parse import urlparse
                 domain = urlparse(ref).netloc or "Direct"
             except Exception:
                 domain = "Direct"
             referrers[domain] = referrers.get(domain, 0) + 1
-    
     top_referrers = sorted(referrers.items(), key=lambda x: x[1], reverse=True)[:10]
-    
-    # Top IPs by request count
-    ip_counts = {}
-    for entry in last_day:
-        ip = entry.get("client_ip", "")
-        if ip and ip != "unknown":
-            ip_counts[ip] = ip_counts.get(ip, 0) + 1
-    
-    top_ips_list = sorted(ip_counts.items(), key=lambda x: x[1], reverse=True)[:20]
-    top_ips = [{"ip": ip, "client_ip": ip, "count": c} for ip, c in top_ips_list]
-    
-    # Enrich top IPs with geolocation data
+
+    # Top IPs
+    ip_rows = _tel("SELECT client_ip, COUNT(*) AS c FROM telemetry_events WHERE log_source='access' AND timestamp>=? AND client_ip IS NOT NULL AND client_ip!='unknown' GROUP BY client_ip ORDER BY c DESC LIMIT 20", (day_ago,))
+    top_ips = [{"ip": r["client_ip"], "client_ip": r["client_ip"], "count": r["c"]} for r in ip_rows]
     await enrich_with_geo(top_ips, 'client_ip', limit=20)
-    
+
     return {
-        "unique_visitors_today": len(set(e.get("client_ip", "") for e in last_day)),
-        "unique_visitors_week": len(set(e.get("client_ip", "") for e in last_week)),
+        "unique_visitors_today": uv_today,
+        "unique_visitors_week": uv_week,
         "daily_unique_visitors": daily_unique,
         "browsers": user_agents,
         "top_referrers": [{"domain": d, "count": c} for d, c in top_referrers],
@@ -3058,9 +2941,9 @@ async def get_system_telemetry(request: Request, x_api_key: str = Header(None)):
         if log_path.exists():
             log_sizes[log_file] = round(log_path.stat().st_size / (1024 * 1024), 2)  # MB
     
-    # Uptime (approximated from first log entry)
-    access_entries = parse_log_file(LOG_DIR / "access.log", max_lines=1)
-    first_request = access_entries[0].get("timestamp") if access_entries else None
+    # Uptime (approximated from first telemetry entry)
+    first_row = _tel("SELECT timestamp FROM telemetry_events WHERE log_source='access' ORDER BY timestamp ASC LIMIT 1")
+    first_request = first_row[0]["timestamp"] if first_row else None
     
     return {
         "system": system_info,
@@ -3115,6 +2998,10 @@ async def clear_logs(
     else:
         raise HTTPException(status_code=400, detail=f"Invalid log type: {log_type}. Use: access, security, audit, error, or all")
     
+    # Map log file names to DB log_source values
+    _file_to_source = {"access.log": "access", "security.log": "security",
+                        "audit.log": "audit", "error.log": "error"}
+
     for log_file in files_to_clear:
         log_path = LOG_DIR / log_file
         try:
@@ -3129,6 +3016,10 @@ async def clear_logs(
                     f.write('')
                 
                 cleared.append(log_file)
+
+            # Also clear matching DB telemetry
+            if db and log_file in _file_to_source:
+                db.clear_telemetry(_file_to_source[log_file])
                 
                 # Log the clear action (to security log, which might have just been cleared)
                 security_logger.log_security_event(
@@ -3274,56 +3165,30 @@ async def get_ai_summaries_telemetry(request: Request, x_api_key: str = Header(N
     is_authorized, error = verify_admin_access(request, x_api_key)
     if not is_authorized:
         raise HTTPException(status_code=401, detail=error)
-    
-    audit_entries = parse_log_file(LOG_DIR / "audit.log", max_lines=50000)
-    
-    # Filter for summary generation events
-    summary_entries = [
-        e for e in audit_entries 
-        if e.get("event_type") == "document_access" 
-        and e.get("action") in ["summary_generate", "summary_cached"]
-    ]
-    
-    # Group by document
-    doc_summaries = {}
-    for entry in summary_entries:
-        doc_id = entry.get("document_id", "")
-        filename = entry.get("filename", "Unknown")
-        
-        if doc_id not in doc_summaries:
-            doc_summaries[doc_id] = {
-                "document_id": doc_id,
-                "filename": filename,
-                "generated_count": 0,
-                "cached_count": 0,
-                "last_generated": None,
-                "first_generated": None
-            }
-        
-        if entry.get("action") == "summary_generate":
-            doc_summaries[doc_id]["generated_count"] += 1
-        else:
-            doc_summaries[doc_id]["cached_count"] += 1
-        
-        timestamp = entry.get("timestamp", "")
-        if timestamp:
-            if not doc_summaries[doc_id]["first_generated"] or timestamp < doc_summaries[doc_id]["first_generated"]:
-                doc_summaries[doc_id]["first_generated"] = timestamp
-            if not doc_summaries[doc_id]["last_generated"] or timestamp > doc_summaries[doc_id]["last_generated"]:
-                doc_summaries[doc_id]["last_generated"] = timestamp
-    
-    # Sort by most recently generated
-    sorted_docs = sorted(
-        doc_summaries.values(),
-        key=lambda x: x["last_generated"] or "",
-        reverse=True
-    )
-    
+
+    jv = lambda k: _json_val('data', k)
+
+    rows = _tel(
+        f"SELECT {jv('document_id')} AS doc_id, {jv('filename')} AS filename, "
+        f"SUM(CASE WHEN {jv('action')}='summary_generate' THEN 1 ELSE 0 END) AS gen_count, "
+        f"SUM(CASE WHEN {jv('action')}='summary_cached' THEN 1 ELSE 0 END) AS cache_count, "
+        f"MIN(timestamp) AS first_gen, MAX(timestamp) AS last_gen "
+        f"FROM telemetry_events WHERE event_type='document_access' "
+        f"AND {jv('action')} IN ('summary_generate','summary_cached') "
+        f"GROUP BY doc_id ORDER BY last_gen DESC LIMIT 50")
+
+    sorted_docs = [{"document_id": r["doc_id"] or "", "filename": r["filename"] or "Unknown",
+                     "generated_count": r["gen_count"], "cached_count": r["cache_count"],
+                     "first_generated": r["first_gen"], "last_generated": r["last_gen"]} for r in rows]
+
+    total_gen = sum(d["generated_count"] for d in sorted_docs)
+    total_cache = sum(d["cached_count"] for d in sorted_docs)
+
     return {
         "total_documents_with_summaries": len(sorted_docs),
-        "total_generations": sum(d["generated_count"] for d in sorted_docs),
-        "total_cache_hits": sum(d["cached_count"] for d in sorted_docs),
-        "documents": sorted_docs[:50]  # Return top 50 most recent
+        "total_generations": total_gen,
+        "total_cache_hits": total_cache,
+        "documents": sorted_docs
     }
 
 

@@ -1383,6 +1383,64 @@
                     </div>
                 </div>
             </div>
+
+            <!-- Full Search Log -->
+            <div class="card" style="margin-top: 20px;">
+                <div class="card-header" style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px;">
+                    <span class="card-title">All Search Queries</span>
+                    <button id="search-log-export" class="btn btn-secondary" style="padding:6px 12px; font-size:12px;">Export CSV</button>
+                </div>
+                <div class="card-body" style="overflow-x:auto;">
+                    <table id="search-log-table" style="width:100%; border-collapse:collapse; font-size:13px;">
+                        <thead>
+                            <tr style="border-bottom:2px solid var(--border); text-align:left;">
+                                <th style="padding:8px 10px; white-space:nowrap;">Time</th>
+                                <th style="padding:8px 10px;">Query</th>
+                                <th style="padding:8px 10px;">Type</th>
+                                <th style="padding:8px 10px;">Results</th>
+                                <th style="padding:8px 10px;">Category</th>
+                                <th style="padding:8px 10px;">IP</th>
+                            </tr>
+                            <tr style="border-bottom:1px solid var(--border);">
+                                <td style="padding:4px 6px;"></td>
+                                <td style="padding:4px 6px;">
+                                    <input type="text" id="slf-query" placeholder="Filter..." style="width:100%; padding:4px 6px; border:1px solid var(--border); border-radius:4px; background:var(--bg-secondary); color:var(--text-primary); font-size:12px;">
+                                </td>
+                                <td style="padding:4px 6px;">
+                                    <select id="slf-type" style="width:100%; padding:4px 4px; border:1px solid var(--border); border-radius:4px; background:var(--bg-secondary); color:var(--text-primary); font-size:12px;">
+                                        <option value="">All</option>
+                                        <option value="fulltext">fulltext</option>
+                                        <option value="semantic">semantic</option>
+                                        <option value="hybrid">hybrid</option>
+                                    </select>
+                                </td>
+                                <td style="padding:4px 6px;">
+                                    <div style="display:flex; gap:3px;">
+                                        <input type="number" id="slf-min-results" placeholder="Min" style="width:50%; padding:4px 4px; border:1px solid var(--border); border-radius:4px; background:var(--bg-secondary); color:var(--text-primary); font-size:12px;" min="0">
+                                        <input type="number" id="slf-max-results" placeholder="Max" style="width:50%; padding:4px 4px; border:1px solid var(--border); border-radius:4px; background:var(--bg-secondary); color:var(--text-primary); font-size:12px;" min="0">
+                                    </div>
+                                </td>
+                                <td style="padding:4px 6px;">
+                                    <input type="text" id="slf-category" placeholder="Filter..." style="width:100%; padding:4px 6px; border:1px solid var(--border); border-radius:4px; background:var(--bg-secondary); color:var(--text-primary); font-size:12px;">
+                                </td>
+                                <td style="padding:4px 6px;">
+                                    <input type="text" id="slf-ip" placeholder="Filter..." style="width:100%; padding:4px 6px; border:1px solid var(--border); border-radius:4px; background:var(--bg-secondary); color:var(--text-primary); font-size:12px;">
+                                </td>
+                            </tr>
+                        </thead>
+                        <tbody id="search-log-body">
+                            <tr><td colspan="6" class="loading" style="padding:20px; text-align:center;"><span class="spinner"></span> Loading...</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+                <div id="search-log-pagination" style="display:flex; justify-content:space-between; align-items:center; padding:12px 16px; border-top:1px solid var(--border); font-size:13px;">
+                    <span id="search-log-info" style="color:var(--text-secondary);">Loading...</span>
+                    <div style="display:flex; gap:6px;">
+                        <button id="search-log-prev" class="btn btn-secondary" style="padding:4px 12px; font-size:12px;" disabled>&laquo; Prev</button>
+                        <button id="search-log-next" class="btn btn-secondary" style="padding:4px 12px; font-size:12px;" disabled>Next &raquo;</button>
+                    </div>
+                </div>
+            </div>
         </div>
 
         <!-- Documents Tab -->
@@ -2273,7 +2331,7 @@
         </div>
     </main>
 
-    <script src="/static/admin.js?v=10"></script>
+    <script src="/static/admin.js?v=12"></script>
 </body>
 </html>
 
