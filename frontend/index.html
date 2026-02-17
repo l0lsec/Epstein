@@ -37,7 +37,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Crimson+Pro:wght@400;500;600&family=JetBrains+Mono:wght@400;500&family=Source+Sans+3:wght@300;400;500;600;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="/static/styles.css?v=37">
+    <link rel="stylesheet" href="/static/styles.css?v=39">
     
     <!-- Structured Data (JSON-LD) -->
     <script type="application/ld+json">
@@ -412,18 +412,43 @@
         <section id="about-view" class="view">
             <div class="about-content">
                 <h1>About This Archive</h1>
-                
+
+                <div class="about-section about-statement">
+                    <h2>Transparency & Integrity Statement</h2>
+                    <p>This platform exists to improve public access to documents released in connection with investigations and legal proceedings involving Jeffrey Epstein. Our goal is simple: <strong>make publicly released documents easier to search, access, and analyze — without altering the official record.</strong></p>
+                    <p>This website is not affiliated with any government agency and does not claim to be an official source. It functions solely as a structured, searchable mirror of publicly available records.</p>
+                </div>
+
                 <div class="about-section">
                     <h2>Purpose</h2>
-                    <p>This platform provides public access to Epstein Library documents related to the Jeffrey Epstein case, including court records, DOJ disclosures, flight logs, and other official documents. Our goal is to make this information searchable and accessible for researchers, journalists, and the public for easier analysis and research that will lead to more revelations and justice.</p>
+                    <p>This platform provides public access to documents related to the Jeffrey Epstein case, including court records, DOJ disclosures, flight logs, and other official documents. It exists to:</p>
+                    <ul>
+                        <li>Support research</li>
+                        <li>Improve transparency</li>
+                        <li>Enable independent analysis</li>
+                        <li>Preserve public access</li>
+                    </ul>
+                    <p>The documents speak for themselves.</p>
                 </div>
-                
+
+                <div class="about-section">
+                    <h2>Document Authenticity & Preservation</h2>
+                    <p>We adhere to the following integrity principles:</p>
+                    <ul>
+                        <li><strong>No Modifications</strong> — Documents are not edited, rewritten, summarized, or altered.</li>
+                        <li><strong>Redactions Preserved</strong> — All redactions remain exactly as released by the issuing authority.</li>
+                        <li><strong>Original Filenames Maintained</strong> — Files retain their original naming conventions whenever available.</li>
+                        <li><strong>Source Citations Provided</strong> — Each document includes a citation or reference to its original release location (e.g., court docket, DOJ release, congressional publication, or agency archive).</li>
+                        <li><strong>Release Metadata Displayed</strong> — Where possible, release batch information and dates are documented.</li>
+                    </ul>
+                </div>
+
                 <div class="about-section">
                     <h2>Document Sources</h2>
-                    <p>All documents in this archive were downloaded directly from the <strong>U.S. Department of Justice website</strong>. These materials were publicly released as part of official disclosures related to the Jeffrey Epstein case.</p>
+                    <p>All documents in this archive were downloaded directly from the <strong>U.S. Department of Justice, FBI, and Congressional Oversight Committees websites</strong>. These materials were publicly released as part of official disclosures related to the Jeffrey Epstein case.</p>
                     
                     <div class="redaction-notice">
-                        <span class="notice-icon">⚠️</span>
+                        <span class="notice-icon">&#9888;&#65039;</span>
                         <div class="notice-content">
                             <strong>Important Note on Redactions:</strong>
                             <p>The vast majority of documents in this archive are heavily redacted, with large portions of text blacked out. This makes many documents difficult or impossible to comprehend in their entirety. The redactions were applied by government agencies prior to public release. We present the documents exactly as they were released by the DOJ.</p>
@@ -434,13 +459,28 @@
                 </div>
                 
                 <div class="about-section">
-                    <h2>Technology</h2>
-                    <p>This platform uses advanced search technology including:</p>
+                    <h2>Search & Indexing</h2>
+                    <p>Government repositories often publish large document sets in static or scanned formats that are difficult to search. This archive enhances accessibility by:</p>
                     <ul>
-                        <li>Full-text search across all extracted document content</li>
+                        <li>Applying improved OCR where necessary</li>
+                        <li>Enabling full-text search across documents</li>
                         <li>Semantic AI search for finding conceptually related documents</li>
                         <li>LLM-powered Q&A for intelligent document analysis</li>
+                        <li>Standardizing indexing for consistency</li>
+                        <li>Structuring files into logical categories</li>
+                        <li>Removing broken links or inaccessible file paths</li>
                     </ul>
+                    <p>These improvements affect only discoverability — not content.</p>
+                </div>
+
+                <div class="about-section">
+                    <h2>Verification & Source Integrity</h2>
+                    <p>Users are encouraged to verify documents against the original source links provided. This archive does not create new primary material and does not reinterpret official documents. It provides an organized access layer to materials already released to the public.</p>
+                </div>
+
+                <div class="about-section">
+                    <h2>Neutrality</h2>
+                    <p>This platform does not endorse or promote any narrative, theory, or interpretation. It exists solely to make public records searchable, verifiable, and preserved exactly as released.</p>
                 </div>
                 
                 <div class="about-section creator">
@@ -476,8 +516,19 @@
                 </div>
                 
                 <div class="about-section disclaimer">
-                    <h2>Disclaimer</h2>
-                    <p>This archive contains documents from public sources. Some documents may contain redactions. The information is provided for research and transparency purposes. We make no claims about the completeness or accuracy of OCR-extracted text.</p>
+                    <h2>Limitations & Disclaimer</h2>
+                    <p>While every effort is made to maintain completeness and accuracy:</p>
+                    <ul>
+                        <li>Availability depends on what has been publicly released.</li>
+                        <li>If an official source removes or alters a document, this archive may retain the last publicly available version for record continuity.</li>
+                        <li>If discrepancies are discovered, users are encouraged to report them.</li>
+                        <li>We make no claims about the completeness or accuracy of OCR-extracted text.</li>
+                    </ul>
+                </div>
+
+                <div class="about-section about-commitment">
+                    <p class="commitment-text">Transparency requires accessibility. Accessibility requires structure. Structure requires technical implementation.</p>
+                    <p class="commitment-text"><strong>This archive is built on the principle that public records should be searchable, verifiable, and preserved exactly as released.</strong></p>
                 </div>
             </div>
         </section>
@@ -672,7 +723,7 @@
     </footer>
 
     <script src="https://www.google.com/recaptcha/api.js?render=6Lf9EDYsAAAAANDlA_xYFIM7Ylccgmc24LhZgDIr"></script>
-    <script src="/static/app.js?v=36"></script></invoke>
+    <script src="/static/app.js?v=37"></script></invoke>
 </body>
 </html>
 

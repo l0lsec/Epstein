@@ -1936,6 +1936,18 @@ body {
     color: var(--accent);
 }
 
+.about-section.about-statement {
+    padding: var(--space-lg);
+    background: linear-gradient(135deg, rgba(var(--accent-rgb, 99, 102, 241), 0.08), rgba(var(--accent-rgb, 99, 102, 241), 0.03));
+    border: 1px solid rgba(var(--accent-rgb, 99, 102, 241), 0.2);
+    border-left: 4px solid var(--accent);
+    border-radius: 8px;
+}
+
+.about-section.about-statement h2 {
+    color: var(--accent);
+}
+
 .about-section.disclaimer {
     padding: var(--space-lg);
     background: rgba(220, 38, 38, 0.1);
@@ -1945,6 +1957,28 @@ body {
 
 .about-section.disclaimer h2 {
     color: var(--danger);
+}
+
+.about-section.disclaimer ul {
+    margin-top: var(--space-sm);
+}
+
+.about-section.about-commitment {
+    text-align: center;
+    padding: var(--space-xl) var(--space-lg);
+    border-top: 1px solid var(--border);
+}
+
+.about-section.about-commitment .commitment-text {
+    color: var(--text-secondary);
+    font-size: 1.1rem;
+    line-height: 1.8;
+    margin-bottom: var(--space-sm);
+}
+
+.about-section.about-commitment .commitment-text:last-child {
+    margin-bottom: 0;
+    color: var(--text-primary);
 }
 
 /* Redaction Notice */
