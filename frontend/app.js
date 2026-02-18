@@ -41,6 +41,22 @@ const elements = {};
 document.addEventListener('DOMContentLoaded', init);
 
 async function init() {
+    // Age verification gate — block everything until user confirms 18+
+    const ageGate = document.getElementById('age-gate');
+    if (!localStorage.getItem('ageVerified')) {
+        ageGate.classList.remove('hidden');
+        document.getElementById('age-gate-confirm').addEventListener('click', () => {
+            localStorage.setItem('ageVerified', 'true');
+            ageGate.classList.add('hidden');
+            init();
+        });
+        document.getElementById('age-gate-deny').addEventListener('click', () => {
+            window.location.href = 'https://www.google.com/search?q=epsteinfta.com';
+        });
+        return;
+    }
+    ageGate.classList.add('hidden');
+
     cacheElements();
     setupEventListeners();
     

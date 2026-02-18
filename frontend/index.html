@@ -37,7 +37,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Crimson+Pro:wght@400;500;600&family=JetBrains+Mono:wght@400;500&family=Source+Sans+3:wght@300;400;500;600;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="/static/styles.css?v=39">
+    <link rel="stylesheet" href="/static/styles.css?v=40">
     
     <!-- Structured Data (JSON-LD) -->
     <script type="application/ld+json">
@@ -59,6 +59,25 @@
     </script>
 </head>
 <body>
+    <!-- Age Verification Gate -->
+    <div id="age-gate" class="age-gate">
+        <div class="age-gate-content">
+            <div class="age-gate-icon">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" width="48" height="48">
+                    <path d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126z"/>
+                    <path d="M12 15.75h.007v.008H12v-.008z"/>
+                </svg>
+            </div>
+            <h1>Content Warning</h1>
+            <p>This archive contains official government documents related to the Jeffrey Epstein case. Some materials may include descriptions of sexual abuse, exploitation, and other disturbing content.</p>
+            <p>By proceeding, you confirm that you are at least <strong>18 years of age</strong> and understand the nature of these documents.</p>
+            <div class="age-gate-actions">
+                <button id="age-gate-confirm" class="age-gate-btn confirm">I am 18 or older &mdash; Enter</button>
+                <button id="age-gate-deny" class="age-gate-btn deny">I am under 18 &mdash; Leave</button>
+            </div>
+        </div>
+    </div>
+
     <div class="noise-overlay"></div>
     
     <header class="header">
@@ -723,7 +742,7 @@
     </footer>
 
     <script src="https://www.google.com/recaptcha/api.js?render=6Lf9EDYsAAAAANDlA_xYFIM7Ylccgmc24LhZgDIr"></script>
-    <script src="/static/app.js?v=37"></script></invoke>
+    <script src="/static/app.js?v=38"></script></invoke>
 </body>
 </html>
 

@@ -3134,6 +3134,118 @@ a.modal-tab.doj-link {
     transform-origin: center;
 }
 
+/* Age Verification Gate */
+.age-gate {
+    position: fixed;
+    inset: 0;
+    z-index: 99999;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(5, 5, 8, 0.95);
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+    padding: var(--space-lg);
+}
+
+.age-gate.hidden {
+    display: none;
+}
+
+.age-gate-content {
+    max-width: 520px;
+    width: 100%;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: var(--space-2xl) var(--space-xl);
+    text-align: center;
+    box-shadow: 0 25px 60px rgba(0, 0, 0, 0.6);
+}
+
+.age-gate-icon {
+    margin-bottom: var(--space-lg);
+    color: var(--accent);
+}
+
+.age-gate-icon svg {
+    width: 48px;
+    height: 48px;
+}
+
+.age-gate-content h1 {
+    font-family: var(--font-display);
+    font-size: 1.75rem;
+    font-weight: 600;
+    color: var(--text-primary);
+    margin-bottom: var(--space-lg);
+    letter-spacing: 0.02em;
+}
+
+.age-gate-content p {
+    font-family: var(--font-body);
+    font-size: 0.95rem;
+    line-height: 1.65;
+    color: var(--text-secondary);
+    margin-bottom: var(--space-md);
+}
+
+.age-gate-content p strong {
+    color: var(--text-primary);
+}
+
+.age-gate-actions {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-sm);
+    margin-top: var(--space-xl);
+}
+
+.age-gate-btn {
+    padding: 0.85rem 1.5rem;
+    border: none;
+    border-radius: 8px;
+    font-family: var(--font-body);
+    font-size: 1rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background var(--transition-fast), transform var(--transition-fast);
+}
+
+.age-gate-btn:hover {
+    transform: translateY(-1px);
+}
+
+.age-gate-btn.confirm {
+    background: var(--accent);
+    color: #0a0b0d;
+}
+
+.age-gate-btn.confirm:hover {
+    background: #d4ab2f;
+}
+
+.age-gate-btn.deny {
+    background: transparent;
+    color: var(--text-muted);
+    border: 1px solid var(--border);
+}
+
+.age-gate-btn.deny:hover {
+    background: var(--bg-hover);
+    color: var(--text-secondary);
+}
+
+@media (max-width: 480px) {
+    .age-gate-content {
+        padding: var(--space-xl) var(--space-lg);
+    }
+
+    .age-gate-content h1 {
+        font-size: 1.4rem;
+    }
+}
+
 /* Responsive */
 @media (max-width: 768px) {
     /* Donation Banner Mobile - Below header like desktop */

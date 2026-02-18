@@ -856,7 +856,7 @@ class PDFExtractor:
         processed_count = 0
         save_interval = 500  # Save index every 500 files (more frequent for crash recovery)
         last_save_count = 0
-        file_timeout = 120  # 2 minute timeout per file
+        file_timeout = 30  # 30 second timeout per file
         
         # Prepare arguments for subprocess function
         # Convert Path to string for pickling
