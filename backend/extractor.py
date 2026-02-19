@@ -426,15 +426,22 @@ class PDFExtractor:
     
     def _load_index(self) -> Dict[str, Any]:
         """Load existing extraction index, rebuilding from files if corrupted"""
+        default = {"files": {}, "stats": {"total": 0, "processed": 0, "failed": 0}}
         if self.index_file.exists():
             try:
                 with open(self.index_file, 'r') as f:
-                    return json.load(f)
+                    idx = json.load(f)
+                # Ensure required keys exist (older indexes may lack 'stats')
+                if "files" not in idx:
+                    idx["files"] = {}
+                if "stats" not in idx:
+                    idx["stats"] = {"total": 0, "processed": 0, "failed": 0}
+                return idx
             except json.JSONDecodeError as e:
                 print(f"  ⚠ Index file corrupted: {e}")
                 print(f"  🔄 Rebuilding index from extracted files...")
                 return self._rebuild_index_from_files()
-        return {"files": {}, "stats": {"total": 0, "processed": 0, "failed": 0}}
+        return default
     
     def _rebuild_index_from_files(self) -> Dict[str, Any]:
         """Rebuild index by scanning all extracted JSON files"""
@@ -866,72 +873,80 @@ class PDFExtractor:
         print(f"  🔒 Using process isolation (max {max_workers} workers, {file_timeout}s timeout)")
         print(f"  💡 Corrupted PDFs will only crash their worker, not the entire process")
         
-        # Use ProcessPoolExecutor for crash isolation
-        # maxtasksperchild=50 restarts workers periodically to prevent memory leaks
-        with ProcessPoolExecutor(max_workers=max_workers, mp_context=multiprocessing.get_context('spawn')) as executor:
-            # Submit all jobs
-            futures = {executor.submit(_extract_pdf_subprocess, args): to_process[i] for i, args in enumerate(process_args)}
-            
-            for future in tqdm(as_completed(futures), total=len(to_process), desc="Extracting"):
-                pdf = futures[future]
-                processed_count += 1
-                
-                # Call progress callback if provided
-                if progress_callback:
+        # Use ProcessPoolExecutor for crash isolation.
+        # Submit in batches to avoid overwhelming the pool with 400K+ futures.
+        BATCH = max_workers * 50  # e.g. 400 futures at a time with 8 workers
+        pbar = tqdm(total=len(to_process), desc="Extracting")
+
+        for batch_start in range(0, len(process_args), BATCH):
+            batch_args = process_args[batch_start:batch_start + BATCH]
+            batch_pdfs = to_process[batch_start:batch_start + BATCH]
+
+            with ProcessPoolExecutor(max_workers=max_workers,
+                                     mp_context=multiprocessing.get_context('spawn')) as executor:
+                futures = {
+                    executor.submit(_extract_pdf_subprocess, args): batch_pdfs[i]
+                    for i, args in enumerate(batch_args)
+                }
+
+                for future in as_completed(futures):
+                    pdf = futures[future]
+                    processed_count += 1
+                    pbar.update(1)
+
+                    if progress_callback:
+                        try:
+                            progress_callback(processed_count, len(to_process))
+                        except:
+                            pass
+
                     try:
-                        progress_callback(processed_count, len(to_process))
-                    except:
-                        pass
-                
-                try:
-                    result = future.result(timeout=file_timeout)
-                    if result and result.get("has_content"):
-                        # Save extracted text
-                        output_file = self.extracted_dir / f"{result['id']}.json"
-                        with open(output_file, 'w') as f:
-                            json.dump(result, f)
-                        
-                        self.index["files"][result["id"]] = {
-                            "filename": result["filename"],
-                            "path": result["path"],
-                            "category": result.get("category", "Unknown"),
-                            "subcategory": result.get("subcategory", ""),
-                            "page_count": result.get("page_count", 0),
-                            "char_count": result.get("char_count", 0)
-                        }
-                        results["success"] += 1
-                    elif result and result.get("error"):
-                        # Log the error but continue
+                        result = future.result(timeout=file_timeout)
+                        if result and result.get("has_content"):
+                            output_file = self.extracted_dir / f"{result['id']}.json"
+                            with open(output_file, 'w') as f:
+                                json.dump(result, f)
+
+                            self.index["files"][result["id"]] = {
+                                "filename": result["filename"],
+                                "path": result["path"],
+                                "category": result.get("category", "Unknown"),
+                                "subcategory": result.get("subcategory", ""),
+                                "page_count": result.get("page_count", 0),
+                                "char_count": result.get("char_count", 0)
+                            }
+                            results["success"] += 1
+                        elif result and result.get("error"):
+                            results["failed"] += 1
+                        else:
+                            results["failed"] += 1
+                    except FuturesTimeoutError:
+                        print(f"\n  ⏱ Timeout ({file_timeout}s): {pdf.name}")
+                        self._save_failed_file(pdf, f"Timeout after {file_timeout}s")
                         results["failed"] += 1
-                    else:
+                    except multiprocessing.TimeoutError:
+                        print(f"\n  ⏱ Timeout ({file_timeout}s): {pdf.name}")
+                        self._save_failed_file(pdf, f"Timeout after {file_timeout}s")
                         results["failed"] += 1
-                except FuturesTimeoutError:
-                    print(f"\n  ⏱ Timeout ({file_timeout}s): {pdf.name}")
-                    self._save_failed_file(pdf, f"Timeout after {file_timeout}s")
-                    results["failed"] += 1
-                except multiprocessing.TimeoutError:
-                    print(f"\n  ⏱ Timeout ({file_timeout}s): {pdf.name}")
-                    self._save_failed_file(pdf, f"Timeout after {file_timeout}s")
-                    results["failed"] += 1
-                except Exception as e:
-                    # This catches BrokenProcessPool and other subprocess errors
-                    error_msg = str(e)
-                    if "BrokenProcessPool" in error_msg or "segmentation" in error_msg.lower():
-                        print(f"\n  💥 Worker crashed on {pdf.name} (corrupted PDF?)")
-                        self._save_failed_file(pdf, "Worker crashed (likely corrupted PDF)")
-                    else:
-                        print(f"\n  ✗ Error processing {pdf.name}: {e}")
-                        self._save_failed_file(pdf, error_msg)
-                    results["failed"] += 1
-                
-                # Periodically save index to prevent progress loss on crash
-                if processed_count - last_save_count >= save_interval:
-                    self.index["stats"]["total"] = len(pdfs)
-                    self.index["stats"]["processed"] = results["success"] + results["skipped"]
-                    self.index["stats"]["failed"] = results["failed"]
-                    self._save_index()
-                    last_save_count = processed_count
-                    print(f"\n  💾 Checkpoint saved ({processed_count:,} files processed)")
+                    except Exception as e:
+                        error_msg = str(e)
+                        if "BrokenProcessPool" in error_msg or "segmentation" in error_msg.lower():
+                            print(f"\n  💥 Worker crashed on {pdf.name} (corrupted PDF?)")
+                            self._save_failed_file(pdf, "Worker crashed (likely corrupted PDF)")
+                        else:
+                            print(f"\n  ✗ Error processing {pdf.name}: {e}")
+                            self._save_failed_file(pdf, error_msg)
+                        results["failed"] += 1
+
+                    if processed_count - last_save_count >= save_interval:
+                        self.index["stats"]["total"] = len(pdfs)
+                        self.index["stats"]["processed"] = results["success"] + results["skipped"]
+                        self.index["stats"]["failed"] = results["failed"]
+                        self._save_index()
+                        last_save_count = processed_count
+                        print(f"\n  💾 Checkpoint saved ({processed_count:,} files processed)")
+
+        pbar.close()
         
         # Final save
         self.index["stats"]["total"] = len(pdfs)
@@ -976,7 +991,12 @@ class ImageExtractor:
         """Load existing extraction index"""
         if self.index_file.exists():
             with open(self.index_file, 'r') as f:
-                return json.load(f)
+                idx = json.load(f)
+            if "files" not in idx:
+                idx["files"] = {}
+            if "stats" not in idx:
+                idx["stats"] = {"total": 0, "processed": 0, "failed": 0}
+            return idx
         return {"files": {}, "stats": {"total": 0, "processed": 0, "failed": 0}}
     
     def _save_index(self):
@@ -1450,7 +1470,12 @@ class AudioVideoExtractor:
         """Load existing extraction index"""
         if self.index_file.exists():
             with open(self.index_file, 'r') as f:
-                return json.load(f)
+                idx = json.load(f)
+            if "files" not in idx:
+                idx["files"] = {}
+            if "stats" not in idx:
+                idx["stats"] = {"total": 0, "processed": 0, "failed": 0}
+            return idx
         return {"files": {}, "stats": {"total": 0, "processed": 0, "failed": 0}}
     
     def _save_index(self):
