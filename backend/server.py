@@ -3863,13 +3863,31 @@ async def re_extract_document(doc_id: str, request: Request, x_api_key: str = He
         if stale_thumb.exists():
             stale_thumb.unlink()
 
+        # Update the vector store embedding with the new text
+        vector_updated = False
+        full_text = result.get("full_text", "")
+        if vector_store and full_text and len(full_text) > 100:
+            try:
+                vector_store.add_document(
+                    doc_id=doc_id,
+                    text=full_text,
+                    metadata={
+                        "filename": doc.get("filename", ""),
+                        "category": result.get("category", doc.get("category", "Unknown")),
+                    }
+                )
+                vector_store._save()
+                vector_updated = True
+            except Exception as ve:
+                print(f"Warning: Failed to update vector store for {doc_id}: {ve}")
+
         # Invalidate caches
         _stats_cache.invalidate()
         _bootstrap_cache.invalidate()
 
         security_logger.log_system_event(
             "document_re_extracted",
-            f"Document text re-extracted: {doc.get('filename', doc_id)} (chars={result.get('char_count', 0)}, pages={result.get('page_count', 0)})",
+            f"Document text re-extracted: {doc.get('filename', doc_id)} (chars={result.get('char_count', 0)}, pages={result.get('page_count', 0)}, vector={'updated' if vector_updated else 'skipped'})",
             document_id=doc_id
         )
 
@@ -3880,6 +3898,7 @@ async def re_extract_document(doc_id: str, request: Request, x_api_key: str = He
             "page_count": result.get("page_count", 0),
             "file_type": result.get("file_type", ext.lstrip('.')),
             "has_content": True,
+            "vector_updated": vector_updated,
         }
     except HTTPException:
         raise

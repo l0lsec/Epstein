@@ -2051,8 +2051,9 @@ async function reExtractDocument() {
         }
 
         const data = await response.json();
+        const vectorMsg = data.vector_updated ? ', search index updated' : ', search index unchanged';
         _showMgmtFeedback(
-            `Successfully re-extracted ${data.filename}: ${data.char_count.toLocaleString()} characters, ${data.page_count} pages`,
+            `Successfully re-extracted ${data.filename}: ${data.char_count.toLocaleString()} characters, ${data.page_count} pages${vectorMsg}`,
             false
         );
 
