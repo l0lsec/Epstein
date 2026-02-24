@@ -1630,6 +1630,14 @@
                 <div class="card-header">
                     <span class="card-title">💬 All Feedback Submissions</span>
                     <div style="display: flex; gap: var(--space-sm);">
+                        <select id="feedback-status-filter" class="btn" style="background: var(--bg-tertiary); border: 1px solid var(--border); color: var(--text-primary); padding: 6px 12px; cursor: pointer;">
+                            <option value="all">All Status</option>
+                            <option value="new">🔴 New</option>
+                            <option value="read">🔵 Read</option>
+                            <option value="in-progress">🟡 In Progress</option>
+                            <option value="completed">🟢 Completed</option>
+                            <option value="archived">⚫ Archived</option>
+                        </select>
                         <select id="feedback-type-filter" class="btn" style="background: var(--bg-tertiary); border: 1px solid var(--border); color: var(--text-primary); padding: 6px 12px; cursor: pointer;">
                             <option value="all">All Types</option>
                             <option value="bug">🐛 Bug Reports</option>
@@ -1646,6 +1654,7 @@
                             <tr>
                                 <th style="width: 140px;">Date</th>
                                 <th style="width: 100px;">Type</th>
+                                <th style="width: 110px;">Status</th>
                                 <th style="width: 180px;">Email</th>
                                 <th>Message</th>
                                 <th style="width: 100px;">IP</th>
@@ -1653,7 +1662,7 @@
                             </tr>
                         </thead>
                         <tbody id="feedback-table-body">
-                            <tr><td colspan="6" class="loading"><span class="spinner"></span>Loading...</td></tr>
+                            <tr><td colspan="7" class="loading"><span class="spinner"></span>Loading...</td></tr>
                         </tbody>
                     </table>
                 </div>
@@ -2364,7 +2373,7 @@
         </div>
     </main>
 
-    <script src="/static/admin.js?v=15"></script>
+    <script src="/static/admin.js?v=16"></script>
 </body>
 </html>
 

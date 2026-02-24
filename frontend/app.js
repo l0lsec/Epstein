@@ -645,7 +645,7 @@ window.submitFeedback = async function() {
         return;
     }
     
-    if (!feedbackType || !message.trim()) {
+    if (!feedbackType || !email.trim() || !message.trim()) {
         showFeedbackStatus('Please fill in all required fields.', 'error');
         return;
     }

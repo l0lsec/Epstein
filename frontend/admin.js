@@ -1623,23 +1623,65 @@ async function loadFeedbackData() {
 }
 
 function setupFeedbackFilter() {
-    const filter = document.getElementById('feedback-type-filter');
-    if (!filter) return;
+    const typeFilter = document.getElementById('feedback-type-filter');
+    const statusFilter = document.getElementById('feedback-status-filter');
     
-    // Remove existing listener if any
-    filter.removeEventListener('change', handleFeedbackFilter);
-    filter.addEventListener('change', handleFeedbackFilter);
+    if (typeFilter) {
+        typeFilter.removeEventListener('change', handleFeedbackFilter);
+        typeFilter.addEventListener('change', handleFeedbackFilter);
+    }
+    
+    if (statusFilter) {
+        statusFilter.removeEventListener('change', handleFeedbackFilter);
+        statusFilter.addEventListener('change', handleFeedbackFilter);
+    }
 }
 
 function handleFeedbackFilter() {
-    const filter = document.getElementById('feedback-type-filter');
-    const selectedType = filter.value;
+    const typeFilter = document.getElementById('feedback-type-filter');
+    const statusFilter = document.getElementById('feedback-status-filter');
+    const selectedType = typeFilter ? typeFilter.value : 'all';
+    const selectedStatus = statusFilter ? statusFilter.value : 'all';
     
-    if (selectedType === 'all') {
-        renderFeedbackTable(allFeedbackData);
-    } else {
-        const filtered = allFeedbackData.filter(fb => fb.type === selectedType);
-        renderFeedbackTable(filtered);
+    let filtered = allFeedbackData;
+    
+    if (selectedType !== 'all') {
+        filtered = filtered.filter(fb => fb.type === selectedType);
+    }
+    
+    if (selectedStatus !== 'all') {
+        filtered = filtered.filter(fb => (fb.status || 'new') === selectedStatus);
+    }
+    
+    renderFeedbackTable(filtered);
+}
+
+async function updateFeedbackStatus(feedbackId, newStatus) {
+    try {
+        const response = await authFetch(`${window.location.origin}/api/admin/feedback/${feedbackId}/status`, {
+            method: 'PATCH',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({ status: newStatus })
+        });
+        
+        if (!response.ok) {
+            const data = await response.json();
+            throw new Error(data.detail || 'Failed to update status');
+        }
+        
+        // Update local data
+        const fb = allFeedbackData.find(f => f.id === feedbackId);
+        if (fb) {
+            fb.status = newStatus;
+        }
+        
+    } catch (error) {
+        console.error('Error updating feedback status:', error);
+        alert(`Error: ${error.message}`);
+        // Reload to restore original state
+        loadFeedbackData();
     }
 }
 
@@ -1720,7 +1762,7 @@ function renderFeedbackTable(feedback) {
     if (!tbody) return;
     
     if (!feedback || feedback.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="6" style="text-align: center; color: var(--text-muted); padding: var(--space-xl);">No feedback submissions yet</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="7" style="text-align: center; color: var(--text-muted); padding: var(--space-xl);">No feedback submissions yet</td></tr>';
         return;
     }
     
@@ -1730,6 +1772,14 @@ function renderFeedbackTable(feedback) {
         'content': '<span class="badge badge-info">📄 Content</span>',
         'pinned': '<span class="badge badge-accent">📌 Pinned</span>',
         'other': '<span class="badge">💬 Other</span>'
+    };
+    
+    const statusLabels = {
+        'new': '<span class="badge" style="background: #dc2626; color: white;">🔴 New</span>',
+        'read': '<span class="badge" style="background: #2563eb; color: white;">🔵 Read</span>',
+        'in-progress': '<span class="badge" style="background: #ca8a04; color: white;">🟡 In Progress</span>',
+        'completed': '<span class="badge" style="background: #16a34a; color: white;">🟢 Completed</span>',
+        'archived': '<span class="badge" style="background: #4b5563; color: white;">⚫ Archived</span>'
     };
     
     tbody.innerHTML = feedback.map(fb => {
@@ -1742,6 +1792,8 @@ function renderFeedbackTable(feedback) {
         }) : 'Unknown';
         
         const typeLabel = typeLabels[fb.type] || `<span class="badge">${fb.type}</span>`;
+        const status = fb.status || 'new';
+        const statusLabel = statusLabels[status] || `<span class="badge">${status}</span>`;
         const email = fb.email || '<span style="color: var(--text-muted);">—</span>';
         const messagePreview = fb.message ? truncate(fb.message, 60) : '';
         const ip = fb.ip || 'Unknown';
@@ -1750,6 +1802,15 @@ function renderFeedbackTable(feedback) {
             <tr>
                 <td style="white-space: nowrap; font-size: 0.85rem; color: var(--text-muted);">${date}</td>
                 <td>${typeLabel}</td>
+                <td>
+                    <select class="feedback-status-select" data-feedback-id="${fb.id}" onchange="updateFeedbackStatus('${fb.id}', this.value)" style="background: var(--bg-tertiary); border: 1px solid var(--border); color: var(--text-primary); padding: 4px 8px; border-radius: 4px; font-size: 0.8rem; cursor: pointer;">
+                        <option value="new" ${status === 'new' ? 'selected' : ''}>🔴 New</option>
+                        <option value="read" ${status === 'read' ? 'selected' : ''}>🔵 Read</option>
+                        <option value="in-progress" ${status === 'in-progress' ? 'selected' : ''}>🟡 In Progress</option>
+                        <option value="completed" ${status === 'completed' ? 'selected' : ''}>🟢 Completed</option>
+                        <option value="archived" ${status === 'archived' ? 'selected' : ''}>⚫ Archived</option>
+                    </select>
+                </td>
                 <td style="font-size: 0.9rem;">${escapeHtml(typeof email === 'string' ? email : '—')}</td>
                 <td>
                     <span class="feedback-message-preview" onclick="openFeedbackModal('${fb.id}')" title="Click to view full message">
@@ -1795,6 +1856,7 @@ function openFeedbackModal(feedbackId) {
     
     const date = feedback.timestamp ? new Date(feedback.timestamp).toLocaleString() : 'Unknown';
     const typeLabel = typeLabels[feedback.type] || feedback.type;
+    const status = feedback.status || 'new';
     
     body.innerHTML = `
         <div class="feedback-detail">
@@ -1805,6 +1867,18 @@ function openFeedbackModal(feedbackId) {
             <div class="feedback-detail-row">
                 <span class="feedback-detail-label">Type</span>
                 <span class="feedback-detail-value">${typeLabel}</span>
+            </div>
+            <div class="feedback-detail-row">
+                <span class="feedback-detail-label">Status</span>
+                <span class="feedback-detail-value">
+                    <select id="modal-status-select" onchange="updateFeedbackStatusFromModal('${feedback.id}', this.value)" style="background: var(--bg-tertiary); border: 1px solid var(--border); color: var(--text-primary); padding: 6px 12px; border-radius: 4px; cursor: pointer;">
+                        <option value="new" ${status === 'new' ? 'selected' : ''}>🔴 New</option>
+                        <option value="read" ${status === 'read' ? 'selected' : ''}>🔵 Read</option>
+                        <option value="in-progress" ${status === 'in-progress' ? 'selected' : ''}>🟡 In Progress</option>
+                        <option value="completed" ${status === 'completed' ? 'selected' : ''}>🟢 Completed</option>
+                        <option value="archived" ${status === 'archived' ? 'selected' : ''}>⚫ Archived</option>
+                    </select>
+                </span>
             </div>
             <div class="feedback-detail-row">
                 <span class="feedback-detail-label">Email</span>
@@ -1842,6 +1916,15 @@ function openFeedbackModal(feedbackId) {
     
     // Close on overlay click
     modal.addEventListener('click', handleModalOverlayClick);
+}
+
+async function updateFeedbackStatusFromModal(feedbackId, newStatus) {
+    await updateFeedbackStatus(feedbackId, newStatus);
+    // Update the table dropdown to match
+    const tableSelect = document.querySelector(`select[data-feedback-id="${feedbackId}"]`);
+    if (tableSelect) {
+        tableSelect.value = newStatus;
+    }
 }
 
 function closeFeedbackModal() {

@@ -757,7 +757,7 @@ class IndexStatusResponse(BaseModel):
 
 class FeedbackRequest(BaseModel):
     type: str  # "bug", "feature", "content", "other"
-    email: Optional[str] = None
+    email: str
     message: str
     recaptcha_token: Optional[str] = None  # reCAPTCHA response token
     _ts: Optional[str] = None  # Timestamp for spam protection
@@ -3229,7 +3229,8 @@ async def get_feedback_telemetry(request: Request, x_api_key: str = Header(None)
             "type": fb.get("type", "unknown"),
             "email": fb.get("email", ""),
             "message": fb.get("message", ""),
-            "ip": fb.get("ip", "Unknown")
+            "ip": fb.get("ip", "Unknown"),
+            "status": fb.get("status", "new")
         })
     
     return {
@@ -3270,6 +3271,56 @@ async def delete_feedback(feedback_id: str, request: Request, x_api_key: str = H
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error deleting feedback: {str(e)}")
+
+
+class FeedbackStatusUpdate(BaseModel):
+    status: str
+
+
+VALID_FEEDBACK_STATUSES = ["new", "read", "in-progress", "completed", "archived"]
+
+
+@app.patch("/api/admin/feedback/{feedback_id}/status")
+async def update_feedback_status(feedback_id: str, status_update: FeedbackStatusUpdate, request: Request, x_api_key: str = Header(None)):
+    """Update the status of a feedback entry (requires admin authentication)"""
+    is_authorized, error = verify_admin_access(request, x_api_key)
+    if not is_authorized:
+        raise HTTPException(status_code=401, detail=error)
+    
+    if status_update.status not in VALID_FEEDBACK_STATUSES:
+        raise HTTPException(
+            status_code=400, 
+            detail=f"Invalid status. Must be one of: {', '.join(VALID_FEEDBACK_STATUSES)}"
+        )
+    
+    if not FEEDBACK_PATH.exists():
+        raise HTTPException(status_code=404, detail="Feedback file not found")
+    
+    try:
+        with open(FEEDBACK_PATH, 'r') as f:
+            feedback_list = json.load(f)
+        
+        # Find and update the feedback entry
+        found = False
+        for fb in feedback_list:
+            if fb.get("id") == feedback_id:
+                fb["status"] = status_update.status
+                found = True
+                break
+        
+        if not found:
+            raise HTTPException(status_code=404, detail="Feedback entry not found")
+        
+        # Save updated list
+        with open(FEEDBACK_PATH, 'w') as f:
+            json.dump(feedback_list, f, indent=2)
+        
+        return {"message": "Status updated successfully", "id": feedback_id, "status": status_update.status}
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error updating feedback status: {str(e)}")
 
 
 # =============================================================================
