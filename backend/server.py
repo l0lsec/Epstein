@@ -3771,6 +3771,11 @@ async def redownload_document(doc_id: str, request: Request, x_api_key: str = He
         if extracted_json.exists():
             extracted_json.unlink()
 
+        # Remove stale thumbnail so it regenerates from the new file
+        stale_thumb = THUMBNAILS_PATH / f"{doc_id}.jpg"
+        if stale_thumb.exists():
+            stale_thumb.unlink()
+
         # Clean up backup on success
         if backup_path.exists():
             backup_path.unlink()
@@ -3852,6 +3857,11 @@ async def re_extract_document(doc_id: str, request: Request, x_api_key: str = He
         result["path"] = doc["path"]
         result["is_hidden"] = doc.get("is_hidden", 0)
         db.insert_document(result)
+
+        # Remove stale thumbnail so it regenerates from the updated content
+        stale_thumb = THUMBNAILS_PATH / f"{doc_id}.jpg"
+        if stale_thumb.exists():
+            stale_thumb.unlink()
 
         # Invalidate caches
         _stats_cache.invalidate()
