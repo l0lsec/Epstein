@@ -3620,9 +3620,9 @@ async def hide_document(doc_id: str, request: Request, x_api_key: str = Header(N
         
         success = db.hide_document(doc_id)
         if success:
-            _categories_cache.clear()
-            _stats_cache.clear()
-            _bootstrap_cache.clear()
+            _categories_cache.invalidate()
+            _stats_cache.invalidate()
+            _bootstrap_cache.invalidate()
             
             security_logger.log_system_event(
                 "document_hidden",
@@ -3655,9 +3655,9 @@ async def unhide_document(doc_id: str, request: Request, x_api_key: str = Header
         
         success = db.unhide_document(doc_id)
         if success:
-            _categories_cache.clear()
-            _stats_cache.clear()
-            _bootstrap_cache.clear()
+            _categories_cache.invalidate()
+            _stats_cache.invalidate()
+            _bootstrap_cache.invalidate()
             
             security_logger.log_system_event(
                 "document_unhidden",
@@ -3854,8 +3854,8 @@ async def re_extract_document(doc_id: str, request: Request, x_api_key: str = He
         db.insert_document(result)
 
         # Invalidate caches
-        _stats_cache.clear()
-        _bootstrap_cache.clear()
+        _stats_cache.invalidate()
+        _bootstrap_cache.invalidate()
 
         security_logger.log_system_event(
             "document_re_extracted",
@@ -3911,9 +3911,9 @@ async def bulk_hide_documents(body: BulkHideRequest, request: Request, x_api_key
     hidden_count = db.bulk_hide_documents(body.document_ids)
     
     # Invalidate all caches
-    _categories_cache.clear()
-    _stats_cache.clear()
-    _bootstrap_cache.clear()
+    _categories_cache.invalidate()
+    _stats_cache.invalidate()
+    _bootstrap_cache.invalidate()
     
     security_logger.log_system_event(
         "bulk_documents_hidden",
@@ -3947,9 +3947,9 @@ async def bulk_unhide_documents(body: BulkHideRequest, request: Request, x_api_k
     unhidden_count = db.bulk_unhide_documents(body.document_ids)
     
     # Invalidate all caches
-    _categories_cache.clear()
-    _stats_cache.clear()
-    _bootstrap_cache.clear()
+    _categories_cache.invalidate()
+    _stats_cache.invalidate()
+    _bootstrap_cache.invalidate()
     
     security_logger.log_system_event(
         "bulk_documents_unhidden",
@@ -3986,9 +3986,9 @@ async def bulk_hide_by_pattern(body: BulkHideByPatternRequest, request: Request,
     hidden_count = db.hide_documents_by_filename_pattern(pattern)
     
     # Invalidate all caches
-    _categories_cache.clear()
-    _stats_cache.clear()
-    _bootstrap_cache.clear()
+    _categories_cache.invalidate()
+    _stats_cache.invalidate()
+    _bootstrap_cache.invalidate()
     
     security_logger.log_system_event(
         "bulk_documents_hidden_by_pattern",
@@ -4034,9 +4034,9 @@ async def bulk_hide_by_filenames(body: BulkHideByFilenamesRequest, request: Requ
     affected_count = result.get(count_key, 0)
     
     # Invalidate all caches
-    _categories_cache.clear()
-    _stats_cache.clear()
-    _bootstrap_cache.clear()
+    _categories_cache.invalidate()
+    _stats_cache.invalidate()
+    _bootstrap_cache.invalidate()
     
     security_logger.log_system_event(
         event_type,
@@ -4102,9 +4102,9 @@ async def hide_category(category: str, request: Request, x_api_key: str = Header
     success = db.hide_category(category)
     if success:
         # Invalidate caches
-        _categories_cache.clear()
-        _stats_cache.clear()
-        _bootstrap_cache.clear()
+        _categories_cache.invalidate()
+        _stats_cache.invalidate()
+        _bootstrap_cache.invalidate()
         
         security_logger.log_system_event(
             "category_hidden",
@@ -4133,9 +4133,9 @@ async def unhide_category(category: str, request: Request, x_api_key: str = Head
     success = db.unhide_category(category)
     if success:
         # Invalidate caches
-        _categories_cache.clear()
-        _stats_cache.clear()
-        _bootstrap_cache.clear()
+        _categories_cache.invalidate()
+        _stats_cache.invalidate()
+        _bootstrap_cache.invalidate()
         
         security_logger.log_system_event(
             "category_unhidden",
