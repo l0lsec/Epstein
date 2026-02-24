@@ -1675,6 +1675,39 @@
 
         <!-- Content Management Tab -->
         <div id="content-tab" class="tab-panel">
+
+            <!-- Document Management (Re-download / Re-extract) -->
+            <div class="card" style="margin-bottom: var(--space-lg);">
+                <div class="card-header">
+                    <span class="card-title">📄 Document Management</span>
+                </div>
+                <div class="card-body">
+                    <p style="font-size: 0.85rem; color: var(--text-muted); margin-bottom: var(--space-md);">
+                        Search for a document to re-download its file from the DOJ website (e.g. to get updated redactions) or re-extract its transcript.
+                    </p>
+                    <div style="display: flex; gap: var(--space-sm); margin-bottom: var(--space-md);">
+                        <input type="text" id="doc-mgmt-search" class="login-input" placeholder="EFTA00549159.pdf" style="flex: 1;"
+                            onkeydown="if(event.key==='Enter') searchDocumentForManagement()">
+                        <button class="btn btn-primary" onclick="searchDocumentForManagement()">Search</button>
+                    </div>
+                    <div id="doc-mgmt-results" style="max-height: 400px; overflow-y: auto; border: 1px solid var(--border); border-radius: 6px; display: none;"></div>
+                    <div id="doc-mgmt-detail" style="display: none; margin-top: var(--space-md); padding: var(--space-md); border: 1px solid var(--border); border-radius: 6px; background: var(--bg-tertiary);">
+                        <div id="doc-mgmt-info" style="margin-bottom: var(--space-md);"></div>
+                        <div style="display: flex; gap: var(--space-sm); flex-wrap: wrap;">
+                            <button id="doc-mgmt-redownload-btn" class="btn btn-primary" onclick="redownloadDocument()">
+                                <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                                Re-download from DOJ
+                            </button>
+                            <button id="doc-mgmt-reextract-btn" class="btn btn-secondary" onclick="reExtractDocument()">
+                                <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
+                                Re-extract Transcript
+                            </button>
+                        </div>
+                        <div id="doc-mgmt-feedback" style="margin-top: var(--space-md); display: none; padding: var(--space-sm) var(--space-md); border-radius: 6px; font-size: 0.85rem;"></div>
+                    </div>
+                </div>
+            </div>
+
             <!-- Status Page Management -->
             <div class="card" style="margin-bottom: var(--space-lg); border-color: var(--warning);">
                 <div class="card-header" style="background: var(--warning-dim);">

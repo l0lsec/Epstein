@@ -154,6 +154,20 @@ async function authFetch(url, options = {}) {
     return response;
 }
 
+async function safeErrorMessage(response, fallbackMsg) {
+    try {
+        const text = await response.text();
+        try {
+            const data = JSON.parse(text);
+            return data.detail || fallbackMsg;
+        } catch {
+            return text || fallbackMsg;
+        }
+    } catch {
+        return fallbackMsg;
+    }
+}
+
 function setupTabNavigation() {
     document.querySelectorAll('.tab-btn').forEach(btn => {
         btn.addEventListener('click', () => {
@@ -1880,6 +1894,181 @@ async function deleteFeedback(feedbackId) {
 }
 
 // ============================================================================
+// DOCUMENT MANAGEMENT FUNCTIONS (Re-download / Re-extract)
+// ============================================================================
+
+let _selectedMgmtDoc = null;
+let _mgmtSearchResults = {};
+
+async function searchDocumentForManagement() {
+    const input = document.getElementById('doc-mgmt-search');
+    const query = input ? input.value.trim() : '';
+    const resultsEl = document.getElementById('doc-mgmt-results');
+    const detailEl = document.getElementById('doc-mgmt-detail');
+    if (!resultsEl) return;
+
+    if (!query) {
+        resultsEl.style.display = 'none';
+        detailEl.style.display = 'none';
+        _selectedMgmtDoc = null;
+        _mgmtSearchResults = {};
+        return;
+    }
+
+    resultsEl.style.display = 'block';
+    resultsEl.innerHTML = '<div style="padding: var(--space-md); text-align: center;"><span class="spinner"></span> Searching...</div>';
+    detailEl.style.display = 'none';
+    _selectedMgmtDoc = null;
+    _mgmtSearchResults = {};
+
+    try {
+        const response = await authFetch(`${window.location.origin}/api/admin/documents-visibility?search=${encodeURIComponent(query)}&limit=20`);
+        if (!response.ok) throw new Error('Search failed');
+        const data = await response.json();
+
+        if (!data.documents || data.documents.length === 0) {
+            resultsEl.innerHTML = '<div style="padding: var(--space-md); color: var(--text-muted); text-align: center;">No documents found</div>';
+            return;
+        }
+
+        data.documents.forEach(doc => { _mgmtSearchResults[doc.id] = doc; });
+
+        resultsEl.innerHTML = data.documents.map(doc => `
+            <div onclick="selectMgmtDocument('${escapeHtml(doc.id)}')"
+                 style="padding: var(--space-sm) var(--space-md); border-bottom: 1px solid var(--border); cursor: pointer; transition: background 0.15s;"
+                 onmouseenter="this.style.background='var(--bg-tertiary)'" onmouseleave="this.style.background=''">
+                <div style="font-family: var(--font-mono); font-size: 0.85rem; color: var(--text-primary);">
+                    ${doc.is_hidden === 1 ? '🔒 ' : ''}${escapeHtml(doc.filename)}
+                </div>
+                <div style="font-size: 0.75rem; color: var(--text-muted);">
+                    ${escapeHtml(doc.category || 'Unknown')} &bull; ${escapeHtml(doc.subcategory || '')} &bull; ${escapeHtml(doc.file_type || '')}
+                </div>
+            </div>
+        `).join('');
+    } catch (error) {
+        console.error('Error searching documents:', error);
+        resultsEl.innerHTML = '<div style="padding: var(--space-md); color: var(--danger); text-align: center;">Search failed</div>';
+    }
+}
+
+function selectMgmtDocument(docId) {
+    const doc = _mgmtSearchResults[docId] || _selectedMgmtDoc;
+    if (!doc) return;
+    _selectedMgmtDoc = doc;
+
+    const resultsEl = document.getElementById('doc-mgmt-results');
+    const detailEl = document.getElementById('doc-mgmt-detail');
+    const infoEl = document.getElementById('doc-mgmt-info');
+    const feedbackEl = document.getElementById('doc-mgmt-feedback');
+
+    if (resultsEl) resultsEl.style.display = 'none';
+    if (feedbackEl) feedbackEl.style.display = 'none';
+
+    const isEfta = doc.filename && doc.filename.toUpperCase().startsWith('EFTA');
+    const redownloadBtn = document.getElementById('doc-mgmt-redownload-btn');
+    if (redownloadBtn) redownloadBtn.style.display = isEfta ? '' : 'none';
+
+    infoEl.innerHTML = `
+        <div style="font-family: var(--font-mono); font-size: 1rem; font-weight: 500; margin-bottom: var(--space-xs);">
+            ${doc.is_hidden === 1 ? '🔒 ' : ''}${escapeHtml(doc.filename)}
+        </div>
+        <div style="font-size: 0.85rem; color: var(--text-muted); display: flex; flex-wrap: wrap; gap: var(--space-sm) var(--space-lg);">
+            <span><strong>Category:</strong> ${escapeHtml(doc.category || 'Unknown')}</span>
+            <span><strong>Subcategory:</strong> ${escapeHtml(doc.subcategory || '-')}</span>
+            <span><strong>Type:</strong> ${escapeHtml(doc.file_type || '-')}</span>
+            <span><strong>Pages:</strong> ${doc.page_count ?? '-'}</span>
+            <span><strong>Characters:</strong> ${(doc.char_count ?? 0).toLocaleString()}</span>
+            <span><strong>ID:</strong> <code style="font-size: 0.75rem;">${escapeHtml(doc.id)}</code></span>
+        </div>
+    `;
+    detailEl.style.display = 'block';
+}
+
+function _showMgmtFeedback(message, isError) {
+    const el = document.getElementById('doc-mgmt-feedback');
+    if (!el) return;
+    el.style.display = 'block';
+    el.style.background = isError ? 'var(--danger-dim)' : 'var(--success-dim, var(--accent-glow))';
+    el.style.color = isError ? 'var(--danger)' : 'var(--success, var(--accent))';
+    el.style.border = `1px solid ${isError ? 'var(--danger)' : 'var(--success, var(--accent))'}`;
+    el.textContent = message;
+}
+
+async function redownloadDocument() {
+    if (!_selectedMgmtDoc) return;
+    const docId = _selectedMgmtDoc.id;
+    const btn = document.getElementById('doc-mgmt-redownload-btn');
+    const origHtml = btn.innerHTML;
+
+    if (!confirm(`Re-download ${_selectedMgmtDoc.filename} from the DOJ website?\n\nThis will replace the local file with the latest version.`)) return;
+
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner" style="width:14px;height:14px;"></span> Downloading...';
+    document.getElementById('doc-mgmt-feedback').style.display = 'none';
+
+    try {
+        const response = await authFetch(`${window.location.origin}/api/admin/documents/${encodeURIComponent(docId)}/redownload`, {
+            method: 'POST'
+        });
+
+        if (!response.ok) {
+            const msg = await safeErrorMessage(response, 'Re-download failed');
+            throw new Error(msg);
+        }
+
+        const data = await response.json();
+        const oldKB = (data.old_size / 1024).toFixed(1);
+        const newKB = (data.new_size / 1024).toFixed(1);
+        const changed = data.size_changed ? ` (size changed: ${oldKB} KB → ${newKB} KB)` : ` (size unchanged: ${newKB} KB)`;
+        _showMgmtFeedback(`Successfully re-downloaded ${data.filename}${changed}`, false);
+    } catch (error) {
+        console.error('Error re-downloading document:', error);
+        _showMgmtFeedback('Error: ' + error.message, true);
+    } finally {
+        btn.disabled = false;
+        btn.innerHTML = origHtml;
+    }
+}
+
+async function reExtractDocument() {
+    if (!_selectedMgmtDoc) return;
+    const docId = _selectedMgmtDoc.id;
+    const btn = document.getElementById('doc-mgmt-reextract-btn');
+    const origHtml = btn.innerHTML;
+
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner" style="width:14px;height:14px;"></span> Extracting...';
+    document.getElementById('doc-mgmt-feedback').style.display = 'none';
+
+    try {
+        const response = await authFetch(`${window.location.origin}/api/admin/documents/${encodeURIComponent(docId)}/re-extract`, {
+            method: 'POST'
+        });
+
+        if (!response.ok) {
+            const msg = await safeErrorMessage(response, 'Re-extraction failed');
+            throw new Error(msg);
+        }
+
+        const data = await response.json();
+        _showMgmtFeedback(
+            `Successfully re-extracted ${data.filename}: ${data.char_count.toLocaleString()} characters, ${data.page_count} pages`,
+            false
+        );
+
+        _selectedMgmtDoc.char_count = data.char_count;
+        _selectedMgmtDoc.page_count = data.page_count;
+        selectMgmtDocument(_selectedMgmtDoc.id);
+    } catch (error) {
+        console.error('Error re-extracting document:', error);
+        _showMgmtFeedback('Error: ' + error.message, true);
+    } finally {
+        btn.disabled = false;
+        btn.innerHTML = origHtml;
+    }
+}
+
+// ============================================================================
 // CONTENT MANAGEMENT FUNCTIONS (Ask AI Toggle + Pinned Documents)
 // ============================================================================
 
@@ -3065,8 +3254,8 @@ async function bulkHideSelected() {
         });
         
         if (!response.ok) {
-            const data = await response.json();
-            throw new Error(data.detail || 'Bulk hide failed');
+            const msg = await safeErrorMessage(response, 'Bulk hide failed');
+            throw new Error(msg);
         }
         
         const result = await response.json();
@@ -3104,8 +3293,8 @@ async function bulkUnhideSelected() {
         });
         
         if (!response.ok) {
-            const data = await response.json();
-            throw new Error(data.detail || 'Bulk unhide failed');
+            const msg = await safeErrorMessage(response, 'Bulk unhide failed');
+            throw new Error(msg);
         }
         
         const result = await response.json();
@@ -3616,8 +3805,8 @@ async function hideDocument(docId) {
         });
         
         if (!response.ok) {
-            const data = await response.json();
-            throw new Error(data.detail || 'Failed to hide document');
+            const msg = await safeErrorMessage(response, 'Failed to hide document');
+            throw new Error(msg);
         }
         
         loadHiddenDocuments();
@@ -3634,8 +3823,8 @@ async function unhideDocument(docId) {
         });
         
         if (!response.ok) {
-            const data = await response.json();
-            throw new Error(data.detail || 'Failed to unhide document');
+            const msg = await safeErrorMessage(response, 'Failed to unhide document');
+            throw new Error(msg);
         }
         
         loadHiddenDocuments();

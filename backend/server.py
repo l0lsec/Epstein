@@ -3613,26 +3613,29 @@ async def hide_document(doc_id: str, request: Request, x_api_key: str = Header(N
     if not db:
         raise HTTPException(status_code=503, detail="Database not initialized")
     
-    # Get document info for logging
-    doc = db.get_document(doc_id, include_hidden=True)
-    if not doc:
-        raise HTTPException(status_code=404, detail="Document not found")
-    
-    success = db.hide_document(doc_id)
-    if success:
-        # Invalidate caches
-        _categories_cache.clear()
-        _stats_cache.clear()
-        _bootstrap_cache.clear()
+    try:
+        doc = db.get_document(doc_id, include_hidden=True)
+        if not doc:
+            raise HTTPException(status_code=404, detail="Document not found")
         
-        security_logger.log_system_event(
-            "document_hidden",
-            f"Document hidden by admin: {doc_id} ({doc.get('filename', 'Unknown')})",
-            document_id=doc_id
-        )
-        return {"success": True, "message": f"Document '{doc.get('filename', doc_id)}' is now hidden"}
-    
-    raise HTTPException(status_code=500, detail="Failed to hide document")
+        success = db.hide_document(doc_id)
+        if success:
+            _categories_cache.clear()
+            _stats_cache.clear()
+            _bootstrap_cache.clear()
+            
+            security_logger.log_system_event(
+                "document_hidden",
+                f"Document hidden by admin: {doc_id} ({doc.get('filename', 'Unknown')})",
+                document_id=doc_id
+            )
+            return {"success": True, "message": f"Document '{doc.get('filename', doc_id)}' is now hidden"}
+        
+        raise HTTPException(status_code=500, detail="Failed to hide document")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error hiding document: {str(e)}")
 
 
 @app.post("/api/admin/documents/{doc_id}/unhide")
@@ -3645,26 +3648,233 @@ async def unhide_document(doc_id: str, request: Request, x_api_key: str = Header
     if not db:
         raise HTTPException(status_code=503, detail="Database not initialized")
     
-    # Get document info for logging
-    doc = db.get_document(doc_id, include_hidden=True)
-    if not doc:
-        raise HTTPException(status_code=404, detail="Document not found")
-    
-    success = db.unhide_document(doc_id)
-    if success:
-        # Invalidate caches
-        _categories_cache.clear()
-        _stats_cache.clear()
-        _bootstrap_cache.clear()
+    try:
+        doc = db.get_document(doc_id, include_hidden=True)
+        if not doc:
+            raise HTTPException(status_code=404, detail="Document not found")
         
+        success = db.unhide_document(doc_id)
+        if success:
+            _categories_cache.clear()
+            _stats_cache.clear()
+            _bootstrap_cache.clear()
+            
+            security_logger.log_system_event(
+                "document_unhidden",
+                f"Document unhidden by admin: {doc_id} ({doc.get('filename', 'Unknown')})",
+                document_id=doc_id
+            )
+            return {"success": True, "message": f"Document '{doc.get('filename', doc_id)}' is now visible"}
+        
+        raise HTTPException(status_code=500, detail="Failed to unhide document")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error unhiding document: {str(e)}")
+
+
+# =========================================================================
+# Document Re-download and Re-extract Endpoints
+# =========================================================================
+
+DATASET_EFTA_RANGES = {
+    1:  (1, 3158),
+    2:  (3159, 3857),
+    3:  (3858, 5704),
+    4:  (5705, 8408),
+    5:  (8409, 8528),
+    6:  (8529, 9015),
+    7:  (9016, 9675),
+    8:  (9676, 39024),
+    9:  (39025, 1262781),
+    10: (1262782, 2212882),
+    11: (2212883, 2730264),
+    12: (2730265, 3000000),
+}
+
+DOJ_DOWNLOAD_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_17_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36",
+    "Accept": "application/pdf,*/*",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Cookie": "justiceGovAgeVerified=true",
+}
+
+
+def _parse_efta_info(filename: str):
+    """Parse EFTA number and dataset from a filename like 'EFTA00549159.pdf'.
+    Returns (efta_number, dataset_num) or (None, None) if not an EFTA file.
+    """
+    import re
+    match = re.match(r'^EFTA(\d+)', filename, re.IGNORECASE)
+    if not match:
+        return None, None
+    efta_num = int(match.group(1))
+    for ds, (start, end) in DATASET_EFTA_RANGES.items():
+        if start <= efta_num <= end:
+            return efta_num, ds
+    return efta_num, None
+
+
+@app.post("/api/admin/documents/{doc_id}/redownload")
+async def redownload_document(doc_id: str, request: Request, x_api_key: str = Header(None)):
+    """Re-download a document file from the DOJ website (requires admin authentication)"""
+    is_authorized, error = verify_admin_access(request, x_api_key)
+    if not is_authorized:
+        raise HTTPException(status_code=401, detail=error)
+
+    if not db:
+        raise HTTPException(status_code=503, detail="Database not initialized")
+
+    try:
+        doc = db.get_document(doc_id, include_hidden=True)
+        if not doc:
+            raise HTTPException(status_code=404, detail="Document not found")
+
+        filename = doc.get("filename", "")
+        efta_num, dataset_num = _parse_efta_info(filename)
+        if efta_num is None:
+            raise HTTPException(status_code=400, detail=f"Not an EFTA file: {filename}")
+        if dataset_num is None:
+            raise HTTPException(status_code=400, detail=f"EFTA number {efta_num} outside known dataset ranges")
+
+        ext = Path(filename).suffix or ".pdf"
+        doj_url = f"https://www.justice.gov/epstein/files/DataSet%20{dataset_num}/EFTA{efta_num:08d}{ext}"
+
+        file_path = (BASE_PATH / doc["path"]).resolve()
+        if not str(file_path).startswith(str(BASE_PATH.resolve())):
+            raise HTTPException(status_code=403, detail="Path traversal denied")
+
+        old_size = file_path.stat().st_size if file_path.exists() else 0
+
+        # Back up the original before overwriting
+        backup_path = file_path.with_suffix(file_path.suffix + ".bak")
+        if file_path.exists():
+            import shutil
+            shutil.copy2(str(file_path), str(backup_path))
+
+        async with httpx.AsyncClient(follow_redirects=True, timeout=120.0) as client:
+            resp = await client.get(doj_url, headers=DOJ_DOWNLOAD_HEADERS)
+
+        if resp.status_code == 404:
+            raise HTTPException(status_code=404, detail=f"File not found on DOJ site: {doj_url}")
+        if resp.status_code != 200:
+            raise HTTPException(status_code=502, detail=f"DOJ returned HTTP {resp.status_code}")
+        if len(resp.content) < 100:
+            raise HTTPException(status_code=502, detail="Downloaded file is suspiciously small; possible access block")
+
+        file_path.parent.mkdir(parents=True, exist_ok=True)
+        file_path.write_bytes(resp.content)
+        new_size = len(resp.content)
+
+        # Remove stale extracted text so re-extract picks up the new content
+        extracted_json = BASE_PATH / "extracted_text" / f"{doc_id}.json"
+        if extracted_json.exists():
+            extracted_json.unlink()
+
+        # Clean up backup on success
+        if backup_path.exists():
+            backup_path.unlink()
+
         security_logger.log_system_event(
-            "document_unhidden",
-            f"Document unhidden by admin: {doc_id} ({doc.get('filename', 'Unknown')})",
+            "document_redownloaded",
+            f"Document re-downloaded from DOJ: {filename} (old={old_size}, new={new_size})",
             document_id=doc_id
         )
-        return {"success": True, "message": f"Document '{doc.get('filename', doc_id)}' is now visible"}
-    
-    raise HTTPException(status_code=500, detail="Failed to unhide document")
+
+        return {
+            "success": True,
+            "filename": filename,
+            "old_size": old_size,
+            "new_size": new_size,
+            "size_changed": old_size != new_size,
+            "doj_url": doj_url,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error re-downloading document: {str(e)}")
+
+
+@app.post("/api/admin/documents/{doc_id}/re-extract")
+async def re_extract_document(doc_id: str, request: Request, x_api_key: str = Header(None)):
+    """Re-extract text/transcript from a document file (requires admin authentication)"""
+    is_authorized, error = verify_admin_access(request, x_api_key)
+    if not is_authorized:
+        raise HTTPException(status_code=401, detail=error)
+
+    if not db:
+        raise HTTPException(status_code=503, detail="Database not initialized")
+
+    try:
+        doc = db.get_document(doc_id, include_hidden=True)
+        if not doc:
+            raise HTTPException(status_code=404, detail="Document not found")
+
+        file_path = (BASE_PATH / doc["path"]).resolve()
+        if not str(file_path).startswith(str(BASE_PATH.resolve())):
+            raise HTTPException(status_code=403, detail="Path traversal denied")
+        if not file_path.exists():
+            raise HTTPException(status_code=404, detail=f"File not found on disk: {doc['path']}")
+
+        ext = file_path.suffix.lower()
+        pdf_exts = {'.pdf'}
+        image_exts = {'.jpg', '.jpeg', '.png', '.gif', '.tiff', '.bmp'}
+        media_exts = {'.mp3', '.mp4', '.wav', '.m4a', '.avi', '.mov', '.wmv'}
+
+        from extractor import PDFExtractor, ImageExtractor, AudioVideoExtractor
+
+        result = None
+        if ext in pdf_exts:
+            extractor = PDFExtractor(str(BASE_PATH))
+            result = extractor.extract_pdf(file_path)
+        elif ext in image_exts:
+            extractor = ImageExtractor(str(BASE_PATH))
+            result = extractor.extract_image(file_path)
+        elif ext in media_exts:
+            extractor = AudioVideoExtractor(str(BASE_PATH))
+            result = extractor.transcribe_file(file_path)
+        else:
+            raise HTTPException(status_code=400, detail=f"Unsupported file type: {ext}")
+
+        if not result or not result.get("has_content"):
+            error_msg = result.get("error", "No text content extracted") if result else "Extraction returned nothing"
+            raise HTTPException(status_code=500, detail=error_msg)
+
+        # Save the extracted JSON
+        extracted_dir = BASE_PATH / "extracted_text"
+        extracted_dir.mkdir(exist_ok=True)
+        output_file = extracted_dir / f"{doc_id}.json"
+        with open(output_file, 'w') as f:
+            json.dump(result, f)
+
+        # Update the database record via INSERT OR REPLACE
+        result["id"] = doc_id
+        result["path"] = doc["path"]
+        result["is_hidden"] = doc.get("is_hidden", 0)
+        db.insert_document(result)
+
+        # Invalidate caches
+        _stats_cache.clear()
+        _bootstrap_cache.clear()
+
+        security_logger.log_system_event(
+            "document_re_extracted",
+            f"Document text re-extracted: {doc.get('filename', doc_id)} (chars={result.get('char_count', 0)}, pages={result.get('page_count', 0)})",
+            document_id=doc_id
+        )
+
+        return {
+            "success": True,
+            "filename": doc.get("filename", ""),
+            "char_count": result.get("char_count", 0),
+            "page_count": result.get("page_count", 0),
+            "file_type": result.get("file_type", ext.lstrip('.')),
+            "has_content": True,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error re-extracting document: {str(e)}")
 
 
 # =========================================================================
@@ -3954,22 +4164,24 @@ async def search_documents_visibility(
     if not db:
         raise HTTPException(status_code=503, detail="Database not initialized")
     
-    # Get documents including hidden ones
-    docs = db.get_all_documents(
-        limit=limit, 
-        offset=offset, 
-        category=category, 
-        search=search,
-        include_hidden=True
-    )
-    total = db.count_documents(category=category, include_hidden=True)
-    
-    return {
-        "documents": docs,
-        "total": total,
-        "limit": limit,
-        "offset": offset
-    }
+    try:
+        docs = db.get_all_documents(
+            limit=limit, 
+            offset=offset, 
+            category=category, 
+            search=search,
+            include_hidden=True
+        )
+        total = db.count_documents(category=category, include_hidden=True)
+        
+        return {
+            "documents": docs,
+            "total": total,
+            "limit": limit,
+            "offset": offset
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error searching documents: {str(e)}")
 
 
 # =============================================================================
