@@ -1600,6 +1600,10 @@ async function clearLogs(logType) {
 
 // Store all feedback data for filtering
 let allFeedbackData = [];
+let feedbackSelectedIds = new Set();
+let feedbackSortField = 'timestamp';
+let feedbackSortAsc = false; // newest first by default
+let feedbackSearchDebounce = null;
 
 async function loadFeedbackData() {
     try {
@@ -1611,9 +1615,8 @@ async function loadFeedbackData() {
         
         renderFeedbackStats(data);
         renderFeedbackTypes(data.type_counts);
-        renderFeedbackTable(allFeedbackData);
+        applyFeedbackFilterAndSort();
         
-        // Setup filter event listener
         setupFeedbackFilter();
     } catch (error) {
         console.error('Error loading feedback:', error);
@@ -1625,44 +1628,224 @@ async function loadFeedbackData() {
 function setupFeedbackFilter() {
     const typeFilter = document.getElementById('feedback-type-filter');
     const statusFilter = document.getElementById('feedback-status-filter');
+    const searchInput = document.getElementById('feedback-search');
     
     if (typeFilter) {
-        typeFilter.removeEventListener('change', handleFeedbackFilter);
-        typeFilter.addEventListener('change', handleFeedbackFilter);
+        typeFilter.removeEventListener('change', applyFeedbackFilterAndSort);
+        typeFilter.addEventListener('change', applyFeedbackFilterAndSort);
+    }
+    if (statusFilter) {
+        statusFilter.removeEventListener('change', applyFeedbackFilterAndSort);
+        statusFilter.addEventListener('change', applyFeedbackFilterAndSort);
+    }
+    if (searchInput) {
+        searchInput.removeEventListener('input', handleFeedbackSearch);
+        searchInput.addEventListener('input', handleFeedbackSearch);
     }
     
-    if (statusFilter) {
-        statusFilter.removeEventListener('change', handleFeedbackFilter);
-        statusFilter.addEventListener('change', handleFeedbackFilter);
+    const bulkStatusSelect = document.getElementById('feedback-bulk-status');
+    if (bulkStatusSelect) {
+        bulkStatusSelect.removeEventListener('change', handleBulkStatusChange);
+        bulkStatusSelect.addEventListener('change', handleBulkStatusChange);
     }
 }
 
-function handleFeedbackFilter() {
+function handleFeedbackSearch() {
+    clearTimeout(feedbackSearchDebounce);
+    feedbackSearchDebounce = setTimeout(applyFeedbackFilterAndSort, 250);
+}
+
+function applyFeedbackFilterAndSort() {
     const typeFilter = document.getElementById('feedback-type-filter');
     const statusFilter = document.getElementById('feedback-status-filter');
+    const searchInput = document.getElementById('feedback-search');
+    
     const selectedType = typeFilter ? typeFilter.value : 'all';
     const selectedStatus = statusFilter ? statusFilter.value : 'all';
+    const searchTerm = (searchInput ? searchInput.value : '').toLowerCase().trim();
     
     let filtered = allFeedbackData;
     
     if (selectedType !== 'all') {
         filtered = filtered.filter(fb => fb.type === selectedType);
     }
-    
     if (selectedStatus !== 'all') {
         filtered = filtered.filter(fb => (fb.status || 'new') === selectedStatus);
     }
+    if (searchTerm) {
+        filtered = filtered.filter(fb =>
+            (fb.email || '').toLowerCase().includes(searchTerm) ||
+            (fb.message || '').toLowerCase().includes(searchTerm)
+        );
+    }
     
+    filtered = sortFeedbackArray(filtered, feedbackSortField, feedbackSortAsc);
     renderFeedbackTable(filtered);
+    updateSortIcons();
+}
+
+function sortFeedbackArray(arr, field, asc) {
+    return [...arr].sort((a, b) => {
+        let valA = a[field] || '';
+        let valB = b[field] || '';
+        if (field === 'status') { valA = valA || 'new'; valB = valB || 'new'; }
+        if (typeof valA === 'string') valA = valA.toLowerCase();
+        if (typeof valB === 'string') valB = valB.toLowerCase();
+        if (valA < valB) return asc ? -1 : 1;
+        if (valA > valB) return asc ? 1 : -1;
+        return 0;
+    });
+}
+
+function sortFeedbackBy(field) {
+    if (feedbackSortField === field) {
+        feedbackSortAsc = !feedbackSortAsc;
+    } else {
+        feedbackSortField = field;
+        feedbackSortAsc = field === 'timestamp' ? false : true;
+    }
+    applyFeedbackFilterAndSort();
+}
+
+function updateSortIcons() {
+    ['timestamp', 'type', 'status', 'email'].forEach(f => {
+        const icon = document.getElementById(`sort-icon-${f}`);
+        if (!icon) return;
+        if (f === feedbackSortField) {
+            icon.textContent = feedbackSortAsc ? '▲' : '▼';
+            icon.style.opacity = '1';
+        } else {
+            icon.textContent = '▼';
+            icon.style.opacity = '0.4';
+        }
+    });
+}
+
+// --- Selection & Bulk ---
+
+function toggleFeedbackCheckbox(id) {
+    if (feedbackSelectedIds.has(id)) {
+        feedbackSelectedIds.delete(id);
+    } else {
+        feedbackSelectedIds.add(id);
+    }
+    updateBulkBar();
+    const selectAll = document.getElementById('feedback-select-all');
+    if (selectAll) {
+        const visibleCheckboxes = document.querySelectorAll('.feedback-row-checkbox');
+        selectAll.checked = visibleCheckboxes.length > 0 && feedbackSelectedIds.size >= visibleCheckboxes.length;
+    }
+}
+
+function toggleAllFeedbackCheckboxes(checked) {
+    const checkboxes = document.querySelectorAll('.feedback-row-checkbox');
+    checkboxes.forEach(cb => {
+        const id = cb.dataset.feedbackId;
+        if (checked) {
+            feedbackSelectedIds.add(id);
+        } else {
+            feedbackSelectedIds.delete(id);
+        }
+        cb.checked = checked;
+    });
+    updateBulkBar();
+}
+
+function clearFeedbackSelection() {
+    feedbackSelectedIds.clear();
+    document.querySelectorAll('.feedback-row-checkbox').forEach(cb => cb.checked = false);
+    const selectAll = document.getElementById('feedback-select-all');
+    if (selectAll) selectAll.checked = false;
+    updateBulkBar();
+}
+
+function updateBulkBar() {
+    const bar = document.getElementById('feedback-bulk-bar');
+    const countEl = document.getElementById('feedback-selected-count');
+    if (!bar) return;
+    
+    if (feedbackSelectedIds.size > 0) {
+        bar.style.display = 'flex';
+        countEl.textContent = `${feedbackSelectedIds.size} selected`;
+    } else {
+        bar.style.display = 'none';
+        const bulkStatus = document.getElementById('feedback-bulk-status');
+        if (bulkStatus) bulkStatus.value = '';
+    }
+}
+
+async function handleBulkStatusChange() {
+    const select = document.getElementById('feedback-bulk-status');
+    const newStatus = select.value;
+    if (!newStatus || feedbackSelectedIds.size === 0) return;
+    
+    const count = feedbackSelectedIds.size;
+    if (!confirm(`Set ${count} feedback item(s) to "${newStatus}"?`)) {
+        select.value = '';
+        return;
+    }
+    
+    try {
+        const response = await authFetch(`${window.location.origin}/api/admin/feedback/bulk/status`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ ids: [...feedbackSelectedIds], status: newStatus })
+        });
+        
+        if (!response.ok) {
+            const data = await response.json();
+            throw new Error(data.detail || 'Bulk status update failed');
+        }
+        
+        feedbackSelectedIds.forEach(id => {
+            const fb = allFeedbackData.find(f => f.id === id);
+            if (fb) fb.status = newStatus;
+        });
+        
+        clearFeedbackSelection();
+        applyFeedbackFilterAndSort();
+    } catch (error) {
+        console.error('Bulk status error:', error);
+        alert(`Error: ${error.message}`);
+        loadFeedbackData();
+    }
+    select.value = '';
+}
+
+async function bulkDeleteFeedback() {
+    if (feedbackSelectedIds.size === 0) return;
+    
+    const count = feedbackSelectedIds.size;
+    if (!confirm(`Permanently delete ${count} feedback item(s)? This cannot be undone.`)) return;
+    
+    try {
+        const response = await authFetch(`${window.location.origin}/api/admin/feedback/bulk/delete`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ ids: [...feedbackSelectedIds] })
+        });
+        
+        if (!response.ok) {
+            const data = await response.json();
+            throw new Error(data.detail || 'Bulk delete failed');
+        }
+        
+        allFeedbackData = allFeedbackData.filter(fb => !feedbackSelectedIds.has(fb.id));
+        clearFeedbackSelection();
+        applyFeedbackFilterAndSort();
+        loadFeedbackData();
+    } catch (error) {
+        console.error('Bulk delete error:', error);
+        alert(`Error: ${error.message}`);
+        loadFeedbackData();
+    }
 }
 
 async function updateFeedbackStatus(feedbackId, newStatus) {
     try {
         const response = await authFetch(`${window.location.origin}/api/admin/feedback/${feedbackId}/status`, {
             method: 'PATCH',
-            headers: {
-                'Content-Type': 'application/json'
-            },
+            headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ status: newStatus })
         });
         
@@ -1671,16 +1854,12 @@ async function updateFeedbackStatus(feedbackId, newStatus) {
             throw new Error(data.detail || 'Failed to update status');
         }
         
-        // Update local data
         const fb = allFeedbackData.find(f => f.id === feedbackId);
-        if (fb) {
-            fb.status = newStatus;
-        }
+        if (fb) fb.status = newStatus;
         
     } catch (error) {
         console.error('Error updating feedback status:', error);
         alert(`Error: ${error.message}`);
-        // Reload to restore original state
         loadFeedbackData();
     }
 }
@@ -1762,7 +1941,7 @@ function renderFeedbackTable(feedback) {
     if (!tbody) return;
     
     if (!feedback || feedback.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="7" style="text-align: center; color: var(--text-muted); padding: var(--space-xl);">No feedback submissions yet</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="8" style="text-align: center; color: var(--text-muted); padding: var(--space-xl);">No feedback submissions found</td></tr>';
         return;
     }
     
@@ -1772,14 +1951,6 @@ function renderFeedbackTable(feedback) {
         'content': '<span class="badge badge-info">📄 Content</span>',
         'pinned': '<span class="badge badge-accent">📌 Pinned</span>',
         'other': '<span class="badge">💬 Other</span>'
-    };
-    
-    const statusLabels = {
-        'new': '<span class="badge" style="background: #dc2626; color: white;">🔴 New</span>',
-        'read': '<span class="badge" style="background: #2563eb; color: white;">🔵 Read</span>',
-        'in-progress': '<span class="badge" style="background: #ca8a04; color: white;">🟡 In Progress</span>',
-        'completed': '<span class="badge" style="background: #16a34a; color: white;">🟢 Completed</span>',
-        'archived': '<span class="badge" style="background: #4b5563; color: white;">⚫ Archived</span>'
     };
     
     tbody.innerHTML = feedback.map(fb => {
@@ -1793,13 +1964,14 @@ function renderFeedbackTable(feedback) {
         
         const typeLabel = typeLabels[fb.type] || `<span class="badge">${fb.type}</span>`;
         const status = fb.status || 'new';
-        const statusLabel = statusLabels[status] || `<span class="badge">${status}</span>`;
         const email = fb.email || '<span style="color: var(--text-muted);">—</span>';
         const messagePreview = fb.message ? truncate(fb.message, 60) : '';
         const ip = fb.ip || 'Unknown';
+        const isChecked = feedbackSelectedIds.has(fb.id) ? 'checked' : '';
         
         return `
-            <tr>
+            <tr style="${isChecked ? 'background: var(--accent-glow);' : ''}">
+                <td style="text-align: center;"><input type="checkbox" class="feedback-row-checkbox" data-feedback-id="${fb.id}" ${isChecked} onchange="toggleFeedbackCheckbox('${fb.id}')"></td>
                 <td style="white-space: nowrap; font-size: 0.85rem; color: var(--text-muted);">${date}</td>
                 <td>${typeLabel}</td>
                 <td>
@@ -1920,11 +2092,7 @@ function openFeedbackModal(feedbackId) {
 
 async function updateFeedbackStatusFromModal(feedbackId, newStatus) {
     await updateFeedbackStatus(feedbackId, newStatus);
-    // Update the table dropdown to match
-    const tableSelect = document.querySelector(`select[data-feedback-id="${feedbackId}"]`);
-    if (tableSelect) {
-        tableSelect.value = newStatus;
-    }
+    applyFeedbackFilterAndSort();
 }
 
 function closeFeedbackModal() {
@@ -1961,13 +2129,9 @@ async function deleteFeedback(feedbackId) {
             throw new Error(data.detail || 'Failed to delete feedback');
         }
         
-        // Remove from local data
         allFeedbackData = allFeedbackData.filter(fb => fb.id !== feedbackId);
-        
-        // Re-render with current filter
-        handleFeedbackFilter();
-        
-        // Reload full data to update stats
+        feedbackSelectedIds.delete(feedbackId);
+        applyFeedbackFilterAndSort();
         loadFeedbackData();
         
     } catch (error) {

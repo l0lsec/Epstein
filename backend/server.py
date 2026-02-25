@@ -3277,6 +3277,15 @@ class FeedbackStatusUpdate(BaseModel):
     status: str
 
 
+class BulkFeedbackStatusUpdate(BaseModel):
+    ids: list[str]
+    status: str
+
+
+class BulkFeedbackDelete(BaseModel):
+    ids: list[str]
+
+
 VALID_FEEDBACK_STATUSES = ["new", "read", "in-progress", "completed", "archived"]
 
 
@@ -3321,6 +3330,77 @@ async def update_feedback_status(feedback_id: str, status_update: FeedbackStatus
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error updating feedback status: {str(e)}")
+
+
+@app.post("/api/admin/feedback/bulk/status")
+async def bulk_update_feedback_status(bulk_update: BulkFeedbackStatusUpdate, request: Request, x_api_key: str = Header(None)):
+    """Bulk update status of multiple feedback entries"""
+    is_authorized, error = verify_admin_access(request, x_api_key)
+    if not is_authorized:
+        raise HTTPException(status_code=401, detail=error)
+    
+    if bulk_update.status not in VALID_FEEDBACK_STATUSES:
+        raise HTTPException(status_code=400, detail=f"Invalid status. Must be one of: {', '.join(VALID_FEEDBACK_STATUSES)}")
+    
+    if not bulk_update.ids:
+        raise HTTPException(status_code=400, detail="No feedback IDs provided")
+    
+    if not FEEDBACK_PATH.exists():
+        raise HTTPException(status_code=404, detail="Feedback file not found")
+    
+    try:
+        with open(FEEDBACK_PATH, 'r') as f:
+            feedback_list = json.load(f)
+        
+        ids_set = set(bulk_update.ids)
+        updated = 0
+        for fb in feedback_list:
+            if fb.get("id") in ids_set:
+                fb["status"] = bulk_update.status
+                updated += 1
+        
+        with open(FEEDBACK_PATH, 'w') as f:
+            json.dump(feedback_list, f, indent=2)
+        
+        return {"message": f"Updated {updated} feedback entries", "updated": updated}
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error bulk updating feedback: {str(e)}")
+
+
+@app.post("/api/admin/feedback/bulk/delete")
+async def bulk_delete_feedback(bulk_delete: BulkFeedbackDelete, request: Request, x_api_key: str = Header(None)):
+    """Bulk delete multiple feedback entries"""
+    is_authorized, error = verify_admin_access(request, x_api_key)
+    if not is_authorized:
+        raise HTTPException(status_code=401, detail=error)
+    
+    if not bulk_delete.ids:
+        raise HTTPException(status_code=400, detail="No feedback IDs provided")
+    
+    if not FEEDBACK_PATH.exists():
+        raise HTTPException(status_code=404, detail="Feedback file not found")
+    
+    try:
+        with open(FEEDBACK_PATH, 'r') as f:
+            feedback_list = json.load(f)
+        
+        ids_set = set(bulk_delete.ids)
+        original_length = len(feedback_list)
+        feedback_list = [fb for fb in feedback_list if fb.get("id") not in ids_set]
+        deleted = original_length - len(feedback_list)
+        
+        with open(FEEDBACK_PATH, 'w') as f:
+            json.dump(feedback_list, f, indent=2)
+        
+        return {"message": f"Deleted {deleted} feedback entries", "deleted": deleted}
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error bulk deleting feedback: {str(e)}")
 
 
 # =============================================================================
