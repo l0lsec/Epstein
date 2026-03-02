@@ -1733,6 +1733,47 @@
                 </div>
             </div>
 
+            <!-- Bulk Document Operations (Re-download / Re-extract) -->
+            <div class="card" style="margin-bottom: var(--space-lg);">
+                <div class="card-header">
+                    <span class="card-title">📦 Bulk Document Operations</span>
+                </div>
+                <div class="card-body">
+                    <p style="font-size: 0.85rem; color: var(--text-muted); margin-bottom: var(--space-md);">
+                        Paste a list of filenames (one per line, comma-separated, or CSV) to bulk re-download from the DOJ or re-extract transcripts.
+                        Non-EFTA files are automatically skipped during re-download. Maximum 500 files per operation.
+                    </p>
+                    <textarea id="bulk-mgmt-textarea" rows="6"
+                        style="width: 100%; font-family: var(--font-mono); font-size: 0.8rem; padding: var(--space-sm); border: 1px solid var(--border); border-radius: 6px; background: var(--bg-secondary); color: var(--text-primary); resize: vertical; margin-bottom: var(--space-xs);"
+                        placeholder="EFTA00549159.pdf&#10;EFTA00234567.pdf&#10;EFTA00891234.pdf"
+                        oninput="updateBulkMgmtCount()"></textarea>
+                    <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: var(--space-md);">
+                        <span id="bulk-mgmt-count" style="font-size: 0.8rem; color: var(--text-muted);"></span>
+                    </div>
+                    <div style="display: flex; gap: var(--space-sm); flex-wrap: wrap; margin-bottom: var(--space-md);">
+                        <button id="bulk-redownload-btn" class="btn btn-primary" onclick="executeBulkRedownload()">
+                            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                            Bulk Re-download from DOJ
+                        </button>
+                        <button id="bulk-reextract-btn" class="btn btn-secondary" onclick="executeBulkReExtract()">
+                            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
+                            Bulk Re-extract Transcripts
+                        </button>
+                    </div>
+                    <div id="bulk-mgmt-progress" style="display: none; margin-bottom: var(--space-md); padding: var(--space-md); border-radius: 6px; background: var(--bg-tertiary); border: 1px solid var(--border); font-size: 0.85rem;">
+                        <div style="display: flex; align-items: center; gap: var(--space-sm); margin-bottom: var(--space-sm);">
+                            <span class="spinner" style="width:14px;height:14px;flex-shrink:0;"></span>
+                            <span id="bulk-mgmt-progress-text">Processing...</span>
+                        </div>
+                        <div style="width: 100%; background: var(--bg-secondary); border-radius: 4px; height: 8px; overflow: hidden;">
+                            <div id="bulk-mgmt-progress-bar" style="height: 100%; width: 0%; background: var(--accent); border-radius: 4px; transition: width 0.3s ease;"></div>
+                        </div>
+                        <div id="bulk-mgmt-progress-detail" style="margin-top: var(--space-xs); font-family: var(--font-mono); font-size: 0.75rem; color: var(--text-muted);"></div>
+                    </div>
+                    <div id="bulk-mgmt-results" style="display: none;"></div>
+                </div>
+            </div>
+
             <!-- Status Page Management -->
             <div class="card" style="margin-bottom: var(--space-lg); border-color: var(--warning);">
                 <div class="card-header" style="background: var(--warning-dim);">
@@ -2389,7 +2430,7 @@
         </div>
     </main>
 
-    <script src="/static/admin.js?v=17"></script>
+    <script src="/static/admin.js?v=19"></script>
 </body>
 </html>
 

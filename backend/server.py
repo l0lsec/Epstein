@@ -6,6 +6,8 @@ FastAPI backend for document search and LLM-powered analysis
 import os
 import json
 import asyncio
+import uuid
+import time as _time
 from html import escape as html_escape
 from pathlib import Path
 from typing import Optional, List
@@ -4035,6 +4037,537 @@ async def re_extract_document(doc_id: str, request: Request, x_api_key: str = He
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error re-extracting document: {str(e)}")
+
+
+# =========================================================================
+# Bulk Document Re-download / Re-extract Endpoints
+# =========================================================================
+
+class BulkFilenamesRequest(BaseModel):
+    filenames: List[str]
+
+
+@app.post("/api/admin/documents/resolve-filenames")
+async def resolve_filenames(body: BulkFilenamesRequest, request: Request, x_api_key: str = Header(None)):
+    """Resolve a list of filenames to document records (for bulk operations UI)."""
+    is_authorized, error = verify_admin_access(request, x_api_key)
+    if not is_authorized:
+        raise HTTPException(status_code=401, detail=error)
+
+    if not db:
+        raise HTTPException(status_code=503, detail="Database not initialized")
+
+    filenames = [f.strip() for f in body.filenames if f.strip()]
+    if not filenames:
+        raise HTTPException(status_code=400, detail="No filenames provided")
+    if len(filenames) > 500:
+        raise HTTPException(status_code=400, detail="Maximum 500 filenames")
+
+    doc_map = db.get_documents_by_filenames(filenames)
+    not_found = [f for f in filenames if f not in doc_map]
+
+    return {
+        "found": doc_map,
+        "not_found": not_found,
+    }
+
+
+# =========================================================================
+# Background Task Infrastructure (async ops behind Cloudflare proxy)
+# =========================================================================
+
+_bg_tasks: dict = {}
+_BG_TASK_TTL = 3600
+
+
+def _cleanup_bg_tasks():
+    now = _time.time()
+    expired = [tid for tid, t in _bg_tasks.items()
+               if t["status"] != "running" and now - t.get("created_at", 0) > _BG_TASK_TTL]
+    for tid in expired:
+        del _bg_tasks[tid]
+
+
+async def _bg_redownload(task_id: str, doc_id: str):
+    try:
+        doc = db.get_document(doc_id, include_hidden=True)
+        if not doc:
+            _bg_tasks[task_id].update(status="failed", result={"error": "Document not found"})
+            return
+
+        filename = doc.get("filename", "")
+        efta_num, dataset_num = _parse_efta_info(filename)
+        if efta_num is None:
+            _bg_tasks[task_id].update(status="failed", result={"error": f"Not an EFTA file: {filename}"})
+            return
+        if dataset_num is None:
+            _bg_tasks[task_id].update(status="failed", result={"error": f"EFTA number outside known dataset ranges"})
+            return
+
+        ext = Path(filename).suffix or ".pdf"
+        doj_url = f"https://www.justice.gov/epstein/files/DataSet%20{dataset_num}/EFTA{efta_num:08d}{ext}"
+        file_path = (BASE_PATH / doc["path"]).resolve()
+        if not str(file_path).startswith(str(BASE_PATH.resolve())):
+            _bg_tasks[task_id].update(status="failed", result={"error": "Path traversal denied"})
+            return
+
+        old_size = file_path.stat().st_size if file_path.exists() else 0
+
+        import shutil
+        backup_path = file_path.with_suffix(file_path.suffix + ".bak")
+        if file_path.exists():
+            shutil.copy2(str(file_path), str(backup_path))
+
+        async with httpx.AsyncClient(follow_redirects=True, timeout=120.0) as client:
+            resp = await client.get(doj_url, headers=DOJ_DOWNLOAD_HEADERS)
+
+        if resp.status_code == 404:
+            if backup_path.exists():
+                backup_path.unlink()
+            _bg_tasks[task_id].update(status="failed", result={"error": f"Not found on DOJ: {doj_url}"})
+            return
+        if resp.status_code != 200:
+            if backup_path.exists():
+                backup_path.unlink()
+            _bg_tasks[task_id].update(status="failed", result={"error": f"DOJ returned HTTP {resp.status_code}"})
+            return
+        if len(resp.content) < 100:
+            if backup_path.exists():
+                backup_path.unlink()
+            _bg_tasks[task_id].update(status="failed", result={"error": "Suspiciously small file from DOJ"})
+            return
+
+        file_path.parent.mkdir(parents=True, exist_ok=True)
+        file_path.write_bytes(resp.content)
+        new_size = len(resp.content)
+
+        extracted_json = BASE_PATH / "extracted_text" / f"{doc_id}.json"
+        if extracted_json.exists():
+            extracted_json.unlink()
+        stale_thumb = THUMBNAILS_PATH / f"{doc_id}.jpg"
+        if stale_thumb.exists():
+            stale_thumb.unlink()
+        if backup_path.exists():
+            backup_path.unlink()
+
+        _stats_cache.invalidate()
+        _bootstrap_cache.invalidate()
+
+        security_logger.log_system_event(
+            "document_redownloaded",
+            f"Document re-downloaded from DOJ (async): {filename} (old={old_size}, new={new_size})",
+            document_id=doc_id
+        )
+
+        _bg_tasks[task_id].update(status="completed", result={
+            "success": True,
+            "filename": filename,
+            "old_size": old_size,
+            "new_size": new_size,
+            "size_changed": old_size != new_size,
+            "doj_url": doj_url,
+        })
+    except Exception as e:
+        _bg_tasks[task_id].update(status="failed", result={"error": str(e)})
+
+
+async def _bg_re_extract(task_id: str, doc_id: str):
+    try:
+        doc = db.get_document(doc_id, include_hidden=True)
+        if not doc:
+            _bg_tasks[task_id].update(status="failed", result={"error": "Document not found"})
+            return
+
+        file_path = (BASE_PATH / doc["path"]).resolve()
+        if not str(file_path).startswith(str(BASE_PATH.resolve())):
+            _bg_tasks[task_id].update(status="failed", result={"error": "Path traversal denied"})
+            return
+        if not file_path.exists():
+            _bg_tasks[task_id].update(status="failed", result={"error": f"File not found on disk: {doc['path']}"})
+            return
+
+        ext = file_path.suffix.lower()
+        pdf_exts = {'.pdf'}
+        image_exts = {'.jpg', '.jpeg', '.png', '.gif', '.tiff', '.bmp'}
+        media_exts = {'.mp3', '.mp4', '.wav', '.m4a', '.avi', '.mov', '.wmv'}
+
+        from extractor import PDFExtractor, ImageExtractor, AudioVideoExtractor
+
+        result = None
+        if ext in pdf_exts:
+            extractor = PDFExtractor(str(BASE_PATH))
+            result = extractor.extract_pdf(file_path)
+        elif ext in image_exts:
+            extractor = ImageExtractor(str(BASE_PATH))
+            result = extractor.extract_image(file_path)
+        elif ext in media_exts:
+            extractor = AudioVideoExtractor(str(BASE_PATH))
+            result = extractor.transcribe_file(file_path)
+        else:
+            _bg_tasks[task_id].update(status="failed", result={"error": f"Unsupported file type: {ext}"})
+            return
+
+        if not result or not result.get("has_content"):
+            error_msg = result.get("error", "No text content extracted") if result else "Extraction returned nothing"
+            _bg_tasks[task_id].update(status="failed", result={"error": error_msg})
+            return
+
+        extracted_dir = BASE_PATH / "extracted_text"
+        extracted_dir.mkdir(exist_ok=True)
+        output_file = extracted_dir / f"{doc_id}.json"
+        with open(output_file, 'w') as f:
+            json.dump(result, f)
+
+        result["id"] = doc_id
+        result["path"] = doc["path"]
+        result["is_hidden"] = doc.get("is_hidden", 0)
+        db.insert_document(result)
+
+        stale_thumb = THUMBNAILS_PATH / f"{doc_id}.jpg"
+        if stale_thumb.exists():
+            stale_thumb.unlink()
+
+        vector_updated = False
+        full_text = result.get("full_text", "")
+        if vector_store and full_text and len(full_text) > 100:
+            try:
+                vector_store.add_document(
+                    doc_id=doc_id,
+                    text=full_text,
+                    metadata={
+                        "filename": doc.get("filename", ""),
+                        "category": result.get("category", doc.get("category", "Unknown")),
+                    }
+                )
+                vector_store._save()
+                vector_updated = True
+            except Exception:
+                pass
+
+        _stats_cache.invalidate()
+        _bootstrap_cache.invalidate()
+
+        security_logger.log_system_event(
+            "document_re_extracted",
+            f"Document text re-extracted (async): {doc.get('filename', doc_id)} "
+            f"(chars={result.get('char_count', 0)}, pages={result.get('page_count', 0)})",
+            document_id=doc_id
+        )
+
+        _bg_tasks[task_id].update(status="completed", result={
+            "success": True,
+            "filename": doc.get("filename", ""),
+            "char_count": result.get("char_count", 0),
+            "page_count": result.get("page_count", 0),
+            "file_type": result.get("file_type", ext.lstrip('.')),
+            "has_content": True,
+            "vector_updated": vector_updated,
+        })
+    except Exception as e:
+        _bg_tasks[task_id].update(status="failed", result={"error": str(e)})
+
+
+@app.post("/api/admin/documents/{doc_id}/redownload-async")
+async def redownload_document_async(doc_id: str, request: Request, x_api_key: str = Header(None)):
+    """Start re-download as a background task, returns task_id for polling."""
+    is_authorized, error = verify_admin_access(request, x_api_key)
+    if not is_authorized:
+        raise HTTPException(status_code=401, detail=error)
+    if not db:
+        raise HTTPException(status_code=503, detail="Database not initialized")
+    doc = db.get_document(doc_id, include_hidden=True)
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    _cleanup_bg_tasks()
+    task_id = str(uuid.uuid4())
+    _bg_tasks[task_id] = {"status": "running", "result": None, "created_at": _time.time()}
+    asyncio.create_task(_bg_redownload(task_id, doc_id))
+    return {"task_id": task_id, "status": "running"}
+
+
+@app.post("/api/admin/documents/{doc_id}/re-extract-async")
+async def re_extract_document_async(doc_id: str, request: Request, x_api_key: str = Header(None)):
+    """Start re-extraction as a background task, returns task_id for polling."""
+    is_authorized, error = verify_admin_access(request, x_api_key)
+    if not is_authorized:
+        raise HTTPException(status_code=401, detail=error)
+    if not db:
+        raise HTTPException(status_code=503, detail="Database not initialized")
+    doc = db.get_document(doc_id, include_hidden=True)
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    _cleanup_bg_tasks()
+    task_id = str(uuid.uuid4())
+    _bg_tasks[task_id] = {"status": "running", "result": None, "created_at": _time.time()}
+    asyncio.create_task(_bg_re_extract(task_id, doc_id))
+    return {"task_id": task_id, "status": "running"}
+
+
+@app.get("/api/admin/tasks/{task_id}")
+async def get_task_status(task_id: str, request: Request, x_api_key: str = Header(None)):
+    """Poll the status of a background task."""
+    is_authorized, error = verify_admin_access(request, x_api_key)
+    if not is_authorized:
+        raise HTTPException(status_code=401, detail=error)
+    task = _bg_tasks.get(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    return {"task_id": task_id, "status": task["status"], "result": task["result"]}
+
+
+@app.post("/api/admin/documents/bulk-redownload")
+async def bulk_redownload_documents(body: BulkFilenamesRequest, request: Request, x_api_key: str = Header(None)):
+    """Re-download multiple EFTA documents from the DOJ website in sequence."""
+    is_authorized, error = verify_admin_access(request, x_api_key)
+    if not is_authorized:
+        raise HTTPException(status_code=401, detail=error)
+
+    if not db:
+        raise HTTPException(status_code=503, detail="Database not initialized")
+
+    filenames = [f.strip() for f in body.filenames if f.strip()]
+    if not filenames:
+        raise HTTPException(status_code=400, detail="No filenames provided")
+    if len(filenames) > 500:
+        raise HTTPException(status_code=400, detail="Maximum 500 filenames per bulk redownload")
+
+    doc_map = db.get_documents_by_filenames(filenames)
+    not_found = [f for f in filenames if f not in doc_map]
+
+    results = []
+    skipped = []
+    processed = 0
+    failed = 0
+
+    for fname in filenames:
+        if fname not in doc_map:
+            continue
+        doc = doc_map[fname]
+        filename = doc.get("filename", fname)
+
+        efta_num, dataset_num = _parse_efta_info(filename)
+        if efta_num is None or dataset_num is None:
+            skipped.append(filename)
+            continue
+
+        ext = Path(filename).suffix or ".pdf"
+        doj_url = f"https://www.justice.gov/epstein/files/DataSet%20{dataset_num}/EFTA{efta_num:08d}{ext}"
+        doc_id = doc["id"]
+
+        try:
+            file_path = (BASE_PATH / doc["path"]).resolve()
+            if not str(file_path).startswith(str(BASE_PATH.resolve())):
+                results.append({"filename": filename, "success": False, "error": "Path traversal denied"})
+                failed += 1
+                continue
+
+            old_size = file_path.stat().st_size if file_path.exists() else 0
+
+            import shutil
+            backup_path = file_path.with_suffix(file_path.suffix + ".bak")
+            if file_path.exists():
+                shutil.copy2(str(file_path), str(backup_path))
+
+            async with httpx.AsyncClient(follow_redirects=True, timeout=120.0) as client:
+                resp = await client.get(doj_url, headers=DOJ_DOWNLOAD_HEADERS)
+
+            if resp.status_code == 404:
+                if backup_path.exists():
+                    backup_path.unlink()
+                results.append({"filename": filename, "success": False, "error": f"Not found on DOJ ({doj_url})"})
+                failed += 1
+                continue
+            if resp.status_code != 200:
+                if backup_path.exists():
+                    backup_path.unlink()
+                results.append({"filename": filename, "success": False, "error": f"DOJ HTTP {resp.status_code}"})
+                failed += 1
+                continue
+            if len(resp.content) < 100:
+                if backup_path.exists():
+                    backup_path.unlink()
+                results.append({"filename": filename, "success": False, "error": "Suspiciously small file from DOJ"})
+                failed += 1
+                continue
+
+            file_path.parent.mkdir(parents=True, exist_ok=True)
+            file_path.write_bytes(resp.content)
+            new_size = len(resp.content)
+
+            extracted_json = BASE_PATH / "extracted_text" / f"{doc_id}.json"
+            if extracted_json.exists():
+                extracted_json.unlink()
+            stale_thumb = THUMBNAILS_PATH / f"{doc_id}.jpg"
+            if stale_thumb.exists():
+                stale_thumb.unlink()
+            if backup_path.exists():
+                backup_path.unlink()
+
+            processed += 1
+            results.append({
+                "filename": filename,
+                "success": True,
+                "old_size": old_size,
+                "new_size": new_size,
+                "size_changed": old_size != new_size,
+            })
+        except Exception as e:
+            failed += 1
+            results.append({"filename": filename, "success": False, "error": str(e)})
+
+    _stats_cache.invalidate()
+    _bootstrap_cache.invalidate()
+
+    security_logger.log_system_event(
+        "bulk_documents_redownloaded",
+        f"Bulk redownload: {processed} succeeded, {failed} failed, "
+        f"{len(skipped)} skipped (non-EFTA), {len(not_found)} not found, "
+        f"{len(filenames)} total submitted"
+    )
+
+    return {
+        "success": True,
+        "processed": processed,
+        "failed": failed,
+        "skipped": skipped,
+        "not_found": not_found,
+        "results": results,
+    }
+
+
+@app.post("/api/admin/documents/bulk-re-extract")
+async def bulk_re_extract_documents(body: BulkFilenamesRequest, request: Request, x_api_key: str = Header(None)):
+    """Re-extract text/transcript from multiple documents in sequence."""
+    is_authorized, error = verify_admin_access(request, x_api_key)
+    if not is_authorized:
+        raise HTTPException(status_code=401, detail=error)
+
+    if not db:
+        raise HTTPException(status_code=503, detail="Database not initialized")
+
+    filenames = [f.strip() for f in body.filenames if f.strip()]
+    if not filenames:
+        raise HTTPException(status_code=400, detail="No filenames provided")
+    if len(filenames) > 500:
+        raise HTTPException(status_code=400, detail="Maximum 500 filenames per bulk re-extract")
+
+    doc_map = db.get_documents_by_filenames(filenames)
+    not_found = [f for f in filenames if f not in doc_map]
+
+    from extractor import PDFExtractor, ImageExtractor, AudioVideoExtractor
+
+    pdf_exts = {'.pdf'}
+    image_exts = {'.jpg', '.jpeg', '.png', '.gif', '.tiff', '.bmp'}
+    media_exts = {'.mp3', '.mp4', '.wav', '.m4a', '.avi', '.mov', '.wmv'}
+
+    results = []
+    skipped = []
+    processed = 0
+    failed = 0
+
+    for fname in filenames:
+        if fname not in doc_map:
+            continue
+        doc = doc_map[fname]
+        doc_id = doc["id"]
+        filename = doc.get("filename", fname)
+
+        try:
+            file_path = (BASE_PATH / doc["path"]).resolve()
+            if not str(file_path).startswith(str(BASE_PATH.resolve())):
+                results.append({"filename": filename, "success": False, "error": "Path traversal denied"})
+                failed += 1
+                continue
+            if not file_path.exists():
+                results.append({"filename": filename, "success": False, "error": "File not found on disk"})
+                failed += 1
+                continue
+
+            ext = file_path.suffix.lower()
+            result = None
+            if ext in pdf_exts:
+                extractor = PDFExtractor(str(BASE_PATH))
+                result = extractor.extract_pdf(file_path)
+            elif ext in image_exts:
+                extractor = ImageExtractor(str(BASE_PATH))
+                result = extractor.extract_image(file_path)
+            elif ext in media_exts:
+                extractor = AudioVideoExtractor(str(BASE_PATH))
+                result = extractor.transcribe_file(file_path)
+            else:
+                skipped.append(filename)
+                continue
+
+            if not result or not result.get("has_content"):
+                error_msg = result.get("error", "No text content extracted") if result else "Extraction returned nothing"
+                results.append({"filename": filename, "success": False, "error": error_msg})
+                failed += 1
+                continue
+
+            extracted_dir = BASE_PATH / "extracted_text"
+            extracted_dir.mkdir(exist_ok=True)
+            output_file = extracted_dir / f"{doc_id}.json"
+            with open(output_file, 'w') as f:
+                json.dump(result, f)
+
+            result["id"] = doc_id
+            result["path"] = doc["path"]
+            result["is_hidden"] = doc.get("is_hidden", 0)
+            db.insert_document(result)
+
+            stale_thumb = THUMBNAILS_PATH / f"{doc_id}.jpg"
+            if stale_thumb.exists():
+                stale_thumb.unlink()
+
+            vector_updated = False
+            full_text = result.get("full_text", "")
+            if vector_store and full_text and len(full_text) > 100:
+                try:
+                    vector_store.add_document(
+                        doc_id=doc_id,
+                        text=full_text,
+                        metadata={
+                            "filename": filename,
+                            "category": result.get("category", doc.get("category", "Unknown")),
+                        }
+                    )
+                    vector_store._save()
+                    vector_updated = True
+                except Exception:
+                    pass
+
+            processed += 1
+            results.append({
+                "filename": filename,
+                "success": True,
+                "char_count": result.get("char_count", 0),
+                "page_count": result.get("page_count", 0),
+                "vector_updated": vector_updated,
+            })
+        except Exception as e:
+            failed += 1
+            results.append({"filename": filename, "success": False, "error": str(e)})
+
+    _stats_cache.invalidate()
+    _bootstrap_cache.invalidate()
+
+    security_logger.log_system_event(
+        "bulk_documents_re_extracted",
+        f"Bulk re-extract: {processed} succeeded, {failed} failed, "
+        f"{len(skipped)} skipped (unsupported type), {len(not_found)} not found, "
+        f"{len(filenames)} total submitted"
+    )
+
+    return {
+        "success": True,
+        "processed": processed,
+        "failed": failed,
+        "skipped": skipped,
+        "not_found": not_found,
+        "results": results,
+    }
 
 
 # =========================================================================

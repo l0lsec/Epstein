@@ -2096,6 +2096,37 @@ class Database:
                 "already_visible": already_visible
             }
     
+    def get_documents_by_filenames(self, filenames: List[str], include_hidden: bool = True) -> Dict[str, Dict[str, Any]]:
+        """Resolve a list of filenames to document records in bulk.
+
+        Args:
+            filenames: List of filenames to look up (max 500)
+            include_hidden: Whether to include hidden documents
+
+        Returns:
+            Dict mapping filename -> document record for found documents
+        """
+        if not filenames:
+            return {}
+        filenames = filenames[:500]
+        result = {}
+        with self.get_connection() as conn:
+            hidden_clause = "" if include_hidden else " AND is_hidden = 0"
+            for fname in filenames:
+                fname = fname.strip()
+                if not fname:
+                    continue
+                cursor = conn.execute(
+                    f"SELECT id, filename, original_filename, path, category, subcategory, "
+                    f"file_type, page_count, char_count, is_hidden FROM documents "
+                    f"WHERE filename = ?{hidden_clause}",
+                    (fname,)
+                )
+                row = cursor.fetchone()
+                if row:
+                    result[fname] = dict(row)
+        return result
+
     # =========================================================================
     # Category Visibility Methods
     # =========================================================================

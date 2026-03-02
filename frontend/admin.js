@@ -2317,6 +2317,305 @@ async function reExtractDocument() {
 }
 
 // ============================================================================
+// BULK DOCUMENT MANAGEMENT FUNCTIONS (Re-download / Re-extract)
+// ============================================================================
+
+function updateBulkMgmtCount() {
+    const textarea = document.getElementById('bulk-mgmt-textarea');
+    const countEl = document.getElementById('bulk-mgmt-count');
+    if (!textarea || !countEl) return;
+    const filenames = parseCsvFilenames(textarea.value);
+    countEl.textContent = filenames.length > 0 ? `${filenames.length} filename(s) detected` : '';
+}
+
+function _renderBulkMgmtResults(data, operationLabel) {
+    const resultsEl = document.getElementById('bulk-mgmt-results');
+    if (!resultsEl) return;
+
+    let html = '<div style="padding: var(--space-md); font-size: 0.85rem; border: 1px solid var(--border); border-radius: 6px; background: var(--bg-tertiary);">';
+    html += `<div style="color: var(--success, #10b981); font-weight: 500; margin-bottom: var(--space-sm);">${operationLabel} complete: ${data.processed} succeeded`;
+    if (data.failed > 0) html += `, <span style="color: var(--danger);">${data.failed} failed</span>`;
+    html += '</div>';
+
+    if (data.skipped && data.skipped.length > 0) {
+        html += `<details style="margin-bottom: var(--space-xs);"><summary style="color: var(--text-muted); cursor: pointer;">${data.skipped.length} file(s) skipped (unsupported type)</summary>`;
+        html += '<div style="max-height: 120px; overflow-y: auto; margin-top: var(--space-xs); padding: var(--space-xs); background: var(--bg-secondary); border-radius: 4px; font-family: var(--font-mono); font-size: 0.75rem;">';
+        html += data.skipped.map(f => escapeHtml(f)).join('<br>');
+        html += '</div></details>';
+    }
+
+    if (data.not_found && data.not_found.length > 0) {
+        html += `<details style="margin-bottom: var(--space-xs);"><summary style="color: var(--warning); cursor: pointer;">${data.not_found.length} filename(s) not found in database</summary>`;
+        html += '<div style="max-height: 120px; overflow-y: auto; margin-top: var(--space-xs); padding: var(--space-xs); background: var(--bg-secondary); border-radius: 4px; font-family: var(--font-mono); font-size: 0.75rem;">';
+        html += data.not_found.map(f => escapeHtml(f)).join('<br>');
+        html += '</div></details>';
+    }
+
+    const successes = (data.results || []).filter(r => r.success);
+    const failures = (data.results || []).filter(r => !r.success);
+
+    if (successes.length > 0) {
+        html += `<details style="margin-bottom: var(--space-xs);"><summary style="color: var(--success, #10b981); cursor: pointer;">${successes.length} successful</summary>`;
+        html += '<div style="max-height: 200px; overflow-y: auto; margin-top: var(--space-xs); padding: var(--space-xs); background: var(--bg-secondary); border-radius: 4px; font-family: var(--font-mono); font-size: 0.75rem;">';
+        for (const r of successes) {
+            let detail = escapeHtml(r.filename);
+            if (r.char_count !== undefined) detail += ` — ${r.char_count.toLocaleString()} chars, ${r.page_count} pages`;
+            if (r.old_size !== undefined) {
+                const oldKB = (r.old_size / 1024).toFixed(1);
+                const newKB = (r.new_size / 1024).toFixed(1);
+                detail += r.size_changed ? ` — ${oldKB} KB → ${newKB} KB` : ` — ${newKB} KB (unchanged)`;
+            }
+            html += detail + '<br>';
+        }
+        html += '</div></details>';
+    }
+
+    if (failures.length > 0) {
+        html += `<details open style="margin-bottom: var(--space-xs);"><summary style="color: var(--danger); cursor: pointer;">${failures.length} failed</summary>`;
+        html += '<div style="max-height: 200px; overflow-y: auto; margin-top: var(--space-xs); padding: var(--space-xs); background: var(--bg-secondary); border-radius: 4px; font-family: var(--font-mono); font-size: 0.75rem;">';
+        for (const r of failures) {
+            html += `<span style="color:var(--danger);">${escapeHtml(r.filename)}</span>: ${escapeHtml(r.error || 'Unknown error')}<br>`;
+        }
+        html += '</div></details>';
+    }
+
+    html += '</div>';
+    resultsEl.style.display = 'block';
+    resultsEl.innerHTML = html;
+}
+
+function _setBulkMgmtBusy(busy) {
+    const progressEl = document.getElementById('bulk-mgmt-progress');
+    const redownloadBtn = document.getElementById('bulk-redownload-btn');
+    const reextractBtn = document.getElementById('bulk-reextract-btn');
+
+    if (progressEl) progressEl.style.display = busy ? 'block' : 'none';
+    if (redownloadBtn) redownloadBtn.disabled = busy;
+    if (reextractBtn) reextractBtn.disabled = busy;
+}
+
+function _updateBulkProgress(current, total, filename) {
+    const pct = total > 0 ? Math.round((current / total) * 100) : 0;
+    const textEl = document.getElementById('bulk-mgmt-progress-text');
+    const barEl = document.getElementById('bulk-mgmt-progress-bar');
+    const detailEl = document.getElementById('bulk-mgmt-progress-detail');
+
+    if (textEl) textEl.textContent = `Processing ${current} of ${total} (${pct}%)`;
+    if (barEl) barEl.style.width = `${pct}%`;
+    if (detailEl) detailEl.textContent = filename || '';
+}
+
+async function _resolveFilenames(filenames) {
+    try {
+        const response = await authFetch(`${window.location.origin}/api/admin/documents/resolve-filenames`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ filenames })
+        });
+        if (response.ok) return await response.json();
+    } catch (e) { /* fall through to fallback */ }
+    return await _resolveFilenamesFallback(filenames);
+}
+
+async function _resolveFilenamesFallback(filenames) {
+    const found = {};
+    const not_found = [];
+    for (const fname of filenames) {
+        try {
+            const resp = await authFetch(
+                `${window.location.origin}/api/admin/documents-visibility?search=${encodeURIComponent(fname)}&limit=1`
+            );
+            if (resp.ok) {
+                const data = await resp.json();
+                const match = (data.documents || []).find(d => d.filename === fname);
+                if (match) { found[fname] = match; } else { not_found.push(fname); }
+            } else { not_found.push(fname); }
+        } catch (e) { not_found.push(fname); }
+    }
+    return { found, not_found };
+}
+
+function _validateBulkInput(textarea, resultsEl) {
+    const filenames = parseCsvFilenames(textarea.value);
+    if (filenames.length === 0) {
+        if (resultsEl) {
+            resultsEl.style.display = 'block';
+            resultsEl.innerHTML = '<div style="padding: var(--space-sm); color: var(--warning); font-size: 0.85rem;">No valid filenames found. Paste filenames one per line or comma-separated.</div>';
+        }
+        return null;
+    }
+    if (filenames.length > 500) {
+        if (resultsEl) {
+            resultsEl.style.display = 'block';
+            resultsEl.innerHTML = '<div style="padding: var(--space-sm); color: var(--danger); font-size: 0.85rem;">Maximum 500 filenames per bulk operation. You have ' + filenames.length + '.</div>';
+        }
+        return null;
+    }
+    return filenames;
+}
+
+async function executeBulkRedownload() {
+    const textarea = document.getElementById('bulk-mgmt-textarea');
+    const resultsEl = document.getElementById('bulk-mgmt-results');
+    if (!textarea) return;
+
+    const filenames = _validateBulkInput(textarea, resultsEl);
+    if (!filenames) return;
+
+    const preview = filenames.slice(0, 5).join('\n') + (filenames.length > 5 ? '\n...' : '');
+    if (!confirm(`Re-download ${filenames.length} file(s) from the DOJ website?\n\nNon-EFTA files will be skipped.\n\nFirst files:\n${preview}`)) return;
+
+    _setBulkMgmtBusy(true);
+    _updateBulkProgress(0, filenames.length, 'Resolving filenames...');
+    if (resultsEl) resultsEl.style.display = 'none';
+
+    const results = [];
+    const skipped = [];
+    let processed = 0;
+    let failed = 0;
+    let notFound = [];
+
+    try {
+        const resolved = await _resolveFilenames(filenames);
+        notFound = resolved.not_found || [];
+        const found = resolved.found || {};
+        const docsToProcess = [];
+
+        for (const fname of filenames) {
+            if (!found[fname]) continue;
+            const doc = found[fname];
+            const isEfta = doc.filename && doc.filename.toUpperCase().startsWith('EFTA');
+            if (!isEfta) {
+                skipped.push(doc.filename || fname);
+                continue;
+            }
+            docsToProcess.push({ fname, doc });
+        }
+
+        const total = docsToProcess.length;
+        for (let i = 0; i < total; i++) {
+            const { fname, doc } = docsToProcess[i];
+            _updateBulkProgress(i + 1, total, doc.filename || fname);
+
+            try {
+                const resp = await authFetch(`${window.location.origin}/api/admin/documents/${encodeURIComponent(doc.id)}/redownload`, {
+                    method: 'POST'
+                });
+                if (!resp.ok) {
+                    const msg = await safeErrorMessage(resp, 'Download failed');
+                    results.push({ filename: doc.filename || fname, success: false, error: msg });
+                    failed++;
+                } else {
+                    const data = await resp.json();
+                    results.push({
+                        filename: data.filename || fname,
+                        success: true,
+                        old_size: data.old_size,
+                        new_size: data.new_size,
+                        size_changed: data.size_changed,
+                    });
+                    processed++;
+                }
+            } catch (err) {
+                results.push({ filename: doc.filename || fname, success: false, error: err.message });
+                failed++;
+            }
+        }
+
+        _renderBulkMgmtResults({ processed, failed, skipped, not_found: notFound, results }, 'Bulk re-download');
+    } catch (error) {
+        console.error('Bulk redownload error:', error);
+        if (resultsEl) {
+            resultsEl.style.display = 'block';
+            resultsEl.innerHTML = `<div style="padding: var(--space-sm); color: var(--danger); font-size: 0.85rem;">Error: ${escapeHtml(error.message)}</div>`;
+        }
+    } finally {
+        _setBulkMgmtBusy(false);
+    }
+}
+
+async function executeBulkReExtract() {
+    const textarea = document.getElementById('bulk-mgmt-textarea');
+    const resultsEl = document.getElementById('bulk-mgmt-results');
+    if (!textarea) return;
+
+    const filenames = _validateBulkInput(textarea, resultsEl);
+    if (!filenames) return;
+
+    const preview = filenames.slice(0, 5).join('\n') + (filenames.length > 5 ? '\n...' : '');
+    if (!confirm(`Re-extract transcripts for ${filenames.length} file(s)?\n\nUnsupported file types will be skipped.\n\nFirst files:\n${preview}`)) return;
+
+    _setBulkMgmtBusy(true);
+    _updateBulkProgress(0, filenames.length, 'Resolving filenames...');
+    if (resultsEl) resultsEl.style.display = 'none';
+
+    const results = [];
+    const skipped = [];
+    let processed = 0;
+    let failed = 0;
+    let notFound = [];
+
+    try {
+        const resolved = await _resolveFilenames(filenames);
+        notFound = resolved.not_found || [];
+        const found = resolved.found || {};
+        const docsToProcess = [];
+
+        const supportedExts = ['.pdf', '.jpg', '.jpeg', '.png', '.gif', '.tiff', '.bmp', '.mp3', '.mp4', '.wav', '.m4a', '.avi', '.mov', '.wmv'];
+        for (const fname of filenames) {
+            if (!found[fname]) continue;
+            const doc = found[fname];
+            const ext = (doc.filename || fname).toLowerCase().match(/\.[^.]+$/);
+            if (!ext || !supportedExts.includes(ext[0])) {
+                skipped.push(doc.filename || fname);
+                continue;
+            }
+            docsToProcess.push({ fname, doc });
+        }
+
+        const total = docsToProcess.length;
+        for (let i = 0; i < total; i++) {
+            const { fname, doc } = docsToProcess[i];
+            _updateBulkProgress(i + 1, total, doc.filename || fname);
+
+            try {
+                const resp = await authFetch(`${window.location.origin}/api/admin/documents/${encodeURIComponent(doc.id)}/re-extract`, {
+                    method: 'POST'
+                });
+                if (!resp.ok) {
+                    const msg = await safeErrorMessage(resp, 'Extraction failed');
+                    results.push({ filename: doc.filename || fname, success: false, error: msg });
+                    failed++;
+                } else {
+                    const data = await resp.json();
+                    results.push({
+                        filename: data.filename || fname,
+                        success: true,
+                        char_count: data.char_count,
+                        page_count: data.page_count,
+                        vector_updated: data.vector_updated,
+                    });
+                    processed++;
+                }
+            } catch (err) {
+                results.push({ filename: doc.filename || fname, success: false, error: err.message });
+                failed++;
+            }
+        }
+
+        _renderBulkMgmtResults({ processed, failed, skipped, not_found: notFound, results }, 'Bulk re-extract');
+    } catch (error) {
+        console.error('Bulk re-extract error:', error);
+        if (resultsEl) {
+            resultsEl.style.display = 'block';
+            resultsEl.innerHTML = `<div style="padding: var(--space-sm); color: var(--danger); font-size: 0.85rem;">Error: ${escapeHtml(error.message)}</div>`;
+        }
+    } finally {
+        _setBulkMgmtBusy(false);
+    }
+}
+
+// ============================================================================
 // CONTENT MANAGEMENT FUNCTIONS (Ask AI Toggle + Pinned Documents)
 // ============================================================================
 
