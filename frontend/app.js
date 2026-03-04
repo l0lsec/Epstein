@@ -2907,7 +2907,7 @@ function downloadCSV(documents, filename) {
             escapeCSVField(doc.document_date || ''),
             escapeCSVField(doc.doj_url || '')
         ];
-        if (hasText) row.push(escapeCSVField(doc.full_text || ''));
+        if (hasText) row.push(escapeCSVField((doc.full_text || '').replace(/[\r\n]+/g, ' ')));
         csv += row.join(',') + '\n';
     }
     
