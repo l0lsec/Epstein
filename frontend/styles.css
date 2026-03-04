@@ -915,30 +915,108 @@ body {
     cursor: not-allowed;
 }
 
-.export-controls {
-    display: inline-flex;
-    align-items: center;
+/* Export CSV Modal */
+.export-modal-content {
+    max-width: 420px;
+    width: 90%;
+}
+
+.export-modal-content .modal-header {
+    padding: var(--space-lg) var(--space-xl);
+    padding-bottom: 0;
+}
+
+.export-modal-body {
+    padding: var(--space-lg) var(--space-xl) var(--space-xl);
+}
+
+.export-modal-body > p {
+    color: var(--text-secondary);
+    font-size: 0.9rem;
+    margin-bottom: var(--space-md);
+}
+
+.export-modal-options {
+    margin-bottom: var(--space-lg);
+}
+
+.export-modal-option {
+    display: flex;
+    align-items: flex-start;
+    gap: var(--space-sm);
+    padding: var(--space-md);
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    cursor: pointer;
+    transition: border-color var(--transition-fast);
+}
+
+.export-modal-option:hover {
+    border-color: var(--accent-dim);
+}
+
+.export-modal-option input[type="checkbox"] {
+    margin-top: 3px;
+    accent-color: var(--accent);
+    cursor: pointer;
+    flex-shrink: 0;
+}
+
+.export-modal-option strong {
+    display: block;
+    color: var(--text-primary);
+    font-size: 0.9rem;
+    margin-bottom: 4px;
+}
+
+.export-option-hint {
+    display: block;
+    color: var(--text-secondary);
+    font-size: 0.8rem;
+    line-height: 1.4;
+}
+
+.export-modal-actions {
+    display: flex;
+    justify-content: flex-end;
     gap: var(--space-sm);
 }
 
-.export-text-toggle {
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-    font-size: 0.8rem;
+.export-modal-btn {
+    padding: var(--space-xs) var(--space-lg);
+    border-radius: 6px;
+    font-family: var(--font-body);
+    font-size: 0.9rem;
+    cursor: pointer;
+    transition: all var(--transition-fast);
+    border: 1px solid var(--border);
+}
+
+.export-modal-btn.cancel {
+    background: var(--bg-tertiary);
     color: var(--text-secondary);
-    cursor: pointer;
-    user-select: none;
-    white-space: nowrap;
 }
 
-.export-text-toggle:hover {
+.export-modal-btn.cancel:hover {
     color: var(--text-primary);
+    background: var(--bg-primary);
 }
 
-.export-text-toggle input[type="checkbox"] {
-    accent-color: var(--accent);
-    cursor: pointer;
+.export-modal-btn.confirm {
+    background: var(--accent);
+    color: var(--bg-primary);
+    border-color: var(--accent);
+    font-weight: 600;
+}
+
+.export-modal-btn.confirm:hover {
+    opacity: 0.9;
+}
+
+.export-modal-btn.confirm:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
 }
 
 /* Export button in pagination-info area */

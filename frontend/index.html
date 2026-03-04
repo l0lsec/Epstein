@@ -37,7 +37,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Crimson+Pro:wght@400;500;600&family=JetBrains+Mono:wght@400;500&family=Source+Sans+3:wght@300;400;500;600;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="/static/styles.css?v=41">
+    <link rel="stylesheet" href="/static/styles.css?v=42">
     
     <!-- Structured Data (JSON-LD) -->
     <script type="application/ld+json">
@@ -306,12 +306,7 @@
                                 </button>
                             </div>
                         </div>
-                        <div class="export-controls">
-                            <button id="export-search-results" class="export-btn" title="Export all results to CSV">Export CSV</button>
-                            <label class="export-text-toggle" title="Include extracted text content (larger file, limited to 5,000 results)">
-                                <input type="checkbox" id="export-search-include-text"> Include text
-                            </label>
-                        </div>
+                        <button id="export-search-results" class="export-btn" title="Export all results to CSV">Export CSV</button>
                     </div>
                 </div>
                 <div id="results-list" class="results-list"></div>
@@ -367,12 +362,7 @@
                 </div>
                 <div class="pagination-info">
                     <span id="browse-count"></span>
-                    <div class="export-controls">
-                        <button id="export-browse-results" class="export-btn" title="Export all documents to CSV">Export CSV</button>
-                        <label class="export-text-toggle" title="Include extracted text content (larger file, limited to 5,000 results)">
-                            <input type="checkbox" id="export-browse-include-text"> Include text
-                        </label>
-                    </div>
+                    <button id="export-browse-results" class="export-btn" title="Export all documents to CSV">Export CSV</button>
                 </div>
             </div>
             
@@ -682,6 +672,33 @@
                 </div>
             </div>
         </div>
+
+        <!-- Export CSV Modal -->
+        <div id="export-modal" class="modal hidden">
+            <div class="modal-backdrop"></div>
+            <div class="modal-content export-modal-content">
+                <button class="modal-close" id="export-modal-close">&times;</button>
+                <div class="modal-header">
+                    <h2>Export CSV</h2>
+                </div>
+                <div class="export-modal-body">
+                    <p>Choose what to include in the export:</p>
+                    <div class="export-modal-options">
+                        <label class="export-modal-option">
+                            <input type="checkbox" id="export-include-text">
+                            <div>
+                                <strong>Include text content</strong>
+                                <span class="export-option-hint">Includes extracted PDF/OCR text for each document. Limited to 5,000 documents. File will be significantly larger.</span>
+                            </div>
+                        </label>
+                    </div>
+                    <div class="export-modal-actions">
+                        <button id="export-modal-cancel" class="export-modal-btn cancel">Cancel</button>
+                        <button id="export-modal-confirm" class="export-modal-btn confirm">Export</button>
+                    </div>
+                </div>
+            </div>
+        </div>
     </main>
 
     <footer class="footer">
@@ -752,7 +769,7 @@
     </footer>
 
     <script src="https://www.google.com/recaptcha/api.js?render=6Lf9EDYsAAAAANDlA_xYFIM7Ylccgmc24LhZgDIr"></script>
-    <script src="/static/app.js?v=40"></script></invoke>
+    <script src="/static/app.js?v=41"></script></invoke>
 </body>
 </html>
 

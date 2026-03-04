@@ -586,7 +586,10 @@ function setupEventListeners() {
     
     // Keyboard shortcuts
     document.addEventListener('keydown', e => {
-        if (e.key === 'Escape') closeModal();
+        if (e.key === 'Escape') {
+            closeModal();
+            closeExportModal();
+        }
         // Arrow key navigation for documents when modal is open
         if (!elements.modal.classList.contains('hidden') && state.documentList.length > 1) {
             if (e.key === 'ArrowLeft') {
@@ -599,16 +602,27 @@ function setupEventListeners() {
         }
     });
     
-    // Export CSV buttons
+    // Export CSV buttons -> open modal
     const exportSearchBtn = document.getElementById('export-search-results');
     if (exportSearchBtn) {
-        exportSearchBtn.addEventListener('click', exportSearchResults);
+        exportSearchBtn.addEventListener('click', () => openExportModal('search'));
     }
     
     const exportBrowseBtn = document.getElementById('export-browse-results');
     if (exportBrowseBtn) {
-        exportBrowseBtn.addEventListener('click', exportBrowseDocuments);
+        exportBrowseBtn.addEventListener('click', () => openExportModal('browse'));
     }
+
+    // Export modal controls
+    const exportModalConfirm = document.getElementById('export-modal-confirm');
+    const exportModalCancel = document.getElementById('export-modal-cancel');
+    const exportModalClose = document.getElementById('export-modal-close');
+    const exportModalBackdrop = document.querySelector('#export-modal > .modal-backdrop');
+
+    if (exportModalConfirm) exportModalConfirm.addEventListener('click', confirmExport);
+    if (exportModalCancel) exportModalCancel.addEventListener('click', closeExportModal);
+    if (exportModalClose) exportModalClose.addEventListener('click', closeExportModal);
+    if (exportModalBackdrop) exportModalBackdrop.addEventListener('click', closeExportModal);
 }
 
 async function handleFeedbackSubmit(e) {
@@ -2806,100 +2820,62 @@ function sanitizeSnippet(html) {
  * Export search results to CSV
  * Exports all matching documents (not just current page) with DOJ links
  */
-async function exportSearchResults() {
-    const btn = document.getElementById('export-search-results');
-    if (!state.lastSearchParams) {
+let pendingExportType = null;
+
+function openExportModal(type) {
+    if (type === 'search' && !state.lastSearchParams) {
         alert('Please perform a search first.');
         return;
     }
-    
-    try {
-        // Show loading state
-        const originalText = btn.textContent;
-        btn.textContent = 'Exporting...';
-        btn.disabled = true;
-        
-        // Build export params from last search
-        const params = new URLSearchParams();
-        if (state.lastSearchParams.query) {
-            params.append('search_query', state.lastSearchParams.query);
-        }
-        if (state.lastSearchParams.search_type) {
-            params.append('search_type', state.lastSearchParams.search_type);
-        }
-        if (state.lastSearchParams.category) {
-            params.append('category', state.lastSearchParams.category);
-        }
-        if (state.lastSearchParams.subcategory) {
-            params.append('subcategory', state.lastSearchParams.subcategory);
-        }
-        if (state.lastSearchParams.file_type) {
-            params.append('file_type', state.lastSearchParams.file_type);
-        }
-        const includeText = document.getElementById('export-search-include-text')?.checked;
-        if (includeText) params.append('include_text', 'true');
-        
-        const response = await fetch(`${API_BASE}/documents/export?${params}`);
-        if (!response.ok) throw new Error('Export failed');
-        
-        const data = await response.json();
-        downloadCSV(data.documents, `search_export_${new Date().toISOString().split('T')[0]}.csv`);
-        
-    } catch (error) {
-        console.error('Export error:', error);
-        alert('Failed to export results. Please try again.');
-    } finally {
-        btn.textContent = 'Export CSV';
-        btn.disabled = false;
-    }
+    pendingExportType = type;
+    const checkbox = document.getElementById('export-include-text');
+    if (checkbox) checkbox.checked = false;
+    document.getElementById('export-modal').classList.remove('hidden');
 }
 
-/**
- * Export browse documents to CSV
- * Exports all matching documents (not just current page) with DOJ links
- */
-async function exportBrowseDocuments() {
-    const btn = document.getElementById('export-browse-results');
-    
+function closeExportModal() {
+    document.getElementById('export-modal').classList.add('hidden');
+    pendingExportType = null;
+}
+
+async function confirmExport() {
+    const includeText = document.getElementById('export-include-text')?.checked;
+    const confirmBtn = document.getElementById('export-modal-confirm');
+    confirmBtn.textContent = 'Exporting...';
+    confirmBtn.disabled = true;
+
     try {
-        // Show loading state
-        const originalText = btn.textContent;
-        btn.textContent = 'Exporting...';
-        btn.disabled = true;
-        
-        // Build export params from current browse filters
         const params = new URLSearchParams();
-        if (state.browseCategory) {
-            params.append('category', state.browseCategory);
+
+        if (pendingExportType === 'search') {
+            if (state.lastSearchParams.query) params.append('search_query', state.lastSearchParams.query);
+            if (state.lastSearchParams.search_type) params.append('search_type', state.lastSearchParams.search_type);
+            if (state.lastSearchParams.category) params.append('category', state.lastSearchParams.category);
+            if (state.lastSearchParams.subcategory) params.append('subcategory', state.lastSearchParams.subcategory);
+            if (state.lastSearchParams.file_type) params.append('file_type', state.lastSearchParams.file_type);
+        } else {
+            if (state.browseCategory) params.append('category', state.browseCategory);
+            if (state.browseSubcategory) params.append('subcategory', state.browseSubcategory);
+            if (state.browseFileType) params.append('file_type', state.browseFileType);
+            if (state.browseFilename) params.append('filename', state.browseFilename);
+            if (state.browseKeyword) params.append('keyword', state.browseKeyword);
         }
-        if (state.browseSubcategory) {
-            params.append('subcategory', state.browseSubcategory);
-        }
-        if (state.browseFileType) {
-            params.append('file_type', state.browseFileType);
-        }
-        if (state.browseFilename) {
-            params.append('filename', state.browseFilename);
-        }
-        if (state.browseKeyword) {
-            params.append('keyword', state.browseKeyword);
-        }
-        const includeText = document.getElementById('export-browse-include-text')?.checked;
+
         if (includeText) params.append('include_text', 'true');
-        
+
         const response = await fetch(`${API_BASE}/documents/export?${params}`);
         if (!response.ok) throw new Error('Export failed');
-        
+
         const data = await response.json();
-        downloadCSV(data.documents, `documents_export_${new Date().toISOString().split('T')[0]}.csv`);
-        
+        const prefix = pendingExportType === 'search' ? 'search_export' : 'documents_export';
+        downloadCSV(data.documents, `${prefix}_${new Date().toISOString().split('T')[0]}.csv`);
+        closeExportModal();
     } catch (error) {
         console.error('Export error:', error);
-        alert('Failed to export documents. Please try again.');
+        alert('Failed to export. Please try again.');
     } finally {
-        // Restore button
-        btn.textContent = 'Export CSV';
-        btn.disabled = false;
+        confirmBtn.textContent = 'Export';
+        confirmBtn.disabled = false;
     }
 }
 
