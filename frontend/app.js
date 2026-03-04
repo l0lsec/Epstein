@@ -2836,6 +2836,8 @@ async function exportSearchResults() {
         if (state.lastSearchParams.file_type) {
             params.append('file_type', state.lastSearchParams.file_type);
         }
+        const includeText = document.getElementById('export-search-include-text')?.checked;
+        if (includeText) params.append('include_text', 'true');
         
         const response = await fetch(`${API_BASE}/documents/export?${params}`);
         if (!response.ok) throw new Error('Export failed');
@@ -2847,7 +2849,6 @@ async function exportSearchResults() {
         console.error('Export error:', error);
         alert('Failed to export results. Please try again.');
     } finally {
-        // Restore button
         btn.textContent = 'Export CSV';
         btn.disabled = false;
     }
@@ -2883,6 +2884,8 @@ async function exportBrowseDocuments() {
         if (state.browseKeyword) {
             params.append('keyword', state.browseKeyword);
         }
+        const includeText = document.getElementById('export-browse-include-text')?.checked;
+        if (includeText) params.append('include_text', 'true');
         
         const response = await fetch(`${API_BASE}/documents/export?${params}`);
         if (!response.ok) throw new Error('Export failed');
@@ -2902,7 +2905,7 @@ async function exportBrowseDocuments() {
 
 /**
  * Generate and download CSV from documents array
- * @param {Array} documents - Array of {filename, category, subcategory, doj_url}
+ * @param {Array} documents - Array of document objects from the export API
  * @param {string} filename - Name for downloaded file
  */
 function downloadCSV(documents, filename) {
@@ -2911,21 +2914,27 @@ function downloadCSV(documents, filename) {
         return;
     }
     
-    // CSV header
-    let csv = 'Filename,Category,Subcategory,DOJ URL\n';
+    const hasText = documents[0] && 'full_text' in documents[0];
+
+    let header = 'Filename,Category,Subcategory,File Type,Page Count,Character Count,Document Date,DOJ URL';
+    if (hasText) header += ',Text Content';
+    let csv = header + '\n';
     
-    // Add rows
     for (const doc of documents) {
         const row = [
             escapeCSVField(doc.filename || ''),
             escapeCSVField(doc.category || ''),
             escapeCSVField(doc.subcategory || ''),
+            escapeCSVField(doc.file_type || ''),
+            escapeCSVField(doc.page_count != null ? doc.page_count : ''),
+            escapeCSVField(doc.char_count != null ? doc.char_count : ''),
+            escapeCSVField(doc.document_date || ''),
             escapeCSVField(doc.doj_url || '')
         ];
+        if (hasText) row.push(escapeCSVField(doc.full_text || ''));
         csv += row.join(',') + '\n';
     }
     
-    // Create download
     const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -2938,16 +2947,16 @@ function downloadCSV(documents, filename) {
 }
 
 /**
- * Escape a field for CSV format
- * Wraps in quotes if contains comma, quote, or newline
+ * Escape a field for CSV format (hardened against formula injection).
+ * Always double-quotes every field. Prefixes formula-triggering characters
+ * with a single-quote per OWASP CSV injection mitigation.
  */
 function escapeCSVField(field) {
-    if (field === null || field === undefined) return '';
-    const str = String(field);
-    // If contains comma, quote, or newline, wrap in quotes and escape internal quotes
-    if (str.includes(',') || str.includes('"') || str.includes('\n')) {
-        return '"' + str.replace(/"/g, '""') + '"';
+    if (field === null || field === undefined) return '""';
+    let str = String(field);
+    if (/^[=+\-@\t\r]/.test(str)) {
+        str = "'" + str;
     }
-    return str;
+    return '"' + str.replace(/"/g, '""') + '"';
 }
 

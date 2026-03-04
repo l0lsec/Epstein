@@ -1769,6 +1769,7 @@ class Database:
                                   filename: Optional[str] = None,
                                   keyword: Optional[str] = None,
                                   search_query: Optional[str] = None,
+                                  include_text: bool = False,
                                   max_results: int = 50000) -> List[Dict[str, Any]]:
         """Get documents with DOJ manifest URLs for CSV export
         
@@ -1779,11 +1780,18 @@ class Database:
             filename: Partial filename match
             keyword: Keyword search using FTS
             search_query: Full-text search query
+            include_text: Include full_text in results (capped at 5,000 rows)
             max_results: Maximum number of results (default 50,000)
         
         Returns:
-            List of dicts with: filename, category, subcategory, doj_url
+            List of dicts with: filename, category, subcategory, file_type,
+            page_count, char_count, document_date, doj_url, and optionally full_text
         """
+        if include_text:
+            max_results = min(max_results, 5000)
+
+        text_col = ", d.full_text" if include_text else ""
+
         with self.get_connection() as conn:
             params = []
             conditions = []
@@ -1791,9 +1799,11 @@ class Database:
             # Base query with LEFT JOIN to doj_manifest
             if search_query:
                 # Full-text search mode
-                sql = """
+                sql = f"""
                     SELECT DISTINCT 
-                        d.filename, d.category, d.subcategory, dm.url as doj_url
+                        d.filename, d.category, d.subcategory,
+                        d.file_type, d.page_count, d.char_count,
+                        d.document_date, dm.url as doj_url{text_col}
                     FROM documents_fts
                     JOIN documents d ON documents_fts.id = d.id
                     LEFT JOIN hidden_categories hc ON d.category = hc.category
@@ -1806,9 +1816,11 @@ class Database:
                 conditions.append("hc.category IS NULL")
             elif keyword:
                 # Keyword search mode
-                sql = """
+                sql = f"""
                     SELECT DISTINCT 
-                        d.filename, d.category, d.subcategory, dm.url as doj_url
+                        d.filename, d.category, d.subcategory,
+                        d.file_type, d.page_count, d.char_count,
+                        d.document_date, dm.url as doj_url{text_col}
                     FROM documents d
                     JOIN documents_fts fts ON d.id = fts.id
                     LEFT JOIN hidden_categories hc ON d.category = hc.category
@@ -1822,9 +1834,11 @@ class Database:
                 conditions.append("hc.category IS NULL")
             else:
                 # Browse mode (no search)
-                sql = """
+                sql = f"""
                     SELECT 
-                        d.filename, d.category, d.subcategory, dm.url as doj_url
+                        d.filename, d.category, d.subcategory,
+                        d.file_type, d.page_count, d.char_count,
+                        d.document_date, dm.url as doj_url{text_col}
                     FROM documents d
                     LEFT JOIN hidden_categories hc ON d.category = hc.category
                     LEFT JOIN doj_manifest dm ON d.filename = dm.filename

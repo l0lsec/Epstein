@@ -37,7 +37,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Crimson+Pro:wght@400;500;600&family=JetBrains+Mono:wght@400;500&family=Source+Sans+3:wght@300;400;500;600;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="/static/styles.css?v=40">
+    <link rel="stylesheet" href="/static/styles.css?v=41">
     
     <!-- Structured Data (JSON-LD) -->
     <script type="application/ld+json">
@@ -306,7 +306,12 @@
                                 </button>
                             </div>
                         </div>
-                        <button id="export-search-results" class="export-btn" title="Export all results to CSV">Export CSV</button>
+                        <div class="export-controls">
+                            <button id="export-search-results" class="export-btn" title="Export all results to CSV">Export CSV</button>
+                            <label class="export-text-toggle" title="Include extracted text content (larger file, limited to 5,000 results)">
+                                <input type="checkbox" id="export-search-include-text"> Include text
+                            </label>
+                        </div>
                     </div>
                 </div>
                 <div id="results-list" class="results-list"></div>
@@ -362,7 +367,12 @@
                 </div>
                 <div class="pagination-info">
                     <span id="browse-count"></span>
-                    <button id="export-browse-results" class="export-btn" title="Export all documents to CSV">Export CSV</button>
+                    <div class="export-controls">
+                        <button id="export-browse-results" class="export-btn" title="Export all documents to CSV">Export CSV</button>
+                        <label class="export-text-toggle" title="Include extracted text content (larger file, limited to 5,000 results)">
+                            <input type="checkbox" id="export-browse-include-text"> Include text
+                        </label>
+                    </div>
                 </div>
             </div>
             
@@ -742,7 +752,7 @@
     </footer>
 
     <script src="https://www.google.com/recaptcha/api.js?render=6Lf9EDYsAAAAANDlA_xYFIM7Ylccgmc24LhZgDIr"></script>
-    <script src="/static/app.js?v=39"></script></invoke>
+    <script src="/static/app.js?v=40"></script></invoke>
 </body>
 </html>
 

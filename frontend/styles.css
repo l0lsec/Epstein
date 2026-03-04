@@ -915,6 +915,32 @@ body {
     cursor: not-allowed;
 }
 
+.export-controls {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-sm);
+}
+
+.export-text-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 0.8rem;
+    color: var(--text-secondary);
+    cursor: pointer;
+    user-select: none;
+    white-space: nowrap;
+}
+
+.export-text-toggle:hover {
+    color: var(--text-primary);
+}
+
+.export-text-toggle input[type="checkbox"] {
+    accent-color: var(--accent);
+    cursor: pointer;
+}
+
 /* Export button in pagination-info area */
 .pagination-info {
     display: flex;

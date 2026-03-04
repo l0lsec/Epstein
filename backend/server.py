@@ -1625,12 +1625,13 @@ async def export_documents(
     filename: Optional[str] = None,
     keyword: Optional[str] = None,
     search_query: Optional[str] = None,
-    search_type: str = "fulltext"
+    search_type: str = "fulltext",
+    include_text: bool = False
 ):
     """Export documents as a list for CSV download
     
-    Returns all matching documents (up to 50,000) with filename, category, 
-    subcategory, and DOJ direct link (if available in manifest).
+    Returns all matching documents with metadata and DOJ direct link.
+    When include_text=true, full_text is included but results are capped at 5,000.
     
     Args:
         category: Filter by category
@@ -1640,9 +1641,12 @@ async def export_documents(
         keyword: Keyword search
         search_query: Full-text search query
         search_type: Type of search (fulltext, semantic, hybrid)
+        include_text: Include extracted text content (caps results at 5,000)
     
     Returns:
-        JSON with documents array containing filename, category, subcategory, doj_url
+        JSON with documents array containing filename, category, subcategory,
+        file_type, page_count, char_count, document_date, doj_url,
+        and optionally full_text
     """
     if not db:
         raise HTTPException(status_code=503, detail="Database not initialized")
@@ -1660,7 +1664,8 @@ async def export_documents(
             file_type=file_type,
             filename=filename,
             keyword=keyword,
-            search_query=fts_query
+            search_query=fts_query,
+            include_text=include_text
         )
         
         return {
