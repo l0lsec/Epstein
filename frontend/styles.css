@@ -2437,6 +2437,35 @@ a.modal-tab.doj-link {
     display: block;
 }
 
+.modal-ocr-disclaimer {
+    display: flex;
+    align-items: flex-start;
+    gap: var(--space-sm);
+    margin-bottom: var(--space-lg);
+    padding: var(--space-md) var(--space-lg);
+    background: rgba(255, 193, 7, 0.08);
+    border: 1px solid rgba(255, 193, 7, 0.25);
+    border-radius: 8px;
+    font-family: var(--font-body);
+    font-size: 0.85rem;
+    line-height: 1.5;
+    color: var(--text-muted);
+}
+
+.modal-ocr-disclaimer .disclaimer-icon {
+    font-size: 1.1rem;
+    flex-shrink: 0;
+    line-height: 1.4;
+}
+
+.modal-ocr-disclaimer p {
+    margin: 0;
+}
+
+.modal-ocr-disclaimer strong {
+    color: #ffc107;
+}
+
 .modal-text {
     font-family: var(--font-mono);
     font-size: 0.85rem;
@@ -3611,6 +3640,11 @@ a.modal-tab.doj-link {
         min-width: 60px;
     }
     
+    .modal-ocr-disclaimer {
+        padding: var(--space-sm) var(--space-md);
+        font-size: 0.8rem;
+    }
+
     .modal-text {
         font-size: 0.85rem;
         padding: var(--space-sm);
