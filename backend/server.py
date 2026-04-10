@@ -724,7 +724,7 @@ class SearchRequest(BaseModel):
     search_type: str = "hybrid"  # "fulltext", "semantic", "hybrid"
     category: Optional[str] = None
     subcategory: Optional[str] = None
-    file_type: Optional[str] = None  # "pdf", "audio", "video"
+    file_type: Optional[str] = None  # "pdf", "document", "image", "audio", "video"
     date_from: Optional[str] = None  # YYYY-MM-DD format
     date_to: Optional[str] = None    # YYYY-MM-DD format
     limit: int = 50  # Results per page (unlimited total via pagination)
@@ -2033,9 +2033,9 @@ def _generate_thumbnail_sync(
     if file_type == "pdf":
         if not generate_pdf_thumbnail(file_path, thumbnail_path):
             create_placeholder_thumbnail("document", thumbnail_path)
-    elif file_type == "image":
+    elif file_type in ("image", "document"):
         if not generate_image_thumbnail(file_path, thumbnail_path):
-            create_placeholder_thumbnail("image", thumbnail_path)
+            create_placeholder_thumbnail("document", thumbnail_path)
     elif file_type == "audio":
         create_placeholder_thumbnail("audio", thumbnail_path)
     elif file_type == "video":

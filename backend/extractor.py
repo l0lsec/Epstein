@@ -1211,11 +1211,11 @@ class ImageExtractor:
                 "full_path": str(filepath),
                 "category": categorization["category"],
                 "subcategory": categorization["subcategory"],
-                "file_type": "image",
+                "file_type": "document" if len(text) > 50 else "image",
                 "image_format": filepath.suffix.lower().lstrip('.'),
                 "full_text": text,
                 "char_count": len(text),
-                "has_content": len(text) > 10  # Require at least some text
+                "has_content": len(text) > 10
             }
             
         except Exception as e:

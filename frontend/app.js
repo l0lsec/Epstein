@@ -1140,7 +1140,9 @@ function renderStats() {
     
     // Get file type counts
     const fileTypes = stats.by_file_type || [];
-    const pdfCount = fileTypes.find(f => f.file_type === 'pdf')?.count || stats.total_documents;
+    const pdfCount = fileTypes.find(f => f.file_type === 'pdf')?.count || 0;
+    const documentCount = fileTypes.find(f => f.file_type === 'document')?.count || 0;
+    const totalDocCount = pdfCount + documentCount || stats.total_documents;
     const audioCount = fileTypes.find(f => f.file_type === 'audio')?.count || 0;
     const videoCount = fileTypes.find(f => f.file_type === 'video')?.count || 0;
     const imageCount = fileTypes.find(f => f.file_type === 'image')?.count || 0;
@@ -1155,9 +1157,9 @@ function renderStats() {
             <div class="stat-value">${formatNumber(stats.total_pages)}</div>
             <div class="stat-label">Total Pages</div>
         </div>
-        <div class="stat-card file-type-card clickable" data-browse="pdf" title="Browse PDF documents">
-            <div class="stat-value">📄 ${formatNumber(pdfCount)}</div>
-            <div class="stat-label">PDF Documents</div>
+        <div class="stat-card file-type-card clickable" data-browse="documents" title="Browse all documents">
+            <div class="stat-value">📄 ${formatNumber(totalDocCount)}</div>
+            <div class="stat-label">Documents</div>
             <div class="stat-action">Browse →</div>
         </div>
         <div class="stat-card file-type-card clickable" data-browse="audio" title="Browse audio files">
@@ -1165,11 +1167,13 @@ function renderStats() {
             <div class="stat-label">Audio Files</div>
             <div class="stat-action">Browse →</div>
         </div>
+        ${imageCount > 0 ? `
         <div class="stat-card file-type-card clickable" data-browse="image" title="Browse image files">
             <div class="stat-value">🖼️ ${formatNumber(imageCount)}</div>
             <div class="stat-label">Image Files</div>
             <div class="stat-action">Browse →</div>
         </div>
+        ` : ''}
         <div class="stat-card file-type-card clickable" data-browse="video" title="Browse video files">
             <div class="stat-value">🎬 ${formatNumber(videoCount)}</div>
             <div class="stat-label">Video Files</div>
@@ -1181,7 +1185,7 @@ function renderStats() {
     elements.statsGrid.querySelectorAll('.stat-card.clickable').forEach(card => {
         card.addEventListener('click', async () => {
             const browseType = card.dataset.browse;
-            if (browseType === 'all') {
+            if (browseType === 'all' || browseType === 'documents') {
                 state.browseFileType = '';
             } else {
                 state.browseFileType = browseType;
@@ -1211,13 +1215,19 @@ function renderStats() {
     
     // Also update the file type filter with counts
     if (elements.searchFileType) {
-        elements.searchFileType.innerHTML = `
+        let searchFileTypeHtml = `
             <option value="">All Files (${formatNumber(stats.total_documents)})</option>
-            <option value="pdf">📄 Documents (${formatNumber(pdfCount)})</option>
-            <option value="audio">🎵 Audio (${formatNumber(audioCount)})</option>
-            <option value="image">🖼️ Images (${formatNumber(imageCount)})</option>
+            <option value="pdf">📄 PDF Documents (${formatNumber(pdfCount)})</option>
+            <option value="document">📄 Scanned Documents (${formatNumber(documentCount)})</option>
+            <option value="audio">🎵 Audio (${formatNumber(audioCount)})</option>`;
+        if (imageCount > 0) {
+            searchFileTypeHtml += `
+            <option value="image">🖼️ Images (${formatNumber(imageCount)})</option>`;
+        }
+        searchFileTypeHtml += `
             <option value="video">🎬 Video (${formatNumber(videoCount)})</option>
         `;
+        elements.searchFileType.innerHTML = searchFileTypeHtml;
     }
 }
 
@@ -1490,7 +1500,7 @@ function renderSearchResults(data) {
             filters.push(state.lastSearchParams.subcategory);
         }
         if (state.lastSearchParams.file_type) {
-            const typeLabels = { pdf: 'Documents', audio: 'Audio', video: 'Video' };
+            const typeLabels = { pdf: 'PDF Documents', document: 'Scanned Documents', audio: 'Audio', image: 'Images', video: 'Video' };
             filters.push(typeLabels[state.lastSearchParams.file_type] || state.lastSearchParams.file_type);
         }
         if (filters.length > 0) {
@@ -1627,8 +1637,10 @@ function updateSearchFilterCounts(facets) {
         const totalFileResults = facets.file_types.reduce((sum, f) => sum + f.count, 0);
         
         const typeLabels = {
-            'pdf': '📄 Documents',
+            'pdf': '📄 PDF Documents',
+            'document': '📄 Scanned Documents',
             'audio': '🎵 Audio',
+            'image': '🖼️ Images',
             'video': '🎬 Video'
         };
         
@@ -1892,7 +1904,7 @@ async function openDocument(docId, index = -1) {
         
         // Determine file type icon
         const fileType = doc.file_type || 'pdf';
-        const fileIcon = fileType === 'audio' ? '🎵' : fileType === 'video' ? '🎬' : fileType === 'image' ? '🖼️' : '📄';
+        const fileIcon = fileType === 'audio' ? '🎵' : fileType === 'video' ? '🎬' : (fileType === 'image') ? '🖼️' : '📄';
         
         // Populate modal
         elements.modalTitle.textContent = doc.filename;
@@ -2009,8 +2021,8 @@ async function openDocument(docId, index = -1) {
                     </div>
                 `;
             }
-        } else if (fileType === 'image') {
-            // Show image viewer
+        } else if (fileType === 'image' || fileType === 'document') {
+            // Show image viewer (both true images and scanned documents are image files)
             elements.pdfIframe.src = '';
             elements.pdfIframe.style.display = 'none';
             elements.pdfFallback.classList.add('hidden');
@@ -2351,6 +2363,9 @@ function getDocumentMeta(doc) {
     if (doc.file_type === 'image') {
         return '🖼️ Image';
     }
+    if (doc.file_type === 'document') {
+        return '📄 Scanned Doc';
+    }
     return `${doc.page_count || 0} pages`;
 }
 
@@ -2389,6 +2404,9 @@ function getSearchResultMeta(result) {
     }
     if (result.file_type === 'image') {
         return '🖼️ Image';
+    }
+    if (result.file_type === 'document') {
+        return '📄 Scanned Doc';
     }
     return result.page_count ? `${result.page_count} pages` : '';
 }

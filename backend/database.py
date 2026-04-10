@@ -225,6 +225,22 @@ class Database:
             conn.execute("UPDATE documents SET is_hidden = 0 WHERE is_hidden IS NULL")
             conn.commit()
             
+            # Migration: Reclassify image-format files that contain OCR text as "document"
+            try:
+                cursor = conn.execute(
+                    "SELECT COUNT(*) FROM documents WHERE file_type = 'image' AND char_count > 50"
+                )
+                count = cursor.fetchone()[0]
+                if count > 0:
+                    conn.execute("""
+                        UPDATE documents SET file_type = 'document'
+                        WHERE file_type = 'image' AND char_count > 50
+                    """)
+                    conn.commit()
+                    print(f"✅ Reclassified {count} scanned documents (image -> document)")
+            except Exception as e:
+                print(f"Note: image reclassification skipped: {e}")
+            
             # Covering index for browse pagination: includes ALL columns selected by the
             # browse query so SQLite can serve it entirely from the index without touching
             # the main table (which has huge full_text blobs that make row lookups slow).
