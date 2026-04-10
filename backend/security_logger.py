@@ -1472,8 +1472,15 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
         )
         
         # === SET SESSION COOKIE ===
-        if session and (new_session_created or session_validation_failed):
-            # Set or refresh the session cookie
+        # Skip Set-Cookie on CDN-cacheable paths — Cloudflare won't cache
+        # responses that contain Set-Cookie, so omitting it here lets CF
+        # serve files/thumbnails from edge cache and cuts origin egress.
+        _cacheable = (
+            path.startswith("/static/")
+            or (path.endswith("/file") and "/api/documents/" in path)
+            or (path.endswith("/thumbnail") and "/api/documents/" in path)
+        )
+        if session and (new_session_created or session_validation_failed) and not _cacheable:
             cookie_value = session.to_cookie_value()
             response.set_cookie(
                 key=SESSION_COOKIE_NAME,
@@ -1485,10 +1492,11 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
                 path="/"
             )
         
-        # Add rate limit headers to response
-        response.headers["X-Request-ID"] = request_id
-        if remaining is not None and remaining >= 0:
-            response.headers["X-RateLimit-Remaining"] = str(remaining)
+        # Add rate limit headers to response (skip on cacheable paths to avoid Vary issues)
+        if not _cacheable:
+            response.headers["X-Request-ID"] = request_id
+            if remaining is not None and remaining >= 0:
+                response.headers["X-RateLimit-Remaining"] = str(remaining)
         
         # Detect and log suspicious patterns
         self._check_suspicious_patterns(request, client_ip, request_id)

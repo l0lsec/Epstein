@@ -459,6 +459,15 @@ async def add_security_headers(request: Request, call_next):
     elif "/thumbnail" in path and response.status_code == 200:
         response.headers["Cache-Control"] = "public, max-age=2592000, immutable"  # 30 days
     
+    # Document files are immutable — let Cloudflare cache to cut origin egress
+    elif path.endswith("/file") and "/api/documents/" in path and response.status_code == 200:
+        response.headers["Cache-Control"] = "public, max-age=604800"  # 7 days
+    
+    # Short CDN cache for homepage (s-maxage for CF, shorter max-age for browsers)
+    elif path == "/" and response.status_code == 200:
+        if "Cache-Control" not in response.headers:
+            response.headers["Cache-Control"] = "public, s-maxage=300, max-age=60"
+    
     return response
 
 
