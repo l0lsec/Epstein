@@ -82,6 +82,13 @@ class ResponseCache:
             del self._cache[key]
         return None
     
+    def get_stale(self, key: str):
+        """Return cached data even if expired (for stale-while-revalidate)."""
+        if key in self._cache:
+            data, _ = self._cache[key]
+            return data
+        return None
+    
     def set(self, key: str, data):
         self._cache[key] = (data, datetime.now().timestamp())
     
@@ -94,8 +101,9 @@ class ResponseCache:
 # Cache instances with different TTLs
 _stats_cache = ResponseCache(ttl_seconds=30)  # Stats cached for 30 seconds
 _categories_cache = ResponseCache(ttl_seconds=60)  # Categories cached for 60 seconds
-_bootstrap_cache = ResponseCache(ttl_seconds=30)  # Bootstrap (stats+categories+keywords+settings) for 30s
+_bootstrap_cache = ResponseCache(ttl_seconds=86400)  # Bootstrap cached for 24h; admin actions invalidate on change
 _maintenance_cache = ResponseCache(ttl_seconds=5)  # Maintenance/status-page check (avoids DB hit per request)
+_bootstrap_refreshing = False  # Guard to prevent concurrent background rebuilds
 
 async def lookup_ip_geo(ip: str) -> dict:
     """Look up geolocation for an IP address using ip-api.com"""
@@ -270,7 +278,7 @@ async def lifespan(app: FastAPI):
     if DB_PATH.exists():
         db = Database(str(DB_PATH))
         security_logger.set_database(db)  # enable telemetry dual-write
-        doc_count = db.get_stats()['total_documents']
+        doc_count = db.count_documents(include_hidden=True)
         security_logger.log_system_event(
             "database_loaded",
             f"Database loaded with {doc_count} documents",
@@ -341,6 +349,23 @@ async def lifespan(app: FastAPI):
         )
     else:
         security_logger.log_system_event("auto_index_disabled", "Auto-indexing is disabled")
+    
+    # Pre-warm the bootstrap cache so the first user request is instant.
+    # Stagger by a random 0-3s so multiple workers don't all hit the DB simultaneously.
+    if db:
+        import random
+        stagger = random.uniform(0, 3.0)
+        await asyncio.sleep(stagger)
+        security_logger.log_system_event("cache_warmup", "Pre-warming bootstrap cache...")
+        try:
+            await asyncio.to_thread(_build_and_cache_bootstrap)
+            security_logger.log_system_event("cache_warmup_done", "Bootstrap cache ready")
+        except Exception as e:
+            security_logger.log_system_event(
+                "cache_warmup_failed",
+                f"Bootstrap warmup failed: {e}",
+                severity="warning"
+            )
     
     yield
     
@@ -980,20 +1005,11 @@ async def get_stats(response: Response) -> StatsResponse:
     return result
 
 
-@app.get("/api/bootstrap")
-async def get_bootstrap(response: Response):
-    """Single request for initial page load: stats, categories, keywords, and public settings.
-    Reduces 4 round-trips to 1 for faster first paint."""
-    if not db:
-        raise HTTPException(status_code=503, detail="Database not initialized")
+def _build_and_cache_bootstrap() -> dict:
+    """Build the full bootstrap payload and store it in _bootstrap_cache.
     
-    cached = _bootstrap_cache.get("bootstrap")
-    if cached:
-        response.headers["X-Cache"] = "HIT"
-        response.headers["Cache-Control"] = "public, max-age=30, s-maxage=30"
-        return cached
-    
-    # Build bootstrap in one go
+    Callable from startup warmup (in a thread) or from the request handler.
+    """
     stats = db.get_stats()
     stats_response = StatsResponse(
         total_documents=stats["total_documents"],
@@ -1021,15 +1037,17 @@ async def get_bootstrap(response: Response):
         "ask_ai_enabled": settings.get("ask_ai_enabled", "true") == "true",
         "pinned_documents_enabled": settings.get("pinned_documents_enabled", "true") == "true",
     }
-    
-    # Prefetch first browse page so the Browse tab is instant
+
     browse_limit = 24
     browse_docs, browse_total = db.get_all_documents_with_total(
         limit=browse_limit, offset=0, include_hidden=False
     )
-    # Cache the unfiltered total for subsequent page requests
     _categories_cache.set("docs_total_unfiltered", browse_total)
-    
+
+    pinned_docs = []
+    if public_settings.get("pinned_documents_enabled", True):
+        pinned_docs = db.get_pinned_documents(include_hidden=False)
+
     result = {
         "stats": stats_response,
         "categories": {"categories": categories},
@@ -1041,10 +1059,49 @@ async def get_bootstrap(response: Response):
             "offset": 0,
             "documents": browse_docs,
         },
+        "pinned_documents": pinned_docs,
     }
     _bootstrap_cache.set("bootstrap", result)
+    return result
+
+
+async def _background_refresh_bootstrap():
+    """Rebuild the bootstrap cache in the background (fire-and-forget)."""
+    global _bootstrap_refreshing
+    if _bootstrap_refreshing:
+        return
+    _bootstrap_refreshing = True
+    try:
+        await asyncio.to_thread(_build_and_cache_bootstrap)
+    except Exception:
+        pass
+    finally:
+        _bootstrap_refreshing = False
+
+
+@app.get("/api/bootstrap")
+async def get_bootstrap(response: Response):
+    """Single request for initial page load: stats, categories, keywords, and public settings.
+    Reduces 4 round-trips to 1 for faster first paint."""
+    if not db:
+        raise HTTPException(status_code=503, detail="Database not initialized")
+    
+    cached = _bootstrap_cache.get("bootstrap")
+    if cached:
+        response.headers["X-Cache"] = "HIT"
+        response.headers["Cache-Control"] = "public, max-age=60, s-maxage=60"
+        return cached
+    
+    stale = _bootstrap_cache.get_stale("bootstrap")
+    if stale:
+        asyncio.create_task(_background_refresh_bootstrap())
+        response.headers["X-Cache"] = "STALE"
+        response.headers["Cache-Control"] = "public, max-age=60, s-maxage=60"
+        return stale
+    
+    result = await asyncio.to_thread(_build_and_cache_bootstrap)
     response.headers["X-Cache"] = "MISS"
-    response.headers["Cache-Control"] = "public, max-age=30, s-maxage=30"
+    response.headers["Cache-Control"] = "public, max-age=60, s-maxage=60"
     return result
 
 

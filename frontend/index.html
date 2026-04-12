@@ -37,7 +37,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Crimson+Pro:wght@400;500;600&family=JetBrains+Mono:wght@400;500&family=Source+Sans+3:wght@300;400;500;600;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="/static/styles.css?v=44">
+    <link rel="stylesheet" href="/static/styles.css?v=45">
     
     <!-- Structured Data (JSON-LD) -->
     <script type="application/ld+json">
@@ -115,6 +115,22 @@
                 <h1 class="hero-title">Search Epstein Library Files</h1>
                 <p class="hero-subtitle">A unified platform for researchers, journalists, and the public to search, view, and explore the DOJ's Epstein Library. Browse documents, PDFs, audio recordings, and video files all in one place as they are released.</p>
                 
+                <div id="pinned-documents-skeleton" class="pinned-documents-bar pinned-skeleton">
+                    <div class="pinned-header">
+                        <span class="pinned-icon">📌</span>
+                        <span class="pinned-title">Featured Documents</span>
+                        <span class="pinned-subtitle">Controversial & Notable Files</span>
+                    </div>
+                    <div class="pinned-scroll-container">
+                        <div class="pinned-scroll-skeleton">
+                            <div class="pinned-card-skeleton"></div>
+                            <div class="pinned-card-skeleton"></div>
+                            <div class="pinned-card-skeleton"></div>
+                            <div class="pinned-card-skeleton"></div>
+                        </div>
+                    </div>
+                </div>
+
                 <div id="stats-display" class="stats-container">
                     <h3 class="stats-title">Archive Statistics</h3>
                     <div id="stats-grid" class="stats-grid"></div>
@@ -780,7 +796,7 @@
     </footer>
 
     <script src="https://www.google.com/recaptcha/api.js?render=6Lf9EDYsAAAAANDlA_xYFIM7Ylccgmc24LhZgDIr"></script>
-    <script src="/static/app.js?v=42"></script></invoke>
+    <script src="/static/app.js?v=43"></script></invoke>
 </body>
 </html>
 

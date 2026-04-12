@@ -204,6 +204,48 @@ body {
     border-radius: 12px;
 }
 
+/* Fade-in for rendered pinned bar */
+.pinned-bar-fadein {
+    animation: pinned-fade-in 0.3s ease-out;
+}
+
+@keyframes pinned-fade-in {
+    from { opacity: 0; transform: translateY(8px); }
+    to   { opacity: 1; transform: translateY(0); }
+}
+
+/* Skeleton loading state */
+.pinned-skeleton .pinned-scroll-skeleton {
+    display: flex;
+    gap: var(--space-lg);
+    padding: var(--space-sm) 0;
+    overflow: hidden;
+}
+
+.pinned-card-skeleton {
+    flex-shrink: 0;
+    width: 220px;
+    height: 190px;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    position: relative;
+    overflow: hidden;
+}
+
+.pinned-card-skeleton::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(90deg, transparent, rgba(255,255,255,0.04) 50%, transparent);
+    animation: skeleton-shimmer 1.5s ease-in-out infinite;
+}
+
+@keyframes skeleton-shimmer {
+    0%   { transform: translateX(-100%); }
+    100% { transform: translateX(100%); }
+}
+
 .pinned-header {
     display: flex;
     align-items: center;

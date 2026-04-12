@@ -77,7 +77,14 @@ async function init() {
                 state._prefetchedBrowse = data.browse;
             }
             if (data.settings && data.settings.pinned_documents_enabled !== false) {
-                await loadPinnedDocuments(true);
+                const pinnedDocs = data.pinned_documents || [];
+                if (pinnedDocs.length > 0) {
+                    renderPinnedDocumentsBar(pinnedDocs);
+                } else {
+                    removePinnedSkeleton();
+                }
+            } else {
+                removePinnedSkeleton();
             }
         } else {
             await loadFallbackInit();
@@ -1007,42 +1014,49 @@ async function loadPinnedDocuments(skipSettingsCheck = false) {
                 if (settings.pinned_documents_enabled === false) {
                     const existingBar = document.getElementById('pinned-documents-bar');
                     if (existingBar) existingBar.remove();
+                    removePinnedSkeleton();
                     return;
                 }
             }
         }
         
         const response = await fetch(`${API_BASE}/pinned-documents`);
-        if (!response.ok) return;
+        if (!response.ok) { removePinnedSkeleton(); return; }
         
         const data = await response.json();
         const pinnedDocs = data.pinned_documents || [];
         
         if (pinnedDocs.length > 0) {
             renderPinnedDocumentsBar(pinnedDocs);
+        } else {
+            removePinnedSkeleton();
         }
     } catch (error) {
         console.error('Error loading pinned documents:', error);
+        removePinnedSkeleton();
     }
 }
 
+function removePinnedSkeleton() {
+    const skeleton = document.getElementById('pinned-documents-skeleton');
+    if (skeleton) skeleton.remove();
+}
+
 function renderPinnedDocumentsBar(docs) {
-    // Only show on search view / homepage
     const searchView = document.getElementById('search-view');
     if (!searchView) return;
     
-    // Check if bar already exists
     let pinnedBar = document.getElementById('pinned-documents-bar');
     if (pinnedBar) {
         pinnedBar.remove();
     }
     
-    // Generate the card HTML
     const generateCardHTML = (doc) => `
         <div class="pinned-card" onclick="openDocument('${escapeHtml(doc.document_id)}')">
             <div class="pinned-card-thumbnail">
                 <img src="${API_BASE}/documents/${doc.document_id}/thumbnail" 
                      alt="${escapeHtml(doc.filename)}"
+                     loading="lazy"
                      onerror="this.style.display='none'; this.nextElementSibling.style.display='flex';">
                 <div class="thumbnail-fallback" style="display: none;">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
@@ -1058,14 +1072,12 @@ function renderPinnedDocumentsBar(docs) {
         </div>
     `;
     
-    // Create cards HTML - duplicate for seamless infinite scroll
     const cardsHTML = docs.map(generateCardHTML).join('');
-    const duplicatedCardsHTML = cardsHTML + cardsHTML; // Duplicate for seamless loop
+    const duplicatedCardsHTML = cardsHTML + cardsHTML;
     
-    // Create the pinned documents bar
     pinnedBar = document.createElement('div');
     pinnedBar.id = 'pinned-documents-bar';
-    pinnedBar.className = 'pinned-documents-bar';
+    pinnedBar.className = 'pinned-documents-bar pinned-bar-fadein';
     
     pinnedBar.innerHTML = `
         <div class="pinned-header">
@@ -1081,12 +1093,12 @@ function renderPinnedDocumentsBar(docs) {
         </div>
     `;
     
-    // Insert right above the Archive Statistics section
+    removePinnedSkeleton();
+    
     const statsDisplay = document.getElementById('stats-display');
     if (statsDisplay) {
         statsDisplay.parentNode.insertBefore(pinnedBar, statsDisplay);
     } else {
-        // Fallback: append to search view
         searchView.appendChild(pinnedBar);
     }
 }

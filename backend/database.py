@@ -30,7 +30,7 @@ class Database:
         self._conn = sqlite3.connect(db_path, timeout=30.0, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA journal_mode=WAL")      # Write-ahead logging: concurrent reads during writes
-        self._conn.execute("PRAGMA busy_timeout=5000")     # Wait 5 seconds if locked instead of failing
+        self._conn.execute("PRAGMA busy_timeout=30000")    # Wait 30 seconds if locked instead of failing
         self._conn.execute("PRAGMA synchronous=NORMAL")    # Faster commits, safe with WAL
         self._conn.execute("PRAGMA cache_size=-64000")     # 64MB cache (negative = KB)
         self._conn.execute("PRAGMA temp_store=MEMORY")     # Temp tables in memory
@@ -250,6 +250,13 @@ class Database:
                 "file_type, page_count, char_count, duration_seconds)"
             )
             conn.commit()
+
+            # Compact index for category aggregation on visible docs only
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_docs_visible_category "
+                "ON documents(category) WHERE is_hidden = 0"
+            )
+            conn.commit()
             
             # Drop the old narrower index — the covering index supersedes it
             conn.execute("DROP INDEX IF EXISTS idx_documents_hidden_filename")
@@ -463,6 +470,7 @@ class Database:
             # Filter out hidden documents and categories unless include_hidden is True
             if not include_hidden:
                 sql += " AND (d.is_hidden IS NULL OR d.is_hidden = 0) AND hc.category IS NULL"
+                sql += " AND d.subcategory != 'thumbnails'"
             
             if category:
                 sql += " AND d.category = ?"
@@ -518,6 +526,7 @@ class Database:
             # Filter out hidden documents and categories unless include_hidden is True
             if not include_hidden:
                 sql += " AND (d.is_hidden IS NULL OR d.is_hidden = 0) AND hc.category IS NULL"
+                sql += " AND d.subcategory != 'thumbnails'"
             
             if category:
                 sql += " AND d.category = ?"
@@ -562,7 +571,7 @@ class Database:
             # Visibility filter
             visibility_filter = ""
             if not include_hidden:
-                visibility_filter = " AND (d.is_hidden IS NULL OR d.is_hidden = 0) AND hc.category IS NULL"
+                visibility_filter = " AND (d.is_hidden IS NULL OR d.is_hidden = 0) AND hc.category IS NULL AND d.subcategory != 'thumbnails'"
             
             # Build date filter conditions
             date_filter = ""
@@ -714,6 +723,7 @@ class Database:
                         FROM documents d
                         LEFT JOIN hidden_categories hc ON d.category = hc.category
                         WHERE (d.is_hidden IS NULL OR d.is_hidden = 0) AND hc.category IS NULL
+                          AND d.subcategory != 'thumbnails'
                           AND d.category = ?
                         GROUP BY d.category, d.subcategory
                         ORDER BY d.category, count DESC
@@ -724,6 +734,7 @@ class Database:
                         FROM documents d
                         LEFT JOIN hidden_categories hc ON d.category = hc.category
                         WHERE (d.is_hidden IS NULL OR d.is_hidden = 0) AND hc.category IS NULL
+                          AND d.subcategory != 'thumbnails'
                         GROUP BY d.category, d.subcategory
                         ORDER BY d.category, count DESC
                     """)
@@ -734,15 +745,11 @@ class Database:
         with self.get_connection() as conn:
             stats = {}
             
-            # Total documents
-            cursor = conn.execute("SELECT COUNT(*) FROM documents")
-            stats["total_documents"] = cursor.fetchone()[0]
+            cursor = conn.execute("SELECT COUNT(*), COALESCE(SUM(page_count), 0) FROM documents")
+            row = cursor.fetchone()
+            stats["total_documents"] = row[0]
+            stats["total_pages"] = row[1]
             
-            # Total pages
-            cursor = conn.execute("SELECT SUM(page_count) FROM documents")
-            stats["total_pages"] = cursor.fetchone()[0] or 0
-            
-            # By category
             cursor = conn.execute("""
                 SELECT category, COUNT(*) as count 
                 FROM documents 
@@ -751,7 +758,6 @@ class Database:
             """)
             stats["by_category"] = [dict(row) for row in cursor]
             
-            # By subcategory
             cursor = conn.execute("""
                 SELECT category, subcategory, COUNT(*) as count 
                 FROM documents 
@@ -760,7 +766,6 @@ class Database:
             """)
             stats["by_subcategory"] = [dict(row) for row in cursor]
             
-            # By file type
             cursor = conn.execute("""
                 SELECT file_type, COUNT(*) as count 
                 FROM documents 
@@ -799,6 +804,7 @@ class Database:
                         WHERE documents_fts MATCH ?
                           AND d.is_hidden = 0
                           AND d.category NOT IN (SELECT category FROM hidden_categories)
+                          AND d.subcategory != 'thumbnails'
                         GROUP BY d.category
                         ORDER BY count DESC
                     """
@@ -818,6 +824,7 @@ class Database:
                         FROM documents d
                         WHERE d.is_hidden = 0
                           AND d.category NOT IN (SELECT category FROM hidden_categories)
+                          AND d.subcategory != 'thumbnails'
                         GROUP BY d.category 
                         ORDER BY count DESC
                     """
@@ -856,6 +863,7 @@ class Database:
                 if not include_hidden:
                     conditions.append("d.is_hidden = 0")
                     conditions.append("d.category NOT IN (SELECT category FROM hidden_categories)")
+                    conditions.append("d.subcategory != 'thumbnails'")
             else:
                 sql = """
                     SELECT d.id, d.filename, d.path, d.category, d.subcategory, d.file_type, d.page_count, d.char_count, d.duration_seconds, d.is_hidden
@@ -864,6 +872,7 @@ class Database:
                 if not include_hidden:
                     conditions.append("d.is_hidden = 0")
                     conditions.append("d.category NOT IN (SELECT category FROM hidden_categories)")
+                    conditions.append("d.subcategory != 'thumbnails'")
             
             if category:
                 conditions.append("d.category = ?")
@@ -910,23 +919,18 @@ class Database:
         filename: Optional[str] = None,
         include_hidden: bool = False,
     ) -> tuple:
-        """Get one page of documents and total count in one query (no keyword/search).
+        """Get one page of documents and total count via two queries.
         
-        Returns (documents_list, total_count). Uses COUNT(*) OVER() for a single round-trip.
-        Use only when keyword and search are not set; otherwise use get_all_documents + count_documents.
+        Returns (documents_list, total_count). Uses a separate COUNT(*) query
+        so the data query can short-circuit via covering index after LIMIT rows.
         """
         with self.get_connection() as conn:
             params = []
             conditions = []
-            sql = """
-                SELECT d.id, d.filename, d.path, d.category, d.subcategory, d.file_type,
-                       d.page_count, d.char_count, d.duration_seconds, d.is_hidden,
-                       COUNT(*) OVER() AS _total
-                FROM documents d
-            """
             if not include_hidden:
                 conditions.append("d.is_hidden = 0")
                 conditions.append("d.category NOT IN (SELECT category FROM hidden_categories)")
+                conditions.append("d.subcategory != 'thumbnails'")
             if category:
                 conditions.append("d.category = ?")
                 params.append(category)
@@ -939,14 +943,22 @@ class Database:
             if filename:
                 conditions.append("LOWER(d.filename) LIKE LOWER(?)")
                 params.append(f"%{filename}%")
-            if conditions:
-                sql += " WHERE " + " AND ".join(conditions)
-            sql += " ORDER BY d.filename LIMIT ? OFFSET ?"
-            params.extend([limit, offset])
-            cursor = conn.execute(sql, params)
-            rows = [dict(row) for row in cursor]
-            total = int(rows[0]["_total"]) if rows else 0
-            docs = [{k: v for k, v in r.items() if k != "_total"} for r in rows]
+
+            where_clause = (" WHERE " + " AND ".join(conditions)) if conditions else ""
+
+            count_sql = "SELECT COUNT(*) FROM documents d" + where_clause
+            cursor = conn.execute(count_sql, params)
+            total = cursor.fetchone()[0]
+
+            data_sql = (
+                "SELECT d.id, d.filename, d.path, d.category, d.subcategory, d.file_type,"
+                "       d.page_count, d.char_count, d.duration_seconds, d.is_hidden"
+                " FROM documents d" + where_clause +
+                " ORDER BY d.filename LIMIT ? OFFSET ?"
+            )
+            data_params = params + [limit, offset]
+            cursor = conn.execute(data_sql, data_params)
+            docs = [dict(row) for row in cursor]
             return (docs, total)
     
     def count_documents(self, category: Optional[str] = None,
@@ -977,6 +989,7 @@ class Database:
                 if not include_hidden:
                     conditions.append("d.is_hidden = 0")
                     conditions.append("d.category NOT IN (SELECT category FROM hidden_categories)")
+                    conditions.append("d.subcategory != 'thumbnails'")
             else:
                 sql = """
                     SELECT COUNT(*) 
@@ -986,6 +999,7 @@ class Database:
                 if not include_hidden:
                     conditions.append("d.is_hidden = 0")
                     conditions.append("d.category NOT IN (SELECT category FROM hidden_categories)")
+                    conditions.append("d.subcategory != 'thumbnails'")
             
             if category:
                 conditions.append("d.category = ?")
@@ -1184,6 +1198,7 @@ class Database:
                     LEFT JOIN hidden_categories hc ON d.category = hc.category
                     WHERE (d.is_hidden IS NULL OR d.is_hidden = 0)
                       AND hc.category IS NULL
+                      AND d.subcategory != 'thumbnails'
                     ORDER BY p.display_order ASC, p.pinned_at DESC
                 """)
             return [dict(row) for row in cursor.fetchall()]
@@ -1815,6 +1830,7 @@ class Database:
                 # Exclude hidden
                 conditions.append("(d.is_hidden IS NULL OR d.is_hidden = 0)")
                 conditions.append("hc.category IS NULL")
+                conditions.append("d.subcategory != 'thumbnails'")
             elif keyword:
                 # Keyword search mode
                 sql = f"""
@@ -1833,6 +1849,7 @@ class Database:
                 # Exclude hidden
                 conditions.append("(d.is_hidden IS NULL OR d.is_hidden = 0)")
                 conditions.append("hc.category IS NULL")
+                conditions.append("d.subcategory != 'thumbnails'")
             else:
                 # Browse mode (no search)
                 sql = f"""
@@ -1847,6 +1864,7 @@ class Database:
                 # Exclude hidden
                 conditions.append("(d.is_hidden IS NULL OR d.is_hidden = 0)")
                 conditions.append("hc.category IS NULL")
+                conditions.append("d.subcategory != 'thumbnails'")
             
             # Apply filters
             if category:
