@@ -4507,3 +4507,157 @@ window.loadCategoryVisibility = loadCategoryVisibility;
 window.hideCategory = hideCategory;
 window.unhideCategory = unhideCategory;
 
+// =============================================================================
+// File Type Reclassification
+// =============================================================================
+
+let _reclassifySelectedIds = new Set();
+
+function _fileTypeBadgeColor(ft) {
+    const colors = { pdf: '#6366f1', document: '#22c55e', image: '#f59e0b', audio: '#06b6d4', video: '#ec4899' };
+    return colors[ft] || '#888';
+}
+
+async function searchDocsForReclassify() {
+    const query = (document.getElementById('reclassify-search')?.value || '').trim();
+    const typeFilter = document.getElementById('reclassify-type-filter')?.value || '';
+    const resultsEl = document.getElementById('reclassify-results');
+    if (!resultsEl) return;
+
+    if (!query && !typeFilter) {
+        resultsEl.innerHTML = '<div style="padding: var(--space-md); color: var(--text-muted); text-align: center; font-size: 0.85rem;">Enter a search term or select a file type filter</div>';
+        return;
+    }
+
+    resultsEl.innerHTML = '<div class="loading"><span class="spinner"></span>Searching...</div>';
+    _reclassifySelectedIds.clear();
+    _updateReclassifyBulkBar();
+
+    try {
+        let url = `${window.location.origin}/api/admin/documents-visibility?limit=200`;
+        if (query) url += `&search=${encodeURIComponent(query)}`;
+        if (typeFilter) url += `&file_type=${encodeURIComponent(typeFilter)}`;
+
+        const response = await authFetch(url);
+        if (!response.ok) throw new Error('Search failed');
+        const data = await response.json();
+        const docs = data.documents || [];
+
+        if (docs.length === 0) {
+            resultsEl.innerHTML = '<div style="padding: var(--space-md); color: var(--text-muted); text-align: center;">No documents found</div>';
+            return;
+        }
+
+        let html = `<div style="padding: 6px 12px; background: var(--bg-elevated); border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: var(--space-sm); font-size: 0.8rem; color: var(--text-muted);">
+            <label style="cursor:pointer;"><input type="checkbox" onchange="toggleSelectAllReclassify(this.checked)" style="margin-right:4px;">Select all</label>
+            <span style="margin-left:auto;">${docs.length} result${docs.length !== 1 ? 's' : ''}</span>
+        </div>`;
+
+        for (const doc of docs) {
+            const badgeColor = _fileTypeBadgeColor(doc.file_type);
+            html += `
+            <div style="display: flex; align-items: center; gap: var(--space-sm); padding: 8px 12px; border-bottom: 1px solid var(--border); font-size: 0.85rem;" data-reclassify-id="${escapeHtml(doc.id)}">
+                <input type="checkbox" onchange="toggleReclassifySelection('${escapeHtml(doc.id)}', this.checked)" ${_reclassifySelectedIds.has(doc.id) ? 'checked' : ''}>
+                <div style="flex:1; min-width:0;">
+                    <div style="font-weight:500; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">${escapeHtml(doc.filename)}</div>
+                    <div style="font-size:0.75rem; color:var(--text-muted);">${escapeHtml(doc.category || '')} ${doc.subcategory ? '› ' + escapeHtml(doc.subcategory) : ''} · ${doc.char_count ?? 0} chars</div>
+                </div>
+                <span style="padding:2px 8px; border-radius:4px; font-size:0.75rem; font-weight:600; color:#fff; background:${badgeColor}; white-space:nowrap;">${escapeHtml(doc.file_type || 'unknown')}</span>
+                <select onchange="reclassifySingleDoc('${escapeHtml(doc.id)}', this.value, this)" style="padding:4px 6px; border-radius:4px; border:1px solid var(--border); background:var(--bg-elevated); color:var(--text); font-size:0.8rem; min-width:90px;">
+                    <option value="">Change…</option>
+                    ${['pdf','document','image','audio','video'].filter(t => t !== doc.file_type).map(t => `<option value="${t}">${t}</option>`).join('')}
+                </select>
+            </div>`;
+        }
+        resultsEl.innerHTML = html;
+    } catch (error) {
+        console.error('Reclassify search error:', error);
+        resultsEl.innerHTML = `<div style="padding: var(--space-md); color: var(--danger); text-align: center;">Error: ${escapeHtml(error.message)}</div>`;
+    }
+}
+
+function toggleReclassifySelection(docId, checked) {
+    if (checked) _reclassifySelectedIds.add(docId);
+    else _reclassifySelectedIds.delete(docId);
+    _updateReclassifyBulkBar();
+}
+
+function toggleSelectAllReclassify(checked) {
+    document.querySelectorAll('#reclassify-results input[type="checkbox"][onchange*="toggleReclassifySelection"]').forEach(cb => {
+        cb.checked = checked;
+        const id = cb.getAttribute('onchange').match(/'([^']+)'/)?.[1];
+        if (id) { if (checked) _reclassifySelectedIds.add(id); else _reclassifySelectedIds.delete(id); }
+    });
+    _updateReclassifyBulkBar();
+}
+
+function _updateReclassifyBulkBar() {
+    const bar = document.getElementById('reclassify-bulk-bar');
+    const countEl = document.getElementById('reclassify-selected-count');
+    if (!bar) return;
+    const n = _reclassifySelectedIds.size;
+    bar.style.display = n > 0 ? 'flex' : 'none';
+    if (countEl) countEl.textContent = `${n} selected`;
+}
+
+async function reclassifySingleDoc(docId, newType, selectEl) {
+    if (!newType) return;
+    try {
+        const response = await authFetch(`${window.location.origin}/api/admin/documents/reclassify`, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ document_ids: [docId], file_type: newType })
+        });
+        if (!response.ok) { const d = await response.json(); throw new Error(d.detail || 'Failed'); }
+
+        // Update the badge in-place
+        const row = document.querySelector(`[data-reclassify-id="${docId}"]`);
+        if (row) {
+            const badge = row.querySelector('span[style*="border-radius:4px"]');
+            if (badge) { badge.textContent = newType; badge.style.background = _fileTypeBadgeColor(newType); }
+            // Rebuild the dropdown to exclude the new type
+            const sel = row.querySelector('select');
+            if (sel) {
+                sel.innerHTML = `<option value="">Change…</option>` +
+                    ['pdf','document','image','audio','video'].filter(t => t !== newType).map(t => `<option value="${t}">${t}</option>`).join('');
+            }
+        }
+    } catch (error) {
+        console.error('Reclassify error:', error);
+        alert('Error: ' + error.message);
+    }
+    if (selectEl) selectEl.value = '';
+}
+
+async function bulkReclassifySelected() {
+    const n = _reclassifySelectedIds.size;
+    if (n === 0) return;
+    const targetType = document.getElementById('reclassify-bulk-type')?.value;
+    if (!targetType) { alert('Select a target file type'); return; }
+    if (!confirm(`Reclassify ${n} document(s) as "${targetType}"?`)) return;
+
+    try {
+        const response = await authFetch(`${window.location.origin}/api/admin/documents/reclassify`, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ document_ids: Array.from(_reclassifySelectedIds), file_type: targetType })
+        });
+        if (!response.ok) { const d = await response.json(); throw new Error(d.detail || 'Failed'); }
+        const result = await response.json();
+        alert(`Reclassified ${result.updated_count} document(s) as "${targetType}"`);
+        _reclassifySelectedIds.clear();
+        _updateReclassifyBulkBar();
+        searchDocsForReclassify();
+    } catch (error) {
+        console.error('Bulk reclassify error:', error);
+        alert('Error: ' + error.message);
+    }
+}
+
+// Export File Type Reclassification functions
+window.searchDocsForReclassify = searchDocsForReclassify;
+window.toggleReclassifySelection = toggleReclassifySelection;
+window.toggleSelectAllReclassify = toggleSelectAllReclassify;
+window.reclassifySingleDoc = reclassifySingleDoc;
+window.bulkReclassifySelected = bulkReclassifySelected;
+

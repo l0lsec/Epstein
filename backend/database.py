@@ -796,10 +796,9 @@ class Database:
                         SELECT d.category, COUNT(*) as count
                         FROM documents d
                         JOIN documents_fts fts ON d.id = fts.id
-                        LEFT JOIN hidden_categories hc ON d.category = hc.category
                         WHERE documents_fts MATCH ?
-                          AND (d.is_hidden IS NULL OR d.is_hidden = 0)
-                          AND hc.category IS NULL
+                          AND d.is_hidden = 0
+                          AND d.category NOT IN (SELECT category FROM hidden_categories)
                         GROUP BY d.category
                         ORDER BY count DESC
                     """
@@ -817,9 +816,8 @@ class Database:
                     sql = """
                         SELECT d.category, COUNT(*) as count 
                         FROM documents d
-                        LEFT JOIN hidden_categories hc ON d.category = hc.category
-                        WHERE (d.is_hidden IS NULL OR d.is_hidden = 0)
-                          AND hc.category IS NULL
+                        WHERE d.is_hidden = 0
+                          AND d.category NOT IN (SELECT category FROM hidden_categories)
                         GROUP BY d.category 
                         ORDER BY count DESC
                     """
@@ -845,34 +843,27 @@ class Database:
             params = []
             conditions = []
             
-            # If keyword search, use FTS join
             if keyword:
                 sql = """
                     SELECT DISTINCT d.id, d.filename, d.path, d.category, d.subcategory, d.file_type, d.page_count, d.char_count, d.duration_seconds, d.is_hidden
                     FROM documents d
                     JOIN documents_fts fts ON d.id = fts.id
-                    LEFT JOIN hidden_categories hc ON d.category = hc.category
                     WHERE documents_fts MATCH ?
                 """
-                # Escape special FTS characters and add wildcards for partial matching
                 escaped_keyword = keyword.replace('"', '""')
                 params.append(f'"{escaped_keyword}"*')
                 
-                # Visibility filter
                 if not include_hidden:
                     conditions.append("d.is_hidden = 0")
-                    conditions.append("hc.category IS NULL")
+                    conditions.append("d.category NOT IN (SELECT category FROM hidden_categories)")
             else:
                 sql = """
                     SELECT d.id, d.filename, d.path, d.category, d.subcategory, d.file_type, d.page_count, d.char_count, d.duration_seconds, d.is_hidden
                     FROM documents d
-                    LEFT JOIN hidden_categories hc ON d.category = hc.category
                 """
-                
-                # Visibility filter
                 if not include_hidden:
                     conditions.append("d.is_hidden = 0")
-                    conditions.append("hc.category IS NULL")
+                    conditions.append("d.category NOT IN (SELECT category FROM hidden_categories)")
             
             if category:
                 conditions.append("d.category = ?")
@@ -932,11 +923,10 @@ class Database:
                        d.page_count, d.char_count, d.duration_seconds, d.is_hidden,
                        COUNT(*) OVER() AS _total
                 FROM documents d
-                LEFT JOIN hidden_categories hc ON d.category = hc.category
             """
             if not include_hidden:
                 conditions.append("d.is_hidden = 0")
-                conditions.append("hc.category IS NULL")
+                conditions.append("d.category NOT IN (SELECT category FROM hidden_categories)")
             if category:
                 conditions.append("d.category = ?")
                 params.append(category)
@@ -974,33 +964,28 @@ class Database:
             params = []
             conditions = []
             
-            # If keyword search, use FTS join
             if keyword:
                 sql = """
                     SELECT COUNT(DISTINCT d.id)
                     FROM documents d
                     JOIN documents_fts fts ON d.id = fts.id
-                    LEFT JOIN hidden_categories hc ON d.category = hc.category
                     WHERE documents_fts MATCH ?
                 """
                 escaped_keyword = keyword.replace('"', '""')
                 params.append(f'"{escaped_keyword}"*')
                 
-                # Visibility filter
                 if not include_hidden:
-                    conditions.append("(d.is_hidden IS NULL OR d.is_hidden = 0)")
-                    conditions.append("hc.category IS NULL")
+                    conditions.append("d.is_hidden = 0")
+                    conditions.append("d.category NOT IN (SELECT category FROM hidden_categories)")
             else:
                 sql = """
                     SELECT COUNT(*) 
                     FROM documents d
-                    LEFT JOIN hidden_categories hc ON d.category = hc.category
                 """
                 
-                # Visibility filter
                 if not include_hidden:
-                    conditions.append("(d.is_hidden IS NULL OR d.is_hidden = 0)")
-                    conditions.append("hc.category IS NULL")
+                    conditions.append("d.is_hidden = 0")
+                    conditions.append("d.category NOT IN (SELECT category FROM hidden_categories)")
             
             if category:
                 conditions.append("d.category = ?")
@@ -2126,6 +2111,32 @@ class Database:
                 "already_visible": already_visible
             }
     
+    VALID_FILE_TYPES = {"pdf", "document", "image", "audio", "video"}
+
+    def update_file_type(self, document_ids: List[str], file_type: str) -> int:
+        """Reclassify documents to a new file_type.
+
+        Args:
+            document_ids: List of document IDs to update (max 1000)
+            file_type: Target file_type (must be in VALID_FILE_TYPES)
+
+        Returns:
+            Number of rows actually updated
+        """
+        if not document_ids:
+            return 0
+        if file_type not in self.VALID_FILE_TYPES:
+            raise ValueError(f"Invalid file_type: {file_type}")
+        document_ids = document_ids[:1000]
+        with self.get_connection() as conn:
+            placeholders = ','.join('?' * len(document_ids))
+            cursor = conn.execute(
+                f"UPDATE documents SET file_type = ? WHERE id IN ({placeholders})",
+                [file_type] + document_ids
+            )
+            conn.commit()
+            return cursor.rowcount
+
     def get_documents_by_filenames(self, filenames: List[str], include_hidden: bool = True) -> Dict[str, Dict[str, Any]]:
         """Resolve a list of filenames to document records in bulk.
 

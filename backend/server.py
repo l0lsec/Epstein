@@ -4860,6 +4860,7 @@ async def search_documents_visibility(
     x_api_key: str = Header(None),
     search: Optional[str] = None,
     category: Optional[str] = None,
+    file_type: Optional[str] = None,
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0)
 ):
@@ -4875,7 +4876,8 @@ async def search_documents_visibility(
         docs = db.get_all_documents(
             limit=limit, 
             offset=offset, 
-            category=category, 
+            category=category,
+            file_type=file_type,
             search=search,
             include_hidden=True
         )
@@ -4889,6 +4891,41 @@ async def search_documents_visibility(
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error searching documents: {str(e)}")
+
+
+class ReclassifyRequest(BaseModel):
+    document_ids: List[str]
+    file_type: str
+
+
+@app.patch("/api/admin/documents/reclassify")
+async def reclassify_documents(
+    body: ReclassifyRequest,
+    request: Request,
+    x_api_key: str = Header(None),
+):
+    """Reclassify documents to a new file_type (admin only)"""
+    is_authorized, error = verify_admin_access(request, x_api_key)
+    if not is_authorized:
+        raise HTTPException(status_code=401, detail=error)
+
+    if not db:
+        raise HTTPException(status_code=503, detail="Database not initialized")
+
+    if body.file_type not in db.VALID_FILE_TYPES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid file_type '{body.file_type}'. Must be one of: {', '.join(sorted(db.VALID_FILE_TYPES))}",
+        )
+
+    if not body.document_ids:
+        raise HTTPException(status_code=400, detail="No document_ids provided")
+
+    try:
+        updated = db.update_file_type(body.document_ids, body.file_type)
+        return {"success": True, "updated_count": updated}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error reclassifying documents: {str(e)}")
 
 
 # =============================================================================

@@ -2045,6 +2045,58 @@
                 </div>
             </div>
 
+            <!-- File Type Management -->
+            <div class="card" style="margin-bottom: var(--space-lg); border-color: var(--primary);">
+                <div class="card-header" style="background: var(--primary-dim);">
+                    <span class="card-title">🏷️ File Type Management</span>
+                </div>
+                <div class="card-body">
+                    <p style="margin-bottom: var(--space-lg); font-size: 0.9rem; color: var(--text-muted);">
+                        Reclassify documents that were incorrectly categorized. Search for files, review their current type and character count, then reclassify individually or in bulk.
+                    </p>
+
+                    <!-- Search controls -->
+                    <div style="display: flex; gap: var(--space-sm); margin-bottom: var(--space-lg); flex-wrap: wrap;">
+                        <input
+                            type="text"
+                            id="reclassify-search"
+                            class="login-input"
+                            placeholder="Search by filename..."
+                            style="flex: 1; min-width: 200px;"
+                            onkeyup="if(event.key==='Enter') searchDocsForReclassify()"
+                        >
+                        <select id="reclassify-type-filter" style="padding: 8px 12px; border-radius: 6px; border: 1px solid var(--border); background: var(--bg-elevated); color: var(--text); font-size: 0.85rem;">
+                            <option value="">All Types</option>
+                            <option value="pdf">pdf</option>
+                            <option value="document">document</option>
+                            <option value="image">image</option>
+                            <option value="audio">audio</option>
+                            <option value="video">video</option>
+                        </select>
+                        <button class="btn btn-primary" onclick="searchDocsForReclassify()">Search</button>
+                    </div>
+
+                    <!-- Results -->
+                    <div id="reclassify-results" style="max-height: 400px; overflow-y: auto; border: 1px solid var(--border); border-radius: 6px; margin-bottom: var(--space-md);">
+                        <div style="padding: var(--space-md); color: var(--text-muted); text-align: center; font-size: 0.85rem;">Search for documents to reclassify</div>
+                    </div>
+
+                    <!-- Bulk action bar -->
+                    <div id="reclassify-bulk-bar" style="display: none; padding: var(--space-sm) var(--space-md); background: var(--bg-elevated); border: 1px solid var(--primary); border-radius: 6px; display: none; align-items: center; gap: var(--space-sm); flex-wrap: wrap;">
+                        <span id="reclassify-selected-count" style="font-size: 0.85rem; font-weight: 600;">0 selected</span>
+                        <span style="color: var(--text-muted); font-size: 0.85rem;">→ Reclassify as:</span>
+                        <select id="reclassify-bulk-type" style="padding: 6px 10px; border-radius: 4px; border: 1px solid var(--border); background: var(--bg-elevated); color: var(--text); font-size: 0.85rem;">
+                            <option value="pdf">pdf</option>
+                            <option value="document">document</option>
+                            <option value="image">image</option>
+                            <option value="audio">audio</option>
+                            <option value="video">video</option>
+                        </select>
+                        <button class="btn btn-primary btn-sm" onclick="bulkReclassifySelected()">Apply</button>
+                    </div>
+                </div>
+            </div>
+
             <!-- Document Visibility Management -->
             <div class="card" style="margin-bottom: var(--space-lg); border-color: var(--danger);">
                 <div class="card-header" style="background: var(--danger-dim);">
@@ -2430,7 +2482,7 @@
         </div>
     </main>
 
-    <script src="/static/admin.js?v=19"></script>
+    <script src="/static/admin.js?v=20"></script>
 </body>
 </html>
 
