@@ -674,21 +674,14 @@ window.submitFeedback = async function() {
     btn.disabled = true;
     btn.innerHTML = '<span class="spinner"></span> Verifying...';
     
-    // Get reCAPTCHA v3 token
-    let recaptchaResponse;
-    try {
-        recaptchaResponse = await grecaptcha.execute('6Lf9EDYsAAAAANDlA_xYFIM7Ylccgmc24LhZgDIr', {action: 'submit_feedback'});
-    } catch (e) {
-        console.error('reCAPTCHA error:', e);
-        showFeedbackStatus('reCAPTCHA verification failed. Please refresh and try again.', 'error');
-        btn.disabled = false;
-        btn.innerHTML = `
-            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2">
-                <path d="M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z"/>
-            </svg>
-            Submit Feedback
-        `;
-        return;
+    // Get reCAPTCHA v3 token (gracefully skip if blocked by browser extension)
+    let recaptchaResponse = null;
+    if (typeof grecaptcha !== 'undefined' && !window.__recaptchaFailed) {
+        try {
+            recaptchaResponse = await grecaptcha.execute('6Lf9EDYsAAAAANDlA_xYFIM7Ylccgmc24LhZgDIr', {action: 'submit_feedback'});
+        } catch (e) {
+            console.warn('reCAPTCHA unavailable, proceeding without:', e);
+        }
     }
     
     btn.innerHTML = '<span class="spinner"></span> Sending...';

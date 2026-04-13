@@ -1330,64 +1330,62 @@ async def submit_feedback(feedback: FeedbackRequest, request: Request):
     # Get client info for logging
     client_ip, request_id = get_client_info(request)
     
-    # Verify reCAPTCHA (skip if secret key not configured)
+    # Verify reCAPTCHA (skip if secret key not configured or token missing due to client-side blocker)
     if RECAPTCHA_SECRET_KEY:
         if not feedback.recaptcha_token:
-            security_logger.log_validation_failure(
+            security_logger.log_security_event(
+                event_type="recaptcha_skipped",
+                severity="low",
                 client_ip=client_ip,
-                endpoint="/api/feedback",
-                field="recaptcha_token",
-                reason="Missing reCAPTCHA token",
+                message="reCAPTCHA token missing (likely blocked by client extension)",
                 request_id=request_id
             )
-            raise HTTPException(status_code=400, detail="Please complete the reCAPTCHA verification.")
-        
-        try:
-            async with httpx.AsyncClient() as client:
-                recaptcha_response = await client.post(
-                    "https://www.google.com/recaptcha/api/siteverify",
-                    data={
-                        "secret": RECAPTCHA_SECRET_KEY,
-                        "response": feedback.recaptcha_token
-                    }
-                )
-                recaptcha_result = recaptcha_response.json()
-                
-                if not recaptcha_result.get("success"):
-                    security_logger.log_recaptcha_failure(
-                        client_ip=client_ip,
-                        reason="Verification failed",
-                        request_id=request_id
+        else:
+            try:
+                async with httpx.AsyncClient() as client:
+                    recaptcha_response = await client.post(
+                        "https://www.google.com/recaptcha/api/siteverify",
+                        data={
+                            "secret": RECAPTCHA_SECRET_KEY,
+                            "response": feedback.recaptcha_token
+                        }
                     )
-                    raise HTTPException(status_code=400, detail="reCAPTCHA verification failed. Please try again.")
-                
-                # v3 returns a score (0.0 - 1.0), reject if too low (likely bot)
-                score = recaptcha_result.get("score", 1.0)
-                if score < 0.3:
-                    security_logger.log_recaptcha_failure(
+                    recaptcha_result = recaptcha_response.json()
+                    
+                    if not recaptcha_result.get("success"):
+                        security_logger.log_recaptcha_failure(
+                            client_ip=client_ip,
+                            reason="Verification failed",
+                            request_id=request_id
+                        )
+                        raise HTTPException(status_code=400, detail="reCAPTCHA verification failed. Please try again.")
+                    
+                    # v3 returns a score (0.0 - 1.0), reject if too low (likely bot)
+                    score = recaptcha_result.get("score", 1.0)
+                    if score < 0.3:
+                        security_logger.log_recaptcha_failure(
+                            client_ip=client_ip,
+                            reason="Low score (bot suspected)",
+                            score=score,
+                            request_id=request_id
+                        )
+                        raise HTTPException(status_code=400, detail="Suspicious activity detected. Please try again later.")
+                    
+                    security_logger.log_security_event(
+                        event_type="recaptcha_success",
+                        severity="low",
                         client_ip=client_ip,
-                        reason="Low score (bot suspected)",
-                        score=score,
-                        request_id=request_id
+                        message=f"reCAPTCHA passed with score {score}",
+                        request_id=request_id,
+                        score=score
                     )
-                    raise HTTPException(status_code=400, detail="Suspicious activity detected. Please try again later.")
-                
-                security_logger.log_security_event(
-                    event_type="recaptcha_success",
-                    severity="low",
+            except httpx.RequestError as e:
+                security_logger.log_error(
+                    error=e,
+                    context="recaptcha_verification",
                     client_ip=client_ip,
-                    message=f"reCAPTCHA passed with score {score}",
-                    request_id=request_id,
-                    score=score
+                    request_id=request_id
                 )
-        except httpx.RequestError as e:
-            # If reCAPTCHA verification fails due to network, allow submission but log it
-            security_logger.log_error(
-                error=e,
-                context="recaptcha_verification",
-                client_ip=client_ip,
-                request_id=request_id
-            )
     
     # Rate limiting check
     now = datetime.now()

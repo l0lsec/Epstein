@@ -55,6 +55,7 @@ html {
     font-size: 16px;
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
+    overflow-x: hidden;
 }
 
 body {
@@ -64,6 +65,7 @@ body {
     line-height: 1.6;
     min-height: 100vh;
     position: relative;
+    overflow-x: hidden;
 }
 
 /* Noise overlay for texture */
@@ -1209,7 +1211,7 @@ body {
 .stats-container {
     margin-top: var(--space-lg);
     margin-bottom: var(--space-xl);
-    max-width: 600px;
+    max-width: 800px;
     margin-left: auto;
     margin-right: auto;
 }
@@ -3426,28 +3428,31 @@ a.modal-tab.doj-link {
 
 /* Responsive */
 @media (max-width: 768px) {
-    /* Donation Banner Mobile - Below header like desktop */
+    /* Donation Banner Mobile */
     .donation-banner {
         flex-direction: column;
         text-align: center;
-        padding: var(--space-sm) var(--space-md);
-        gap: var(--space-sm);
-        position: sticky;
-        top: 0;
-        z-index: 99;
-        background: linear-gradient(90deg, rgba(201, 162, 39, 0.15) 0%, rgba(201, 162, 39, 0.25) 50%, rgba(201, 162, 39, 0.15) 100%);
-        backdrop-filter: blur(12px);
-        border-bottom: 1px solid rgba(201, 162, 39, 0.3);
+        padding: var(--space-xs) var(--space-md);
+        gap: var(--space-xs);
+        position: static;
     }
     
     .banner-text {
         text-align: center;
         line-height: 1.4;
+        font-size: 0.8rem;
     }
     
     .header-content {
         flex-direction: column;
         gap: var(--space-md);
+        padding: var(--space-sm) var(--space-md);
+        max-width: 100%;
+    }
+
+    .main {
+        padding: var(--space-md);
+        max-width: 100%;
     }
     
     .nav {
@@ -3455,8 +3460,16 @@ a.modal-tab.doj-link {
         justify-content: center;
     }
     
+    .hero {
+        padding: var(--space-sm) 0 var(--space-xl) 0;
+    }
+
     .hero-title {
         font-size: 2rem;
+    }
+
+    .search-container {
+        max-width: 100%;
     }
     
     .search-box {
@@ -3507,14 +3520,35 @@ a.modal-tab.doj-link {
         padding: 6px 8px;
     }
     
+    .stats-container {
+        max-width: 100%;
+    }
+
     .stats-grid {
         grid-template-columns: repeat(2, 1fr);
     }
     
+    /* Mobile Results Header */
+    .results-header {
+        flex-wrap: wrap;
+        gap: var(--space-sm);
+    }
+
+    .results-header-actions {
+        width: 100%;
+        justify-content: flex-start;
+    }
+
+    .results-container {
+        max-width: 100%;
+        overflow: hidden;
+    }
+
     /* Mobile Thumbnail Styles */
     .result-item {
         flex-direction: row;
         gap: var(--space-md);
+        padding: var(--space-md);
     }
     
     .result-thumbnail {
