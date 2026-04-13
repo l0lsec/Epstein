@@ -8,6 +8,9 @@ import json
 import asyncio
 import uuid
 import time as _time
+import threading as _threading
+import concurrent.futures as _cf
+import sqlite3
 from html import escape as html_escape
 from pathlib import Path
 from typing import Optional, List
@@ -99,11 +102,15 @@ class ResponseCache:
             self._cache.clear()
 
 # Cache instances with different TTLs
-_stats_cache = ResponseCache(ttl_seconds=30)  # Stats cached for 30 seconds
-_categories_cache = ResponseCache(ttl_seconds=60)  # Categories cached for 60 seconds
+_stats_cache = ResponseCache(ttl_seconds=3600)  # Stats cached for 1h; admin actions call invalidate() on change
+_categories_cache = ResponseCache(ttl_seconds=3600)  # Categories cached for 1h; admin actions call invalidate() on change
 _bootstrap_cache = ResponseCache(ttl_seconds=86400)  # Bootstrap cached for 24h; admin actions invalidate on change
-_maintenance_cache = ResponseCache(ttl_seconds=5)  # Maintenance/status-page check (avoids DB hit per request)
+_maintenance_cache = ResponseCache(ttl_seconds=120)
 _bootstrap_refreshing = False  # Guard to prevent concurrent background rebuilds
+
+_categories_lock = asyncio.Lock()
+_subcategories_lock = asyncio.Lock()
+_stats_lock = asyncio.Lock()
 
 async def lookup_ip_geo(ip: str) -> dict:
     """Look up geolocation for an IP address using ip-api.com"""
@@ -351,10 +358,9 @@ async def lifespan(app: FastAPI):
         security_logger.log_system_event("auto_index_disabled", "Auto-indexing is disabled")
     
     # Pre-warm the bootstrap cache so the first user request is instant.
-    # Stagger by a random 0-3s so multiple workers don't all hit the DB simultaneously.
     if db:
         import random
-        stagger = random.uniform(0, 3.0)
+        stagger = random.uniform(0, 30.0)
         await asyncio.sleep(stagger)
         security_logger.log_system_event("cache_warmup", "Pre-warming bootstrap cache...")
         try:
@@ -429,11 +435,10 @@ async def maintenance_check(request: Request, call_next):
     # First check: .maintenance file exists (indexing in progress)
     if MAINTENANCE_LOCK.exists():
         show_maintenance = True
-    # Second check: custom status page enabled in database settings (cached to avoid DB hit per request)
     elif db:
         status_enabled = _maintenance_cache.get("status_page_enabled")
         if status_enabled is None:
-            status_enabled = db.get_setting("status_page_enabled", "false")
+            status_enabled = await asyncio.to_thread(db.get_setting, "status_page_enabled", "false")
             _maintenance_cache.set("status_page_enabled", status_enabled)
         if status_enabled == "true":
             show_maintenance = True
@@ -822,7 +827,7 @@ async def root(doc: str = None):
     
     # If doc param present, serve modified HTML with document's thumbnail for social sharing
     if doc and db:
-        document = db.get_document(doc)
+        document = await asyncio.to_thread(db.get_document, doc)
         if document:
             try:
                 html = index_path.read_text()
@@ -925,7 +930,7 @@ async def get_maintenance_status():
     
     Used by maintenance.html to show appropriate content to users.
     """
-    return get_maintenance_status_data()
+    return await asyncio.to_thread(get_maintenance_status_data)
 
 
 @app.get("/api/maintenance-stream")
@@ -946,8 +951,7 @@ async def maintenance_stream(request: Request):
             if await request.is_disconnected():
                 break
             
-            # Get current status
-            current_status = get_maintenance_status_data()
+            current_status = await asyncio.to_thread(get_maintenance_status_data)
             current_status_json = json.dumps(current_status, sort_keys=True)
             
             # Send update if status changed or first connection
@@ -976,33 +980,38 @@ async def maintenance_stream(request: Request):
 
 @app.get("/api/stats")
 async def get_stats(response: Response) -> StatsResponse:
-    """Get platform statistics (cached for 30 seconds)"""
+    """Get platform statistics (cached for 1h)"""
     if not db:
         raise HTTPException(status_code=503, detail="Database not initialized")
-    
-    # Check cache first
+
     cached = _stats_cache.get("stats")
     if cached:
         response.headers["X-Cache"] = "HIT"
-        response.headers["Cache-Control"] = "public, max-age=30, s-maxage=30"
+        response.headers["Cache-Control"] = "public, max-age=300, s-maxage=300"
         return cached
-    
-    stats = db.get_stats()
-    result = StatsResponse(
-        total_documents=stats["total_documents"],
-        total_pages=stats["total_pages"],
-        by_category=stats["by_category"],
-        by_subcategory=stats["by_subcategory"],
-        by_file_type=stats.get("by_file_type", []),
-        vector_chunks=vector_store.get_count() if vector_store else 0,
-        llm_available=llm.is_available() if llm else False
-    )
-    
-    # Cache the result
-    _stats_cache.set("stats", result)
-    response.headers["X-Cache"] = "MISS"
-    response.headers["Cache-Control"] = "public, max-age=30, s-maxage=30"
-    return result
+
+    async with _stats_lock:
+        cached = _stats_cache.get("stats")
+        if cached:
+            response.headers["X-Cache"] = "HIT"
+            response.headers["Cache-Control"] = "public, max-age=300, s-maxage=300"
+            return cached
+
+        stats = await asyncio.to_thread(db.get_stats)
+        result = StatsResponse(
+            total_documents=stats["total_documents"],
+            total_pages=stats["total_pages"],
+            by_category=stats["by_category"],
+            by_subcategory=stats["by_subcategory"],
+            by_file_type=stats.get("by_file_type", []),
+            vector_chunks=vector_store.get_count() if vector_store else 0,
+            llm_available=llm.is_available() if llm else False
+        )
+
+        _stats_cache.set("stats", result)
+        response.headers["X-Cache"] = "MISS"
+        response.headers["Cache-Control"] = "public, max-age=300, s-maxage=300"
+        return result
 
 
 def _build_and_cache_bootstrap() -> dict:
@@ -1168,8 +1177,12 @@ async def trigger_index(request: Request, x_api_key: str = Header(None)):
         is_indexing = False
         
         duration = (last_index_time - start_time).total_seconds()
-        stats = db.get_stats() if db else {}
-        
+
+        def _work():
+            return db.get_stats() if db else {}
+
+        stats = await asyncio.to_thread(_work)
+
         security_logger.log_index_operation(
             operation="complete",
             trigger="manual",
@@ -1216,7 +1229,7 @@ async def rebuild_fts_index(request: Request, x_api_key: str = Header(None)):
             f"FTS index rebuild triggered from {client_ip}"
         )
         
-        db.rebuild_fts()
+        await asyncio.to_thread(db.rebuild_fts)
         
         security_logger.log_system_event(
             "fts_rebuild_complete",
@@ -1240,13 +1253,12 @@ async def rebuild_fts_index(request: Request, x_api_key: str = Header(None)):
 @app.get("/api/categories")
 async def get_categories(keyword: Optional[str] = None, response: Response = None):
     """Get all document categories, optionally filtered by keyword (cached for 60 seconds)
-    
+
     Note: Hidden categories and documents in hidden categories are excluded from results.
     """
     if not db:
         raise HTTPException(status_code=503, detail="Database not initialized")
-    
-    # Use cache only for unfiltered requests (most common)
+
     cache_key = f"categories:{keyword or 'all'}"
     if not keyword:
         cached = _categories_cache.get(cache_key)
@@ -1255,43 +1267,59 @@ async def get_categories(keyword: Optional[str] = None, response: Response = Non
                 response.headers["X-Cache"] = "HIT"
                 response.headers["Cache-Control"] = "public, max-age=60, s-maxage=60"
             return cached
-    
-    # Exclude hidden categories and hidden documents from public view
-    categories = db.get_category_counts(keyword=keyword, include_hidden=False)
-    result = {"categories": categories}
-    
-    # Cache unfiltered results
-    if not keyword:
-        _categories_cache.set(cache_key, result)
-    
-    if response:
-        response.headers["X-Cache"] = "MISS" if not keyword else "BYPASS"
-        response.headers["Cache-Control"] = "public, max-age=60, s-maxage=60"
-    return result
 
+    async with _categories_lock:
+        if not keyword:
+            cached = _categories_cache.get(cache_key)
+            if cached:
+                if response:
+                    response.headers["X-Cache"] = "HIT"
+                    response.headers["Cache-Control"] = "public, max-age=60, s-maxage=60"
+                return cached
+
+        categories = await asyncio.to_thread(db.get_category_counts, keyword=keyword, include_hidden=False)
+        result = {"categories": categories}
+
+        if not keyword:
+            _categories_cache.set(cache_key, result)
+
+        if response:
+            response.headers["X-Cache"] = "MISS" if not keyword else "BYPASS"
+            response.headers["Cache-Control"] = "public, max-age=60, s-maxage=60"
+        return result
+
+
+_subcategories_cache = ResponseCache(ttl_seconds=3600)  # 1h; admin actions invalidate via _categories_cache pattern
 
 @app.get("/api/subcategories")
 async def get_subcategories(category: Optional[str] = None):
     """Get subcategories, optionally filtered by category
-    
+
     Note: Returns empty list if the category is hidden.
     Uses a dedicated lightweight query instead of full stats.
     """
     if not db:
         raise HTTPException(status_code=503, detail="Database not initialized")
-    
-    # If category is specified and it's hidden, return empty
-    if category and db.is_category_hidden(category):
+
+    if category and await asyncio.to_thread(db.is_category_hidden, category):
         return {"subcategories": []}
-    
-    subcategories = db.get_subcategory_counts(category=category, include_hidden=False)
-    # Normalize to list of {subcategory, count} for the requested category only
-    if category:
+
+    cache_key = f"subcategories:{category or 'all'}"
+    cached = _subcategories_cache.get(cache_key)
+    if cached:
+        return cached
+
+    async with _subcategories_lock:
+        cached = _subcategories_cache.get(cache_key)
+        if cached:
+            return cached
+
+        subcategories = await asyncio.to_thread(db.get_subcategory_counts, category=category, include_hidden=False)
         subcategories = [{"subcategory": s["subcategory"], "count": s["count"]} for s in subcategories if s.get("subcategory")]
-    else:
-        subcategories = [{"subcategory": s["subcategory"], "count": s["count"]} for s in subcategories if s.get("subcategory")]
-    
-    return {"subcategories": subcategories}
+
+        result = {"subcategories": subcategories}
+        _subcategories_cache.set(cache_key, result)
+        return result
 
 
 @app.post("/api/feedback")
@@ -1459,6 +1487,10 @@ async def search(search_request: SearchRequest, request: Request) -> dict:
     
     if not db:
         raise HTTPException(status_code=503, detail="Database not initialized")
+
+    stripped_query = search_request.query.strip()
+    if len(stripped_query) < 2:
+        raise HTTPException(status_code=400, detail="Search query must be at least 2 characters")
     
     results = []
     total_count = 0
@@ -1467,113 +1499,100 @@ async def search(search_request: SearchRequest, request: Request) -> dict:
     parsed = parse_boolean_query(search_request.query)
     fts_query = parsed['fts_query']
     
-    if search_request.search_type in ["fulltext", "hybrid"]:
-        # Full-text search using parsed Boolean query
-        # Note: Hidden documents and hidden categories are excluded from results
-        try:
-            ft_results = db.search_fulltext(
-                query=fts_query,
-                limit=search_request.limit,
-                offset=search_request.offset,
-                category=search_request.category,
-                subcategory=search_request.subcategory,
-                file_type=search_request.file_type,
-                date_from=search_request.date_from,
-                date_to=search_request.date_to,
-                include_hidden=False
+    def _do_search():
+        """Run all search DB work in a thread to avoid blocking the event loop."""
+        _results = []
+        _total = 0
+        _facets = {}
+        _error = None
+        _timed_out = False
+
+        if search_request.search_type in ["fulltext", "hybrid"]:
+            try:
+                ft_results = db.search_fulltext(
+                    query=fts_query, limit=search_request.limit,
+                    offset=search_request.offset, category=search_request.category,
+                    subcategory=search_request.subcategory, file_type=search_request.file_type,
+                    date_from=search_request.date_from, date_to=search_request.date_to,
+                    include_hidden=False
+                )
+                for r in ft_results:
+                    _results.append({**r, "search_type": "fulltext", "score": abs(r.get("score", 0))})
+            except sqlite3.OperationalError:
+                _timed_out = True
+            except Exception as e:
+                _error = e
+                if search_request.search_type == "fulltext":
+                    return _results, _total, _facets, _error
+
+            if not _timed_out and _results:
+                try:
+                    _total = db.count_fulltext_results(
+                        query=fts_query, category=search_request.category,
+                        subcategory=search_request.subcategory, file_type=search_request.file_type,
+                        date_from=search_request.date_from, date_to=search_request.date_to,
+                        include_hidden=False
+                    )
+                except sqlite3.OperationalError:
+                    _total = len(_results) + search_request.limit
+            elif _timed_out:
+                _total = 0
+
+        if search_request.search_type in ["semantic", "hybrid"] and vector_store:
+            sem_results = vector_store.search(
+                query=search_request.query, n_results=search_request.limit,
+                category=search_request.category
             )
-            # Get actual total count for pagination
-            total_count = db.count_fulltext_results(
-                query=fts_query,
-                category=search_request.category,
-                subcategory=search_request.subcategory,
-                file_type=search_request.file_type,
-                date_from=search_request.date_from,
-                date_to=search_request.date_to,
-                include_hidden=False
-            )
-            for r in ft_results:
-                results.append({
-                    **r,
-                    "search_type": "fulltext",
-                    "score": abs(r.get("score", 0))
-                })
-        except Exception as e:
-            security_logger.log_error(
-                error=e,
-                context="fulltext_search",
-                client_ip=client_ip,
-                request_id=request_id,
-                query=search_request.query[:100]
-            )
-            if search_request.search_type == "fulltext":
-                raise HTTPException(status_code=400, detail="Search query error. Please check your search syntax.")
-    
-    if search_request.search_type in ["semantic", "hybrid"] and vector_store:
-        # Semantic search (doesn't support pagination as well, so we use it for discovery)
-        sem_results = vector_store.search(
-            query=search_request.query,
-            n_results=search_request.limit,
-            category=search_request.category
+            existing_ids = {r["id"] for r in _results}
+            for r in sem_results:
+                doc_id = r.get("id", "")
+                if doc_id and doc_id not in existing_ids:
+                    if not db.is_document_visible(doc_id):
+                        continue
+                    doc = db.get_document(doc_id, include_full_text=False)
+                    if doc:
+                        text = r.get("text", "")
+                        _results.append({
+                            "id": doc_id,
+                            "filename": doc.get("filename", r.get("filename", "Unknown")),
+                            "path": doc.get("path", r.get("path", "")),
+                            "category": doc.get("category", r.get("category", "Unknown")),
+                            "subcategory": doc.get("subcategory", r.get("subcategory", "")),
+                            "file_type": doc.get("file_type", "pdf"),
+                            "page_count": doc.get("page_count"),
+                            "duration_seconds": doc.get("duration_seconds"),
+                            "snippet": text[:300] + "..." if len(text) > 300 else text,
+                            "search_type": "semantic", "score": r.get("score", 0)
+                        })
+                        existing_ids.add(doc_id)
+            if search_request.search_type == "semantic":
+                _total = len(_results)
+
+        _results.sort(key=lambda x: x.get("score", 0), reverse=True)
+
+        if not _timed_out and search_request.search_type in ["fulltext", "hybrid"]:
+            try:
+                _facets = db.get_search_facets(
+                    query=fts_query, category=search_request.category,
+                    subcategory=search_request.subcategory, file_type=search_request.file_type,
+                    date_from=search_request.date_from, date_to=search_request.date_to,
+                    include_hidden=False
+                )
+            except (sqlite3.OperationalError, Exception):
+                pass
+
+        return _results, _total, _facets, _error
+
+    results, total_count, facets, search_error = await asyncio.to_thread(_do_search)
+
+    if search_error:
+        security_logger.log_error(
+            error=search_error, context="fulltext_search",
+            client_ip=client_ip, request_id=request_id,
+            query=search_request.query[:100]
         )
-        
-        # Merge with existing results or add new
-        # Note: Validate docs exist in DB and are visible to avoid stale/hidden entries
-        existing_ids = {r["id"] for r in results}
-        for r in sem_results:
-            doc_id = r.get("id", "")
-            if doc_id and doc_id not in existing_ids:
-                # Verify document exists and is visible (not hidden)
-                if not db.is_document_visible(doc_id):
-                    continue
-                # Use metadata-only to avoid loading full_text for every result
-                doc = db.get_document(doc_id, include_full_text=False)
-                if doc:
-                    text = r.get("text", "")
-                    results.append({
-                        "id": doc_id,
-                        "filename": doc.get("filename", r.get("filename", "Unknown")),
-                        "path": doc.get("path", r.get("path", "")),
-                        "category": doc.get("category", r.get("category", "Unknown")),
-                        "subcategory": doc.get("subcategory", r.get("subcategory", "")),
-                        "file_type": doc.get("file_type", "pdf"),
-                        "page_count": doc.get("page_count"),
-                        "duration_seconds": doc.get("duration_seconds"),
-                        "snippet": text[:300] + "..." if len(text) > 300 else text,
-                        "search_type": "semantic",
-                        "score": r.get("score", 0)
-                    })
-                    existing_ids.add(doc_id)
-        
-        # For semantic/hybrid, total is approximate since vector search doesn't have exact count
-        if search_request.search_type == "semantic":
-            total_count = len(results)
-        # For hybrid, use fulltext total as the authoritative count
-    
-    # Sort by score (results are already paginated for fulltext)
-    results.sort(key=lambda x: x.get("score", 0), reverse=True)
-    
-    # Get faceted counts for filter dropdowns (excluding hidden content)
-    facets = {}
-    if search_request.search_type in ["fulltext", "hybrid"]:
-        try:
-            facets = db.get_search_facets(
-                query=fts_query,
-                category=search_request.category,
-                subcategory=search_request.subcategory,
-                file_type=search_request.file_type,
-                date_from=search_request.date_from,
-                date_to=search_request.date_to,
-                include_hidden=False
-            )
-        except Exception as e:
-            security_logger.log_error(
-                error=e,
-                context="search_facets",
-                client_ip=client_ip,
-                request_id=request_id
-            )
-            # Non-fatal: continue without facets
+        if search_request.search_type == "fulltext":
+            raise HTTPException(status_code=400, detail="Search query error. Please check your search syntax.")
     
     # Log the search query for audit
     security_logger.log_search_query(
@@ -1643,28 +1662,26 @@ async def list_documents(
     # Unfiltered browse: no category, subcategory, file_type, filename, keyword, search
     unfiltered = not category and not subcategory and not file_type and not filename and not keyword and not search
     
-    if unfiltered:
-        # Single query for list + total (get_all_documents_with_total); cache total for later pages
-        cached_total = _categories_cache.get("docs_total_unfiltered")
-        if cached_total is not None:
-            docs = db.get_all_documents(limit=limit, offset=offset, include_hidden=False)
-            total = cached_total
-        else:
-            docs, total = db.get_all_documents_with_total(
-                limit=limit, offset=offset, include_hidden=False
+    def _do_browse():
+        if unfiltered:
+            cached_total = _categories_cache.get("docs_total_unfiltered")
+            if cached_total is not None:
+                _docs = db.get_all_documents(limit=limit, offset=offset, include_hidden=False)
+                return _docs, cached_total
+            _docs, _total = db.get_all_documents_with_total(limit=limit, offset=offset, include_hidden=False)
+            _categories_cache.set("docs_total_unfiltered", _total)
+            return _docs, _total
+        elif not keyword and not search:
+            return db.get_all_documents_with_total(
+                limit=limit, offset=offset, category=category, subcategory=subcategory,
+                file_type=file_type, filename=filename, include_hidden=False,
             )
-            _categories_cache.set("docs_total_unfiltered", total)
-    elif not keyword and not search:
-        # Filtered but no FTS: still use single query for list + total
-        docs, total = db.get_all_documents_with_total(
-            limit=limit, offset=offset,
-            category=category, subcategory=subcategory, file_type=file_type, filename=filename,
-            include_hidden=False,
-        )
-    else:
-        # Keyword or search: keep two-call path (FTS join)
-        docs = db.get_all_documents(limit=limit, offset=offset, category=category, subcategory=subcategory, file_type=file_type, filename=filename, keyword=keyword, search=search, include_hidden=False)
-        total = db.count_documents(category=category, subcategory=subcategory, file_type=file_type, filename=filename, keyword=keyword, include_hidden=False)
+        else:
+            _docs = db.get_all_documents(limit=limit, offset=offset, category=category, subcategory=subcategory, file_type=file_type, filename=filename, keyword=keyword, search=search, include_hidden=False)
+            _total = db.count_documents(category=category, subcategory=subcategory, file_type=file_type, filename=filename, keyword=keyword, include_hidden=False)
+            return _docs, _total
+
+    docs, total = await asyncio.to_thread(_do_browse)
     
     result = {
         "total": total,
@@ -1724,13 +1741,11 @@ async def export_documents(
         fts_query = parsed['fts_query']
     
     try:
-        documents = db.get_documents_for_export(
-            category=category,
-            subcategory=subcategory,
-            file_type=file_type,
-            filename=filename,
-            keyword=keyword,
-            search_query=fts_query,
+        documents = await asyncio.to_thread(
+            db.get_documents_for_export,
+            category=category, subcategory=subcategory,
+            file_type=file_type, filename=filename,
+            keyword=keyword, search_query=fts_query,
             include_text=include_text
         )
         
@@ -1761,7 +1776,7 @@ async def get_document(
         raise HTTPException(status_code=503, detail="Database not initialized")
     
     # Check if document is visible (not hidden and category not hidden)
-    doc = db.get_document(doc_id, include_hidden=False, include_full_text=include_text)
+    doc = await asyncio.to_thread(db.get_document, doc_id, include_hidden=False, include_full_text=include_text)
     if not doc:
         security_logger.log_security_event(
             event_type="document_not_found",
@@ -1773,7 +1788,6 @@ async def get_document(
         )
         raise HTTPException(status_code=404, detail="Document not found")
     
-    # Log document metadata access
     security_logger.log_document_access(
         client_ip=client_ip,
         document_id=doc_id,
@@ -1795,7 +1809,7 @@ async def get_document_text(doc_id: str, request: Request):
     if not db:
         raise HTTPException(status_code=503, detail="Database not initialized")
     
-    full_text = db.get_document_full_text(doc_id, include_hidden=False)
+    full_text = await asyncio.to_thread(db.get_document_full_text, doc_id, include_hidden=False)
     if full_text is None:
         raise HTTPException(status_code=404, detail="Document not found")
     
@@ -1833,8 +1847,7 @@ async def get_document_file(doc_id: str, request: Request):
     if not db:
         raise HTTPException(status_code=503, detail="Database not initialized")
     
-    # CRITICAL: Check if document is visible (not hidden and category not hidden)
-    doc = db.get_document(doc_id, include_hidden=False)
+    doc = await asyncio.to_thread(db.get_document, doc_id, include_hidden=False)
     if not doc:
         security_logger.log_security_event(
             event_type="file_not_found",
@@ -2129,8 +2142,7 @@ async def get_document_thumbnail(doc_id: str, request: Request):
             }
         )
     
-    # Cache miss – need to generate the thumbnail. Verify visibility first.
-    doc = db.get_document(doc_id, include_hidden=False, include_full_text=False)
+    doc = await asyncio.to_thread(db.get_document, doc_id, include_hidden=False, include_full_text=False)
     if not doc:
         raise HTTPException(status_code=404, detail="Document not found")
     
@@ -2180,23 +2192,33 @@ async def ask_question(ask_request: AskRequest, request: Request):
     if not vector_store:
         raise HTTPException(status_code=503, detail="Vector store not initialized")
     
-    # Get relevant documents via semantic search
-    context_docs = vector_store.search(
-        query=ask_request.question,
-        n_results=ask_request.num_context_docs,
-        category=ask_request.category
-    )
-    
-    # Filter out hidden documents from AI context (SECURITY: prevent hidden doc content from being exposed via AI)
-    visible_context_docs = [doc for doc in context_docs if db.is_document_visible(doc.get("id", ""))]
-    
-    # Log the LLM query
+    def _do_ask_context():
+        context_docs = vector_store.search(
+            query=ask_request.question, n_results=ask_request.num_context_docs,
+            category=ask_request.category
+        )
+        visible = [doc for doc in context_docs if db.is_document_visible(doc.get("id", ""))]
+        enriched = []
+        for doc in visible:
+            doc_id = doc.get("id")
+            if doc_id and db:
+                full_doc = db.get_document(doc_id, include_hidden=False)
+                if full_doc:
+                    enriched.append({
+                        **doc,
+                        "full_text": full_doc.get("full_text", doc.get("text", "")),
+                        "filename": full_doc.get("filename", doc.get("filename", "Unknown")),
+                        "category": full_doc.get("category", doc.get("category", "Unknown")),
+                        "subcategory": full_doc.get("subcategory", doc.get("subcategory", ""))
+                    })
+        return visible, enriched
+
+    visible_context_docs, enriched_docs = await asyncio.to_thread(_do_ask_context)
+
     security_logger.log_llm_query(
-        client_ip=client_ip,
-        question=ask_request.question,
+        client_ip=client_ip, question=ask_request.question,
         context_docs_count=len(visible_context_docs),
-        request_id=request_id,
-        category=ask_request.category
+        request_id=request_id, category=ask_request.category
     )
     
     if not visible_context_docs:
@@ -2205,26 +2227,6 @@ async def ask_question(ask_request: AskRequest, request: Request):
             "answer": "No relevant documents found for this question.",
             "sources": []
         }
-    
-    # Fetch full document content from database for better accuracy
-    # The vector store only has 500-char snippets, we need full text for LLM
-    enriched_docs = []
-    for doc in visible_context_docs:
-        doc_id = doc.get("id")
-        if doc_id and db:
-            full_doc = db.get_document(doc_id, include_hidden=False)
-            if full_doc:
-                enriched_docs.append({
-                    **doc,
-                    "full_text": full_doc.get("full_text", doc.get("text", "")),
-                    "filename": full_doc.get("filename", doc.get("filename", "Unknown")),
-                    "category": full_doc.get("category", doc.get("category", "Unknown")),
-                    "subcategory": full_doc.get("subcategory", doc.get("subcategory", ""))
-                })
-            # Skip if document no longer visible (was hidden between search and fetch)
-        else:
-            # Vector store doc without DB lookup - skip for safety
-            pass
     
     # Get answer from LLM with enriched context
     try:
@@ -2271,32 +2273,28 @@ async def ask_question_stream(ask_request: AskRequest, request: Request):
     if not vector_store:
         raise HTTPException(status_code=503, detail="Vector store not initialized")
     
-    # Get relevant documents via semantic search
-    context_docs = vector_store.search(
-        query=ask_request.question,
-        n_results=ask_request.num_context_docs,
-        category=ask_request.category
-    )
-    
-    # Filter out hidden documents from AI context (SECURITY: prevent hidden doc content from being exposed via AI)
-    visible_context_docs = [doc for doc in context_docs if db.is_document_visible(doc.get("id", ""))]
-    
-    # Fetch full document content from database for better accuracy
-    enriched_docs = []
-    for doc in visible_context_docs:
-        doc_id = doc.get("id")
-        if doc_id and db:
-            full_doc = db.get_document(doc_id, include_hidden=False)
-            if full_doc:
-                enriched_docs.append({
-                    **doc,
-                    "full_text": full_doc.get("full_text", doc.get("text", "")),
-                    "filename": full_doc.get("filename", doc.get("filename", "Unknown")),
-                    "category": full_doc.get("category", doc.get("category", "Unknown")),
-                    "subcategory": full_doc.get("subcategory", doc.get("subcategory", ""))
-                })
-            # Skip if document no longer visible
-    
+    def _do_stream_context():
+        ctx = vector_store.search(
+            query=ask_request.question, n_results=ask_request.num_context_docs,
+            category=ask_request.category
+        )
+        visible = [d for d in ctx if db.is_document_visible(d.get("id", ""))]
+        enriched = []
+        for d in visible:
+            did = d.get("id")
+            if did and db:
+                fd = db.get_document(did, include_hidden=False)
+                if fd:
+                    enriched.append({
+                        **d, "full_text": fd.get("full_text", d.get("text", "")),
+                        "filename": fd.get("filename", d.get("filename", "Unknown")),
+                        "category": fd.get("category", d.get("category", "Unknown")),
+                        "subcategory": fd.get("subcategory", d.get("subcategory", ""))
+                    })
+        return enriched
+
+    enriched_docs = await asyncio.to_thread(_do_stream_context)
+
     # Log the streaming LLM query
     security_logger.log_llm_query(
         client_ip=client_ip,
@@ -2326,8 +2324,7 @@ async def get_document_summary(doc_id: str, request: Request, regenerate: bool =
     if not db:
         raise HTTPException(status_code=503, detail="Database not initialized")
     
-    # Check if document is visible (not hidden and category not hidden)
-    doc = db.get_document(doc_id, include_hidden=False)
+    doc = await asyncio.to_thread(db.get_document, doc_id, include_hidden=False)
     if not doc:
         security_logger.log_security_event(
             event_type="summary_not_found",
@@ -2339,9 +2336,8 @@ async def get_document_summary(doc_id: str, request: Request, regenerate: bool =
         )
         raise HTTPException(status_code=404, detail="Document not found")
     
-    # Check for cached summary first (unless regenerate is requested)
     if not regenerate:
-        cached = db.get_summary(doc_id)
+        cached = await asyncio.to_thread(db.get_summary, doc_id)
         if cached:
             security_logger.log_document_access(
                 client_ip=client_ip,
@@ -2377,7 +2373,7 @@ async def get_document_summary(doc_id: str, request: Request, regenerate: bool =
         summary = llm.summarize_document(doc)
         
         # Save the generated summary to cache
-        db.save_summary(doc_id, summary)
+        await asyncio.to_thread(db.save_summary, doc_id, summary)
         
         security_logger.log_system_event(
             "summary_cached",
@@ -2414,6 +2410,12 @@ def _tel(sql: str, params: tuple = ()) -> list:
     if not db:
         return []
     return db.query_telemetry(sql, params)
+
+async def _atel(sql: str, params: tuple = ()) -> list:
+    """Async version of _tel — runs the query in a thread."""
+    if not db:
+        return []
+    return await asyncio.to_thread(db.query_telemetry, sql, params)
 
 
 def _json_val(col: str, key: str) -> str:
@@ -2527,62 +2529,65 @@ async def get_telemetry_overview(request: Request, x_api_key: str = Header(None)
     if not is_authorized:
         raise HTTPException(status_code=401, detail=error)
 
-    now = datetime.utcnow()
-    hour_ago = (now - timedelta(hours=1)).isoformat()
-    day_ago = (now - timedelta(days=1)).isoformat()
+    def _build():
+        now = datetime.utcnow()
+        hour_ago = (now - timedelta(hours=1)).isoformat()
+        day_ago = (now - timedelta(days=1)).isoformat()
 
-    r = lambda sql, p=(): (_tel(sql, p) or [{}])[0]
+        r = lambda sql, p=(): (_tel(sql, p) or [{}])[0]
 
-    total_requests = r("SELECT COUNT(*) AS c FROM telemetry_events WHERE log_source='access'").get("c", 0)
-    requests_last_hour = r("SELECT COUNT(*) AS c FROM telemetry_events WHERE log_source='access' AND timestamp>=?", (hour_ago,)).get("c", 0)
-    requests_last_day = r("SELECT COUNT(*) AS c FROM telemetry_events WHERE log_source='access' AND timestamp>=?", (day_ago,)).get("c", 0)
+        total_requests = r("SELECT COUNT(*) AS c FROM telemetry_events WHERE log_source='access'").get("c", 0)
+        requests_last_hour = r("SELECT COUNT(*) AS c FROM telemetry_events WHERE log_source='access' AND timestamp>=?", (hour_ago,)).get("c", 0)
+        requests_last_day = r("SELECT COUNT(*) AS c FROM telemetry_events WHERE log_source='access' AND timestamp>=?", (day_ago,)).get("c", 0)
 
-    avg_row = r("SELECT AVG(duration_ms) AS a FROM telemetry_events WHERE log_source='access' AND duration_ms IS NOT NULL")
-    avg_duration = avg_row.get("a") or 0
+        avg_row = r("SELECT AVG(duration_ms) AS a FROM telemetry_events WHERE log_source='access' AND duration_ms IS NOT NULL")
+        avg_duration = avg_row.get("a") or 0
 
-    err_count = r("SELECT COUNT(*) AS c FROM telemetry_events WHERE log_source='access' AND status_code>=400").get("c", 0)
-    error_rate = (err_count / total_requests * 100) if total_requests > 0 else 0
+        err_count = r("SELECT COUNT(*) AS c FROM telemetry_events WHERE log_source='access' AND status_code>=400").get("c", 0)
+        error_rate = (err_count / total_requests * 100) if total_requests > 0 else 0
 
-    unique_ips = r("SELECT COUNT(DISTINCT client_ip) AS c FROM telemetry_events WHERE log_source='access'").get("c", 0)
-    unique_ips_hour = r("SELECT COUNT(DISTINCT client_ip) AS c FROM telemetry_events WHERE log_source='access' AND timestamp>=?", (hour_ago,)).get("c", 0)
+        unique_ips = r("SELECT COUNT(DISTINCT client_ip) AS c FROM telemetry_events WHERE log_source='access'").get("c", 0)
+        unique_ips_hour = r("SELECT COUNT(DISTINCT client_ip) AS c FROM telemetry_events WHERE log_source='access' AND timestamp>=?", (hour_ago,)).get("c", 0)
 
-    status_rows = _tel("SELECT CAST(status_code AS TEXT) AS code, COUNT(*) AS c FROM telemetry_events WHERE log_source='access' GROUP BY status_code")
-    status_codes = {row["code"]: row["c"] for row in status_rows}
+        status_rows = _tel("SELECT CAST(status_code AS TEXT) AS code, COUNT(*) AS c FROM telemetry_events WHERE log_source='access' GROUP BY status_code")
+        status_codes = {row["code"]: row["c"] for row in status_rows}
 
-    top_ep = _tel("SELECT path, COUNT(*) AS c FROM telemetry_events WHERE log_source='access' AND path IS NOT NULL GROUP BY path ORDER BY c DESC LIMIT 10")
+        top_ep = _tel("SELECT path, COUNT(*) AS c FROM telemetry_events WHERE log_source='access' AND path IS NOT NULL GROUP BY path ORDER BY c DESC LIMIT 10")
 
-    sec_total = r("SELECT COUNT(*) AS c FROM telemetry_events WHERE log_source='security'").get("c", 0)
-    sec_high = r("SELECT COUNT(*) AS c FROM telemetry_events WHERE log_source='security' AND severity IN ('high','critical')").get("c", 0)
+        sec_total = r("SELECT COUNT(*) AS c FROM telemetry_events WHERE log_source='security'").get("c", 0)
+        sec_high = r("SELECT COUNT(*) AS c FROM telemetry_events WHERE log_source='security' AND severity IN ('high','critical')").get("c", 0)
 
-    rate_limited = r(f"SELECT COUNT(*) AS c FROM telemetry_events WHERE log_source='access' AND {_json_val('data','rate_limited')} IS NOT NULL").get("c", 0)
-    error_count = r("SELECT COUNT(*) AS c FROM telemetry_events WHERE log_source='error'").get("c", 0)
+        rate_limited = r(f"SELECT COUNT(*) AS c FROM telemetry_events WHERE log_source='access' AND {_json_val('data','rate_limited')} IS NOT NULL").get("c", 0)
+        error_count = r("SELECT COUNT(*) AS c FROM telemetry_events WHERE log_source='error'").get("c", 0)
 
-    from security_logger import get_session_stats, get_blocked_ips, get_blocked_sessions
-    session_stats = get_session_stats()
+        from security_logger import get_session_stats, get_blocked_ips, get_blocked_sessions
+        session_stats = get_session_stats()
 
-    return {
-        "generated_at": now.isoformat(),
-        "overview": {
-            "total_requests": total_requests,
-            "requests_last_hour": requests_last_hour,
-            "requests_last_day": requests_last_day,
-            "avg_response_time_ms": round(avg_duration, 2),
-            "error_rate_percent": round(error_rate, 2),
-            "unique_visitors": unique_ips,
-            "unique_visitors_hour": unique_ips_hour,
-            "security_events": sec_total,
-            "security_events_high": sec_high,
-            "rate_limited_requests": rate_limited,
-            "error_count": error_count
-        },
-        "status_codes": status_codes,
-        "top_endpoints": [{"path": row["path"], "count": row["c"]} for row in top_ep],
-        "sessions": {
-            "active_sessions": session_stats.get("active_sessions", 0),
-            "blocked_sessions": len(get_blocked_sessions()),
-            "blocked_ips": len(get_blocked_ips())
+        return {
+            "generated_at": now.isoformat(),
+            "overview": {
+                "total_requests": total_requests,
+                "requests_last_hour": requests_last_hour,
+                "requests_last_day": requests_last_day,
+                "avg_response_time_ms": round(avg_duration, 2),
+                "error_rate_percent": round(error_rate, 2),
+                "unique_visitors": unique_ips,
+                "unique_visitors_hour": unique_ips_hour,
+                "security_events": sec_total,
+                "security_events_high": sec_high,
+                "rate_limited_requests": rate_limited,
+                "error_count": error_count
+            },
+            "status_codes": status_codes,
+            "top_endpoints": [{"path": row["path"], "count": row["c"]} for row in top_ep],
+            "sessions": {
+                "active_sessions": session_stats.get("active_sessions", 0),
+                "blocked_sessions": len(get_blocked_sessions()),
+                "blocked_ips": len(get_blocked_ips())
+            }
         }
-    }
+
+    return await asyncio.to_thread(_build)
 
 
 @app.get("/api/admin/telemetry/requests")
@@ -2601,12 +2606,12 @@ async def get_request_telemetry(
     hours, bucket_min = tf_map.get(timeframe, (1, 1))
     cutoff = (now - timedelta(hours=hours)).isoformat()
 
-    total_row = _tel("SELECT COUNT(*) AS c FROM telemetry_events WHERE log_source='access' AND timestamp>=?", (cutoff,))
+    total_row = await _atel("SELECT COUNT(*) AS c FROM telemetry_events WHERE log_source='access' AND timestamp>=?", (cutoff,))
     total = total_row[0]["c"] if total_row else 0
 
     # Time series buckets via SQL
     fmt = f"strftime('%Y-%m-%dT%H:', timestamp) || printf('%02d', (CAST(strftime('%M', timestamp) AS INTEGER) / {bucket_min}) * {bucket_min}) || ':00'"
-    ts_rows = _tel(
+    ts_rows = await _atel(
         f"SELECT {fmt} AS bucket, COUNT(*) AS requests, "
         f"SUM(CASE WHEN status_code>=400 THEN 1 ELSE 0 END) AS errors, "
         f"AVG(duration_ms) AS avg_dur "
@@ -2616,11 +2621,11 @@ async def get_request_telemetry(
                      "avg_duration_ms": round(r["avg_dur"] or 0, 2)} for r in ts_rows]
 
     # Method breakdown
-    method_rows = _tel("SELECT method, COUNT(*) AS c FROM telemetry_events WHERE log_source='access' AND timestamp>=? GROUP BY method", (cutoff,))
+    method_rows = await _atel("SELECT method, COUNT(*) AS c FROM telemetry_events WHERE log_source='access' AND timestamp>=? GROUP BY method", (cutoff,))
     methods = {r["method"] or "UNKNOWN": r["c"] for r in method_rows}
 
     # Response time distribution
-    dur_rows = _tel(
+    dur_rows = await _atel(
         "SELECT "
         "SUM(CASE WHEN duration_ms<50 THEN 1 ELSE 0 END) AS d0, "
         "SUM(CASE WHEN duration_ms>=50 AND duration_ms<100 THEN 1 ELSE 0 END) AS d1, "
@@ -2635,7 +2640,7 @@ async def get_request_telemetry(
                         "1s-5s": d.get("d4") or 0, "5s+": d.get("d5") or 0}
 
     # Recent 50 requests
-    recent_rows = _tel(
+    recent_rows = await _atel(
         f"SELECT timestamp, client_ip, path, method, status_code, duration_ms, "
         f"{_json_val('data','user_agent')} AS user_agent "
         f"FROM telemetry_events WHERE log_source='access' AND timestamp>=? "
@@ -2664,22 +2669,22 @@ async def get_search_telemetry(request: Request, x_api_key: str = Header(None)):
 
     jv = lambda k: _json_val('data', k)
 
-    total_row = _tel("SELECT COUNT(*) AS c FROM telemetry_events WHERE event_type='search_query'")
+    total_row = await _atel("SELECT COUNT(*) AS c FROM telemetry_events WHERE event_type='search_query'")
     total = total_row[0]["c"] if total_row else 0
 
-    st_rows = _tel(f"SELECT {jv('search_type')} AS st, COUNT(*) AS c FROM telemetry_events WHERE event_type='search_query' GROUP BY st")
+    st_rows = await _atel(f"SELECT {jv('search_type')} AS st, COUNT(*) AS c FROM telemetry_events WHERE event_type='search_query' GROUP BY st")
     search_types = {r["st"] or "unknown": r["c"] for r in st_rows}
 
-    tq_rows = _tel(f"SELECT SUBSTR({jv('query')},1,100) AS q, COUNT(*) AS c FROM telemetry_events WHERE event_type='search_query' AND {jv('query')} IS NOT NULL GROUP BY q ORDER BY c DESC LIMIT 20")
+    tq_rows = await _atel(f"SELECT SUBSTR({jv('query')},1,100) AS q, COUNT(*) AS c FROM telemetry_events WHERE event_type='search_query' AND {jv('query')} IS NOT NULL GROUP BY q ORDER BY c DESC LIMIT 20")
     top_queries = [{"query": r["q"], "count": r["c"]} for r in tq_rows]
 
-    cat_rows = _tel(f"SELECT {jv('category')} AS cat, COUNT(*) AS c FROM telemetry_events WHERE event_type='search_query' AND {jv('category')} IS NOT NULL GROUP BY cat")
+    cat_rows = await _atel(f"SELECT {jv('category')} AS cat, COUNT(*) AS c FROM telemetry_events WHERE event_type='search_query' AND {jv('category')} IS NOT NULL GROUP BY cat")
     category_usage = {r["cat"]: r["c"] for r in cat_rows}
 
-    ft_rows = _tel(f"SELECT {jv('file_type')} AS ft, COUNT(*) AS c FROM telemetry_events WHERE event_type='search_query' AND {jv('file_type')} IS NOT NULL GROUP BY ft")
+    ft_rows = await _atel(f"SELECT {jv('file_type')} AS ft, COUNT(*) AS c FROM telemetry_events WHERE event_type='search_query' AND {jv('file_type')} IS NOT NULL GROUP BY ft")
     file_type_usage = {r["ft"]: r["c"] for r in ft_rows}
 
-    avg_row = _tel(f"SELECT AVG(CAST({jv('result_count')} AS REAL)) AS a, SUM(CASE WHEN CAST({jv('result_count')} AS INTEGER)=0 THEN 1 ELSE 0 END) AS z FROM telemetry_events WHERE event_type='search_query'")
+    avg_row = await _atel(f"SELECT AVG(CAST({jv('result_count')} AS REAL)) AS a, SUM(CASE WHEN CAST({jv('result_count')} AS INTEGER)=0 THEN 1 ELSE 0 END) AS z FROM telemetry_events WHERE event_type='search_query'")
     a = avg_row[0] if avg_row else {}
 
     return {
@@ -2735,10 +2740,10 @@ async def get_search_log(
         where += f" AND CAST({jv('result_count')} AS INTEGER) <= ?"
         params.append(max_results)
 
-    count_row = _tel(f"SELECT COUNT(*) AS c FROM telemetry_events WHERE {where}", tuple(params))
+    count_row = await _atel(f"SELECT COUNT(*) AS c FROM telemetry_events WHERE {where}", tuple(params))
     total = count_row[0]["c"] if count_row else 0
 
-    rows = _tel(
+    rows = await _atel(
         f"SELECT timestamp, client_ip, "
         f"{jv('query')} AS query, "
         f"{jv('search_type')} AS search_type, "
@@ -2780,19 +2785,19 @@ async def get_document_telemetry(request: Request, x_api_key: str = Header(None)
 
     jv = lambda k: _json_val('data', k)
 
-    total_row = _tel("SELECT COUNT(*) AS c FROM telemetry_events WHERE event_type='document_access'")
+    total_row = await _atel("SELECT COUNT(*) AS c FROM telemetry_events WHERE event_type='document_access'")
     total = total_row[0]["c"] if total_row else 0
 
-    at_rows = _tel(f"SELECT {jv('action')} AS a, COUNT(*) AS c FROM telemetry_events WHERE event_type='document_access' GROUP BY a")
+    at_rows = await _atel(f"SELECT {jv('action')} AS a, COUNT(*) AS c FROM telemetry_events WHERE event_type='document_access' GROUP BY a")
     access_types = {r["a"] or "unknown": r["c"] for r in at_rows}
 
-    td_rows = _tel(f"SELECT {jv('filename')} AS fn, COUNT(*) AS c FROM telemetry_events WHERE event_type='document_access' AND {jv('filename')} IS NOT NULL GROUP BY fn ORDER BY c DESC LIMIT 20")
+    td_rows = await _atel(f"SELECT {jv('filename')} AS fn, COUNT(*) AS c FROM telemetry_events WHERE event_type='document_access' AND {jv('filename')} IS NOT NULL GROUP BY fn ORDER BY c DESC LIMIT 20")
     top_docs = [{"filename": r["fn"], "count": r["c"]} for r in td_rows]
 
-    ft_rows = _tel(f"SELECT {jv('file_type')} AS ft, COUNT(*) AS c FROM telemetry_events WHERE event_type='document_access' GROUP BY ft")
+    ft_rows = await _atel(f"SELECT {jv('file_type')} AS ft, COUNT(*) AS c FROM telemetry_events WHERE event_type='document_access' GROUP BY ft")
     file_types = {(r["ft"] or ".pdf"): r["c"] for r in ft_rows}
 
-    bytes_row = _tel(f"SELECT COALESCE(SUM(CAST({jv('file_size_bytes')} AS INTEGER)),0) AS b FROM telemetry_events WHERE event_type='document_access'")
+    bytes_row = await _atel(f"SELECT COALESCE(SUM(CAST({jv('file_size_bytes')} AS INTEGER)),0) AS b FROM telemetry_events WHERE event_type='document_access'")
     total_bytes = bytes_row[0]["b"] if bytes_row else 0
 
     return {
@@ -2811,21 +2816,21 @@ async def get_ai_telemetry(request: Request, x_api_key: str = Header(None)):
     if not is_authorized:
         raise HTTPException(status_code=401, detail=error)
 
-    jv = lambda k: _json_val('data', k)
+    def _build():
+        jv = lambda k: _json_val('data', k)
+        llm_total = (_tel("SELECT COUNT(*) AS c FROM telemetry_events WHERE event_type='llm_query'") or [{}])[0].get("c", 0)
+        sum_total = (_tel(f"SELECT COUNT(*) AS c FROM telemetry_events WHERE event_type='document_access' AND {jv('action')} IN ('summary_generate','summary_cached')") or [{}])[0].get("c", 0)
+        streaming = (_tel(f"SELECT COUNT(*) AS c FROM telemetry_events WHERE event_type='llm_query' AND {jv('streaming')}=1") or [{}])[0].get("c", 0)
+        tq_rows = _tel(f"SELECT SUBSTR({jv('question')},1,100) AS q, COUNT(*) AS c FROM telemetry_events WHERE event_type='llm_query' AND {jv('question')} IS NOT NULL GROUP BY q ORDER BY c DESC LIMIT 15")
+        return {
+            "total_ai_queries": llm_total,
+            "total_summaries": sum_total,
+            "streaming_queries": streaming,
+            "non_streaming_queries": llm_total - streaming,
+            "top_questions": [{"question": r["q"], "count": r["c"]} for r in tq_rows]
+        }
 
-    llm_total = (_tel("SELECT COUNT(*) AS c FROM telemetry_events WHERE event_type='llm_query'") or [{}])[0].get("c", 0)
-    sum_total = (_tel(f"SELECT COUNT(*) AS c FROM telemetry_events WHERE event_type='document_access' AND {jv('action')} IN ('summary_generate','summary_cached')") or [{}])[0].get("c", 0)
-    streaming = (_tel(f"SELECT COUNT(*) AS c FROM telemetry_events WHERE event_type='llm_query' AND {jv('streaming')}=1") or [{}])[0].get("c", 0)
-
-    tq_rows = _tel(f"SELECT SUBSTR({jv('question')},1,100) AS q, COUNT(*) AS c FROM telemetry_events WHERE event_type='llm_query' AND {jv('question')} IS NOT NULL GROUP BY q ORDER BY c DESC LIMIT 15")
-
-    return {
-        "total_ai_queries": llm_total,
-        "total_summaries": sum_total,
-        "streaming_queries": streaming,
-        "non_streaming_queries": llm_total - streaming,
-        "top_questions": [{"question": r["q"], "count": r["c"]} for r in tq_rows]
-    }
+    return await asyncio.to_thread(_build)
 
 
 @app.get("/api/admin/telemetry/security")
@@ -2835,37 +2840,32 @@ async def get_security_telemetry(request: Request, x_api_key: str = Header(None)
     if not is_authorized:
         raise HTTPException(status_code=401, detail=error)
 
-    jv = lambda k: _json_val('data', k)
+    def _build():
+        jv = lambda k: _json_val('data', k)
+        total = (_tel("SELECT COUNT(*) AS c FROM telemetry_events WHERE log_source='security'") or [{}])[0].get("c", 0)
+        et_rows = _tel("SELECT event_type, COUNT(*) AS c FROM telemetry_events WHERE log_source='security' GROUP BY event_type")
+        event_types = {r["event_type"]: r["c"] for r in et_rows}
+        sev_rows = _tel("SELECT severity, COUNT(*) AS c FROM telemetry_events WHERE log_source='security' GROUP BY severity")
+        severities = {(r["severity"] or "unknown"): r["c"] for r in sev_rows}
+        hs_rows = _tel(f"SELECT timestamp, event_type, SUBSTR({jv('message')},1,200) AS message, client_ip FROM telemetry_events WHERE log_source='security' AND severity IN ('high','critical') ORDER BY timestamp DESC LIMIT 20")
+        high_severity = [{"timestamp": r["timestamp"], "event_type": r["event_type"], "message": r["message"] or "", "client_ip": r["client_ip"]} for r in hs_rows]
+        rl = (_tel("SELECT COUNT(*) AS c FROM telemetry_events WHERE event_type='rate_limit_exceeded'") or [{}])[0].get("c", 0)
+        sa = (_tel("SELECT COUNT(*) AS c FROM telemetry_events WHERE event_type='suspicious_activity'") or [{}])[0].get("c", 0)
+        ip_rows = _tel("SELECT client_ip, COUNT(*) AS c FROM telemetry_events WHERE log_source='security' AND client_ip IS NOT NULL GROUP BY client_ip ORDER BY c DESC LIMIT 10")
+        from security_logger import get_blocked_ips, get_blocked_sessions
+        return {
+            "total_security_events": total,
+            "event_types": event_types,
+            "severities": severities,
+            "recent_high_severity": high_severity,
+            "rate_limit_violations": rl,
+            "suspicious_activities": sa,
+            "top_ips_by_events": [{"ip": r["client_ip"], "count": r["c"]} for r in ip_rows],
+            "blocked_ips": list(get_blocked_ips()),
+            "blocked_sessions": len(get_blocked_sessions())
+        }
 
-    total = (_tel("SELECT COUNT(*) AS c FROM telemetry_events WHERE log_source='security'") or [{}])[0].get("c", 0)
-
-    et_rows = _tel("SELECT event_type, COUNT(*) AS c FROM telemetry_events WHERE log_source='security' GROUP BY event_type")
-    event_types = {r["event_type"]: r["c"] for r in et_rows}
-
-    sev_rows = _tel("SELECT severity, COUNT(*) AS c FROM telemetry_events WHERE log_source='security' GROUP BY severity")
-    severities = {(r["severity"] or "unknown"): r["c"] for r in sev_rows}
-
-    hs_rows = _tel(f"SELECT timestamp, event_type, SUBSTR({jv('message')},1,200) AS message, client_ip FROM telemetry_events WHERE log_source='security' AND severity IN ('high','critical') ORDER BY timestamp DESC LIMIT 20")
-    high_severity = [{"timestamp": r["timestamp"], "event_type": r["event_type"], "message": r["message"] or "", "client_ip": r["client_ip"]} for r in hs_rows]
-
-    rl = (_tel("SELECT COUNT(*) AS c FROM telemetry_events WHERE event_type='rate_limit_exceeded'") or [{}])[0].get("c", 0)
-    sa = (_tel("SELECT COUNT(*) AS c FROM telemetry_events WHERE event_type='suspicious_activity'") or [{}])[0].get("c", 0)
-
-    ip_rows = _tel("SELECT client_ip, COUNT(*) AS c FROM telemetry_events WHERE log_source='security' AND client_ip IS NOT NULL GROUP BY client_ip ORDER BY c DESC LIMIT 10")
-
-    from security_logger import get_blocked_ips, get_blocked_sessions
-
-    return {
-        "total_security_events": total,
-        "event_types": event_types,
-        "severities": severities,
-        "recent_high_severity": high_severity,
-        "rate_limit_violations": rl,
-        "suspicious_activities": sa,
-        "top_ips_by_events": [{"ip": r["client_ip"], "count": r["c"]} for r in ip_rows],
-        "blocked_ips": list(get_blocked_ips()),
-        "blocked_sessions": len(get_blocked_sessions())
-    }
+    return await asyncio.to_thread(_build)
 
 
 @app.get("/api/admin/telemetry/errors")
@@ -2875,25 +2875,23 @@ async def get_error_telemetry(request: Request, x_api_key: str = Header(None)):
     if not is_authorized:
         raise HTTPException(status_code=401, detail=error)
 
-    jv = lambda k: _json_val('data', k)
+    def _build():
+        jv = lambda k: _json_val('data', k)
+        total = (_tel("SELECT COUNT(*) AS c FROM telemetry_events WHERE log_source='error'") or [{}])[0].get("c", 0)
+        et_rows = _tel(f"SELECT {jv('error_type')} AS et, COUNT(*) AS c FROM telemetry_events WHERE log_source='error' GROUP BY et")
+        error_types = {(r["et"] or "unknown"): r["c"] for r in et_rows}
+        ctx_rows = _tel(f"SELECT {jv('context')} AS ctx, COUNT(*) AS c FROM telemetry_events WHERE log_source='error' GROUP BY ctx")
+        contexts = {(r["ctx"] or "unknown"): r["c"] for r in ctx_rows}
+        rec_rows = _tel(f"SELECT timestamp, {jv('error_type')} AS error_type, {jv('context')} AS context, SUBSTR({jv('error_message')},1,200) AS message FROM telemetry_events WHERE log_source='error' ORDER BY timestamp DESC LIMIT 20")
+        recent_errors = [{"timestamp": r["timestamp"], "error_type": r["error_type"], "context": r["context"], "message": r["message"] or ""} for r in rec_rows]
+        return {
+            "total_errors": total,
+            "error_types": error_types,
+            "error_contexts": contexts,
+            "recent_errors": recent_errors
+        }
 
-    total = (_tel("SELECT COUNT(*) AS c FROM telemetry_events WHERE log_source='error'") or [{}])[0].get("c", 0)
-
-    et_rows = _tel(f"SELECT {jv('error_type')} AS et, COUNT(*) AS c FROM telemetry_events WHERE log_source='error' GROUP BY et")
-    error_types = {(r["et"] or "unknown"): r["c"] for r in et_rows}
-
-    ctx_rows = _tel(f"SELECT {jv('context')} AS ctx, COUNT(*) AS c FROM telemetry_events WHERE log_source='error' GROUP BY ctx")
-    contexts = {(r["ctx"] or "unknown"): r["c"] for r in ctx_rows}
-
-    rec_rows = _tel(f"SELECT timestamp, {jv('error_type')} AS error_type, {jv('context')} AS context, SUBSTR({jv('error_message')},1,200) AS message FROM telemetry_events WHERE log_source='error' ORDER BY timestamp DESC LIMIT 20")
-    recent_errors = [{"timestamp": r["timestamp"], "error_type": r["error_type"], "context": r["context"], "message": r["message"] or ""} for r in rec_rows]
-
-    return {
-        "total_errors": total,
-        "error_types": error_types,
-        "error_contexts": contexts,
-        "recent_errors": recent_errors
-    }
+    return await asyncio.to_thread(_build)
 
 
 @app.get("/api/admin/telemetry/visitors")
@@ -2903,56 +2901,51 @@ async def get_visitor_telemetry(request: Request, x_api_key: str = Header(None))
     if not is_authorized:
         raise HTTPException(status_code=401, detail=error)
 
-    jv = lambda k: _json_val('data', k)
-    now = datetime.utcnow()
-    day_ago = (now - timedelta(days=1)).isoformat()
-    week_ago = (now - timedelta(days=7)).isoformat()
+    def _build():
+        jv = lambda k: _json_val('data', k)
+        now = datetime.utcnow()
+        day_ago = (now - timedelta(days=1)).isoformat()
+        week_ago = (now - timedelta(days=7)).isoformat()
 
-    uv_today = (_tel("SELECT COUNT(DISTINCT client_ip) AS c FROM telemetry_events WHERE log_source='access' AND timestamp>=?", (day_ago,)) or [{}])[0].get("c", 0)
-    uv_week = (_tel("SELECT COUNT(DISTINCT client_ip) AS c FROM telemetry_events WHERE log_source='access' AND timestamp>=?", (week_ago,)) or [{}])[0].get("c", 0)
+        uv_today = (_tel("SELECT COUNT(DISTINCT client_ip) AS c FROM telemetry_events WHERE log_source='access' AND timestamp>=?", (day_ago,)) or [{}])[0].get("c", 0)
+        uv_week = (_tel("SELECT COUNT(DISTINCT client_ip) AS c FROM telemetry_events WHERE log_source='access' AND timestamp>=?", (week_ago,)) or [{}])[0].get("c", 0)
 
-    # Daily unique visitors (last 7 days)
-    dv_rows = _tel("SELECT SUBSTR(timestamp,1,10) AS d, COUNT(DISTINCT client_ip) AS c FROM telemetry_events WHERE log_source='access' AND timestamp>=? GROUP BY d ORDER BY d", (week_ago,))
-    daily_unique = [{"date": r["d"], "unique_visitors": r["c"]} for r in dv_rows]
+        dv_rows = _tel("SELECT SUBSTR(timestamp,1,10) AS d, COUNT(DISTINCT client_ip) AS c FROM telemetry_events WHERE log_source='access' AND timestamp>=? GROUP BY d ORDER BY d", (week_ago,))
+        daily_unique = [{"date": r["d"], "unique_visitors": r["c"]} for r in dv_rows]
 
-    # Browser breakdown (user_agent is in data JSON)
-    ua_rows = _tel(f"SELECT {jv('user_agent')} AS ua FROM telemetry_events WHERE log_source='access' AND timestamp>=? AND {jv('user_agent')} IS NOT NULL", (day_ago,))
-    user_agents = {}
-    for r in ua_rows:
-        ua = (r["ua"] or "")[:100]
-        if not ua:
-            continue
-        if "Chrome" in ua:
-            browser = "Chrome"
-        elif "Firefox" in ua:
-            browser = "Firefox"
-        elif "Safari" in ua:
-            browser = "Safari"
-        elif "curl" in ua:
-            browser = "curl/CLI"
-        elif "bot" in ua.lower() or "spider" in ua.lower():
-            browser = "Bot/Crawler"
-        else:
-            browser = "Other"
-        user_agents[browser] = user_agents.get(browser, 0) + 1
+        ua_rows = _tel(f"SELECT {jv('user_agent')} AS ua FROM telemetry_events WHERE log_source='access' AND timestamp>=? AND {jv('user_agent')} IS NOT NULL", (day_ago,))
+        user_agents = {}
+        for r in ua_rows:
+            ua = (r["ua"] or "")[:100]
+            if not ua:
+                continue
+            if "Chrome" in ua: browser = "Chrome"
+            elif "Firefox" in ua: browser = "Firefox"
+            elif "Safari" in ua: browser = "Safari"
+            elif "curl" in ua: browser = "curl/CLI"
+            elif "bot" in ua.lower() or "spider" in ua.lower(): browser = "Bot/Crawler"
+            else: browser = "Other"
+            user_agents[browser] = user_agents.get(browser, 0) + 1
 
-    # Referrers
-    ref_rows = _tel(f"SELECT {jv('referer')} AS ref FROM telemetry_events WHERE log_source='access' AND timestamp>=? AND {jv('referer')} IS NOT NULL", (day_ago,))
-    referrers = {}
-    for r in ref_rows:
-        ref = r["ref"] or ""
-        if ref and "localhost" not in ref and "127.0.0.1" not in ref:
-            try:
-                from urllib.parse import urlparse
-                domain = urlparse(ref).netloc or "Direct"
-            except Exception:
-                domain = "Direct"
-            referrers[domain] = referrers.get(domain, 0) + 1
-    top_referrers = sorted(referrers.items(), key=lambda x: x[1], reverse=True)[:10]
+        from urllib.parse import urlparse
+        ref_rows = _tel(f"SELECT {jv('referer')} AS ref FROM telemetry_events WHERE log_source='access' AND timestamp>=? AND {jv('referer')} IS NOT NULL", (day_ago,))
+        referrers = {}
+        for r in ref_rows:
+            ref = r["ref"] or ""
+            if ref and "localhost" not in ref and "127.0.0.1" not in ref:
+                try:
+                    domain = urlparse(ref).netloc or "Direct"
+                except Exception:
+                    domain = "Direct"
+                referrers[domain] = referrers.get(domain, 0) + 1
+        top_referrers = sorted(referrers.items(), key=lambda x: x[1], reverse=True)[:10]
 
-    # Top IPs
-    ip_rows = _tel("SELECT client_ip, COUNT(*) AS c FROM telemetry_events WHERE log_source='access' AND timestamp>=? AND client_ip IS NOT NULL AND client_ip!='unknown' GROUP BY client_ip ORDER BY c DESC LIMIT 20", (day_ago,))
-    top_ips = [{"ip": r["client_ip"], "client_ip": r["client_ip"], "count": r["c"]} for r in ip_rows]
+        ip_rows = _tel("SELECT client_ip, COUNT(*) AS c FROM telemetry_events WHERE log_source='access' AND timestamp>=? AND client_ip IS NOT NULL AND client_ip!='unknown' GROUP BY client_ip ORDER BY c DESC LIMIT 20", (day_ago,))
+        top_ips = [{"ip": r["client_ip"], "client_ip": r["client_ip"], "count": r["c"]} for r in ip_rows]
+
+        return uv_today, uv_week, daily_unique, user_agents, top_referrers, top_ips
+
+    uv_today, uv_week, daily_unique, user_agents, top_referrers, top_ips = await asyncio.to_thread(_build)
     await enrich_with_geo(top_ips, 'client_ip', limit=20)
 
     return {
@@ -3004,18 +2997,15 @@ async def get_system_telemetry(request: Request, x_api_key: str = Header(None)):
         "usage_percent": psutil.cpu_percent(interval=0.1)
     }
     
-    # Database stats
-    db_stats = db.get_stats() if db else {}
+    db_stats = await asyncio.to_thread(db.get_stats) if db else {}
     
-    # Log file sizes
     log_sizes = {}
     for log_file in ["access.log", "security.log", "audit.log", "error.log"]:
         log_path = LOG_DIR / log_file
         if log_path.exists():
-            log_sizes[log_file] = round(log_path.stat().st_size / (1024 * 1024), 2)  # MB
+            log_sizes[log_file] = round(log_path.stat().st_size / (1024 * 1024), 2)
     
-    # Uptime (approximated from first telemetry entry)
-    first_row = _tel("SELECT timestamp FROM telemetry_events WHERE log_source='access' ORDER BY timestamp ASC LIMIT 1")
+    first_row = await _atel("SELECT timestamp FROM telemetry_events WHERE log_source='access' ORDER BY timestamp ASC LIMIT 1")
     first_request = first_row[0]["timestamp"] if first_row else None
     
     return {
@@ -3092,8 +3082,13 @@ async def clear_logs(
 
             # Also clear matching DB telemetry
             if db and log_file in _file_to_source:
-                db.clear_telemetry(_file_to_source[log_file])
-                
+                telemetry_source = _file_to_source[log_file]
+
+                def _work():
+                    db.clear_telemetry(telemetry_source)
+
+                await asyncio.to_thread(_work)
+
                 # Log the clear action (to security log, which might have just been cleared)
                 security_logger.log_security_event(
                     event_type="log_cleared",
@@ -3241,7 +3236,7 @@ async def get_ai_summaries_telemetry(request: Request, x_api_key: str = Header(N
 
     jv = lambda k: _json_val('data', k)
 
-    rows = _tel(
+    rows = await _atel(
         f"SELECT {jv('document_id')} AS doc_id, {jv('filename')} AS filename, "
         f"SUM(CASE WHEN {jv('action')}='summary_generate' THEN 1 ELSE 0 END) AS gen_count, "
         f"SUM(CASE WHEN {jv('action')}='summary_cached' THEN 1 ELSE 0 END) AS cache_count, "
@@ -3486,8 +3481,8 @@ async def get_public_settings():
     if not db:
         raise HTTPException(status_code=503, detail="Database not initialized")
     
-    settings = db.get_all_settings()
-    
+    settings = await asyncio.to_thread(db.get_all_settings)
+
     # Only expose certain settings to the public
     public_settings = {
         "ask_ai_enabled": settings.get("ask_ai_enabled", "true") == "true",
@@ -3507,7 +3502,7 @@ async def get_admin_settings(request: Request, x_api_key: str = Header(None)):
     if not db:
         raise HTTPException(status_code=503, detail="Database not initialized")
     
-    return db.get_all_settings()
+    return await asyncio.to_thread(db.get_all_settings)
 
 
 class SettingUpdate(BaseModel):
@@ -3535,9 +3530,12 @@ async def update_setting(setting: SettingUpdate, request: Request, x_api_key: st
         message=f"Setting '{setting.key}' changed to '{setting.value}'",
         request_id=request_id
     )
-    
-    db.set_setting(setting.key, setting.value)
-    
+
+    def _work():
+        db.set_setting(setting.key, setting.value)
+
+    await asyncio.to_thread(_work)
+
     return {"success": True, "key": setting.key, "value": setting.value}
 
 
@@ -3561,15 +3559,22 @@ async def get_status_page(request: Request, x_api_key: str = Header(None)):
     
     if not db:
         raise HTTPException(status_code=503, detail="Database not initialized")
-    
-    return {
-        "enabled": db.get_setting("status_page_enabled", "false") == "true",
-        "title": db.get_setting("status_page_title", "Under Maintenance"),
-        "message": db.get_setting("status_page_message", "We're performing scheduled maintenance. Please check back soon."),
-        "timeline": db.get_setting("status_page_timeline", ""),
-        "started": db.get_setting("status_page_started", ""),
-        "indexing_active": MAINTENANCE_LOCK.exists()  # Whether .maintenance file exists
-    }
+
+    def _work():
+        return {
+            "enabled": db.get_setting("status_page_enabled", "false") == "true",
+            "title": db.get_setting("status_page_title", "Under Maintenance"),
+            "message": db.get_setting(
+                "status_page_message",
+                "We're performing scheduled maintenance. Please check back soon.",
+            ),
+            "timeline": db.get_setting("status_page_timeline", ""),
+            "started": db.get_setting("status_page_started", ""),
+        }
+
+    data = await asyncio.to_thread(_work)
+    data["indexing_active"] = MAINTENANCE_LOCK.exists()
+    return data
 
 
 @app.post("/api/admin/status-page")
@@ -3583,23 +3588,22 @@ async def update_status_page(status: StatusPageUpdate, request: Request, x_api_k
         raise HTTPException(status_code=503, detail="Database not initialized")
     
     client_ip, request_id = get_client_info(request)
-    
-    # Update settings
-    db.set_setting("status_page_enabled", "true" if status.enabled else "false")
-    _maintenance_cache.invalidate("status_page_enabled")  # Clear cached value
-    db.set_setting("status_page_title", status.title or "Under Maintenance")
-    db.set_setting("status_page_message", status.message or "")
-    db.set_setting("status_page_timeline", status.timeline or "")
-    
-    # Set started timestamp when enabling
-    if status.enabled:
-        current_started = db.get_setting("status_page_started", "")
-        if not current_started:
-            db.set_setting("status_page_started", datetime.now().isoformat())
-    else:
-        # Clear started time when disabling
-        db.set_setting("status_page_started", "")
-    
+
+    def _work():
+        db.set_setting("status_page_enabled", "true" if status.enabled else "false")
+        db.set_setting("status_page_title", status.title or "Under Maintenance")
+        db.set_setting("status_page_message", status.message or "")
+        db.set_setting("status_page_timeline", status.timeline or "")
+        if status.enabled:
+            current_started = db.get_setting("status_page_started", "")
+            if not current_started:
+                db.set_setting("status_page_started", datetime.now().isoformat())
+        else:
+            db.set_setting("status_page_started", "")
+
+    await asyncio.to_thread(_work)
+    _maintenance_cache.invalidate("status_page_enabled")
+
     # Log the change
     action = "enabled" if status.enabled else "disabled"
     security_logger.log_security_event(
@@ -3630,11 +3634,14 @@ async def disable_status_page(request: Request, x_api_key: str = Header(None)):
         raise HTTPException(status_code=503, detail="Database not initialized")
     
     client_ip, request_id = get_client_info(request)
-    
-    db.set_setting("status_page_enabled", "false")
-    _maintenance_cache.invalidate("status_page_enabled")  # Clear cached value
-    db.set_setting("status_page_started", "")
-    
+
+    def _work():
+        db.set_setting("status_page_enabled", "false")
+        db.set_setting("status_page_started", "")
+
+    await asyncio.to_thread(_work)
+    _maintenance_cache.invalidate("status_page_enabled")
+
     security_logger.log_security_event(
         event_type="status_page_disabled",
         severity="info",
@@ -3660,7 +3667,8 @@ async def get_pinned_documents():
         raise HTTPException(status_code=503, detail="Database not initialized")
     
     # Exclude hidden documents from public pinned list
-    return {"pinned_documents": db.get_pinned_documents(include_hidden=False)}
+    pinned = await asyncio.to_thread(db.get_pinned_documents, include_hidden=False)
+    return {"pinned_documents": pinned}
 
 
 class PinDocumentRequest(BaseModel):
@@ -3680,13 +3688,16 @@ async def pin_document(pin_request: PinDocumentRequest, request: Request, x_api_
         raise HTTPException(status_code=503, detail="Database not initialized")
     
     client_ip, request_id = get_client_info(request)
-    
-    success = db.pin_document(
-        pin_request.document_id,
-        pin_request.reason,
-        pin_request.display_order
-    )
-    
+
+    def _work():
+        return db.pin_document(
+            pin_request.document_id,
+            pin_request.reason,
+            pin_request.display_order,
+        )
+
+    success = await asyncio.to_thread(_work)
+
     if not success:
         raise HTTPException(status_code=404, detail="Document not found")
     
@@ -3721,13 +3732,16 @@ async def update_pinned_document(
     
     if not db:
         raise HTTPException(status_code=503, detail="Database not initialized")
-    
-    success = db.update_pinned_document(
-        document_id,
-        update_request.reason,
-        update_request.display_order
-    )
-    
+
+    def _work():
+        return db.update_pinned_document(
+            document_id,
+            update_request.reason,
+            update_request.display_order,
+        )
+
+    success = await asyncio.to_thread(_work)
+
     if not success:
         raise HTTPException(status_code=404, detail="Pinned document not found")
     
@@ -3745,12 +3759,15 @@ async def unpin_document(document_id: str, request: Request, x_api_key: str = He
         raise HTTPException(status_code=503, detail="Database not initialized")
     
     client_ip, request_id = get_client_info(request)
-    
-    success = db.unpin_document(document_id)
-    
+
+    def _work():
+        return db.unpin_document(document_id)
+
+    success = await asyncio.to_thread(_work)
+
     if not success:
         raise HTTPException(status_code=404, detail="Pinned document not found")
-    
+
     security_logger.log_security_event(
         event_type="document_unpinned",
         severity="info",
@@ -3772,9 +3789,12 @@ async def get_admin_pinned_documents(request: Request, x_api_key: str = Header(N
     
     if not db:
         raise HTTPException(status_code=503, detail="Database not initialized")
-    
-    # Admin sees all pinned documents including hidden ones
-    return {"pinned_documents": db.get_pinned_documents(include_hidden=True)}
+
+    def _work():
+        return db.get_pinned_documents(include_hidden=True)
+
+    pinned = await asyncio.to_thread(_work)
+    return {"pinned_documents": pinned}
 
 
 # =============================================================================
@@ -3795,10 +3815,14 @@ async def get_hidden_documents(
     
     if not db:
         raise HTTPException(status_code=503, detail="Database not initialized")
-    
-    docs = db.get_hidden_documents(limit=limit, offset=offset)
-    total = db.count_hidden_documents()
-    
+
+    def _work():
+        docs = db.get_hidden_documents(limit=limit, offset=offset)
+        total = db.count_hidden_documents()
+        return docs, total
+
+    docs, total = await asyncio.to_thread(_work)
+
     return {
         "hidden_documents": docs,
         "total": total,
@@ -3818,23 +3842,29 @@ async def hide_document(doc_id: str, request: Request, x_api_key: str = Header(N
         raise HTTPException(status_code=503, detail="Database not initialized")
     
     try:
-        doc = db.get_document(doc_id, include_hidden=True)
+        def _work():
+            doc = db.get_document(doc_id, include_hidden=True)
+            if not doc:
+                return None, False
+            return doc, db.hide_document(doc_id)
+
+        doc, success = await asyncio.to_thread(_work)
         if not doc:
             raise HTTPException(status_code=404, detail="Document not found")
-        
-        success = db.hide_document(doc_id)
+
         if success:
             _categories_cache.invalidate()
+            _subcategories_cache.invalidate()
             _stats_cache.invalidate()
             _bootstrap_cache.invalidate()
-            
+
             security_logger.log_system_event(
                 "document_hidden",
                 f"Document hidden by admin: {doc_id} ({doc.get('filename', 'Unknown')})",
                 document_id=doc_id
             )
             return {"success": True, "message": f"Document '{doc.get('filename', doc_id)}' is now hidden"}
-        
+
         raise HTTPException(status_code=500, detail="Failed to hide document")
     except HTTPException:
         raise
@@ -3853,23 +3883,29 @@ async def unhide_document(doc_id: str, request: Request, x_api_key: str = Header
         raise HTTPException(status_code=503, detail="Database not initialized")
     
     try:
-        doc = db.get_document(doc_id, include_hidden=True)
+        def _work():
+            doc = db.get_document(doc_id, include_hidden=True)
+            if not doc:
+                return None, False
+            return doc, db.unhide_document(doc_id)
+
+        doc, success = await asyncio.to_thread(_work)
         if not doc:
             raise HTTPException(status_code=404, detail="Document not found")
-        
-        success = db.unhide_document(doc_id)
+
         if success:
             _categories_cache.invalidate()
+            _subcategories_cache.invalidate()
             _stats_cache.invalidate()
             _bootstrap_cache.invalidate()
-            
+
             security_logger.log_system_event(
                 "document_unhidden",
                 f"Document unhidden by admin: {doc_id} ({doc.get('filename', 'Unknown')})",
                 document_id=doc_id
             )
             return {"success": True, "message": f"Document '{doc.get('filename', doc_id)}' is now visible"}
-        
+
         raise HTTPException(status_code=500, detail="Failed to unhide document")
     except HTTPException:
         raise
@@ -3930,7 +3966,10 @@ async def redownload_document(doc_id: str, request: Request, x_api_key: str = He
         raise HTTPException(status_code=503, detail="Database not initialized")
 
     try:
-        doc = db.get_document(doc_id, include_hidden=True)
+        def _work():
+            return db.get_document(doc_id, include_hidden=True)
+
+        doc = await asyncio.to_thread(_work)
         if not doc:
             raise HTTPException(status_code=404, detail="Document not found")
 
@@ -4015,7 +4054,10 @@ async def re_extract_document(doc_id: str, request: Request, x_api_key: str = He
         raise HTTPException(status_code=503, detail="Database not initialized")
 
     try:
-        doc = db.get_document(doc_id, include_hidden=True)
+        def _fetch_doc():
+            return db.get_document(doc_id, include_hidden=True)
+
+        doc = await asyncio.to_thread(_fetch_doc)
         if not doc:
             raise HTTPException(status_code=404, detail="Document not found")
 
@@ -4060,32 +4102,36 @@ async def re_extract_document(doc_id: str, request: Request, x_api_key: str = He
         result["id"] = doc_id
         result["path"] = doc["path"]
         result["is_hidden"] = doc.get("is_hidden", 0)
-        db.insert_document(result)
+
+        def _persist():
+            db.insert_document(result)
+            vector_updated = False
+            full_text = result.get("full_text", "")
+            if vector_store and full_text and len(full_text) > 100:
+                try:
+                    vector_store.add_document(
+                        doc_id=doc_id,
+                        text=full_text,
+                        metadata={
+                            "filename": doc.get("filename", ""),
+                            "category": result.get("category", doc.get("category", "Unknown")),
+                        },
+                    )
+                    vector_store._save()
+                    vector_updated = True
+                except Exception as ve:
+                    print(f"Warning: Failed to update vector store for {doc_id}: {ve}")
+            return vector_updated
+
+        vector_updated = await asyncio.to_thread(_persist)
 
         # Remove stale thumbnail so it regenerates from the updated content
         stale_thumb = THUMBNAILS_PATH / f"{doc_id}.jpg"
         if stale_thumb.exists():
             stale_thumb.unlink()
 
-        # Update the vector store embedding with the new text
-        vector_updated = False
-        full_text = result.get("full_text", "")
-        if vector_store and full_text and len(full_text) > 100:
-            try:
-                vector_store.add_document(
-                    doc_id=doc_id,
-                    text=full_text,
-                    metadata={
-                        "filename": doc.get("filename", ""),
-                        "category": result.get("category", doc.get("category", "Unknown")),
-                    }
-                )
-                vector_store._save()
-                vector_updated = True
-            except Exception as ve:
-                print(f"Warning: Failed to update vector store for {doc_id}: {ve}")
-
         # Invalidate caches
+        _subcategories_cache.invalidate()
         _stats_cache.invalidate()
         _bootstrap_cache.invalidate()
 
@@ -4134,7 +4180,10 @@ async def resolve_filenames(body: BulkFilenamesRequest, request: Request, x_api_
     if len(filenames) > 500:
         raise HTTPException(status_code=400, detail="Maximum 500 filenames")
 
-    doc_map = db.get_documents_by_filenames(filenames)
+    def _work():
+        return db.get_documents_by_filenames(filenames)
+
+    doc_map = await asyncio.to_thread(_work)
     not_found = [f for f in filenames if f not in doc_map]
 
     return {
@@ -4161,7 +4210,10 @@ def _cleanup_bg_tasks():
 
 async def _bg_redownload(task_id: str, doc_id: str):
     try:
-        doc = db.get_document(doc_id, include_hidden=True)
+        def _fetch():
+            return db.get_document(doc_id, include_hidden=True)
+
+        doc = await asyncio.to_thread(_fetch)
         if not doc:
             _bg_tasks[task_id].update(status="failed", result={"error": "Document not found"})
             return
@@ -4221,6 +4273,7 @@ async def _bg_redownload(task_id: str, doc_id: str):
         if backup_path.exists():
             backup_path.unlink()
 
+        _subcategories_cache.invalidate()
         _stats_cache.invalidate()
         _bootstrap_cache.invalidate()
 
@@ -4244,7 +4297,10 @@ async def _bg_redownload(task_id: str, doc_id: str):
 
 async def _bg_re_extract(task_id: str, doc_id: str):
     try:
-        doc = db.get_document(doc_id, include_hidden=True)
+        def _fetch():
+            return db.get_document(doc_id, include_hidden=True)
+
+        doc = await asyncio.to_thread(_fetch)
         if not doc:
             _bg_tasks[task_id].update(status="failed", result={"error": "Document not found"})
             return
@@ -4292,29 +4348,34 @@ async def _bg_re_extract(task_id: str, doc_id: str):
         result["id"] = doc_id
         result["path"] = doc["path"]
         result["is_hidden"] = doc.get("is_hidden", 0)
-        db.insert_document(result)
+
+        def _persist():
+            db.insert_document(result)
+            vector_updated = False
+            full_text = result.get("full_text", "")
+            if vector_store and full_text and len(full_text) > 100:
+                try:
+                    vector_store.add_document(
+                        doc_id=doc_id,
+                        text=full_text,
+                        metadata={
+                            "filename": doc.get("filename", ""),
+                            "category": result.get("category", doc.get("category", "Unknown")),
+                        },
+                    )
+                    vector_store._save()
+                    vector_updated = True
+                except Exception:
+                    pass
+            return vector_updated
+
+        vector_updated = await asyncio.to_thread(_persist)
 
         stale_thumb = THUMBNAILS_PATH / f"{doc_id}.jpg"
         if stale_thumb.exists():
             stale_thumb.unlink()
 
-        vector_updated = False
-        full_text = result.get("full_text", "")
-        if vector_store and full_text and len(full_text) > 100:
-            try:
-                vector_store.add_document(
-                    doc_id=doc_id,
-                    text=full_text,
-                    metadata={
-                        "filename": doc.get("filename", ""),
-                        "category": result.get("category", doc.get("category", "Unknown")),
-                    }
-                )
-                vector_store._save()
-                vector_updated = True
-            except Exception:
-                pass
-
+        _subcategories_cache.invalidate()
         _stats_cache.invalidate()
         _bootstrap_cache.invalidate()
 
@@ -4346,7 +4407,11 @@ async def redownload_document_async(doc_id: str, request: Request, x_api_key: st
         raise HTTPException(status_code=401, detail=error)
     if not db:
         raise HTTPException(status_code=503, detail="Database not initialized")
-    doc = db.get_document(doc_id, include_hidden=True)
+
+    def _work():
+        return db.get_document(doc_id, include_hidden=True)
+
+    doc = await asyncio.to_thread(_work)
     if not doc:
         raise HTTPException(status_code=404, detail="Document not found")
 
@@ -4365,7 +4430,11 @@ async def re_extract_document_async(doc_id: str, request: Request, x_api_key: st
         raise HTTPException(status_code=401, detail=error)
     if not db:
         raise HTTPException(status_code=503, detail="Database not initialized")
-    doc = db.get_document(doc_id, include_hidden=True)
+
+    def _work():
+        return db.get_document(doc_id, include_hidden=True)
+
+    doc = await asyncio.to_thread(_work)
     if not doc:
         raise HTTPException(status_code=404, detail="Document not found")
 
@@ -4404,7 +4473,10 @@ async def bulk_redownload_documents(body: BulkFilenamesRequest, request: Request
     if len(filenames) > 500:
         raise HTTPException(status_code=400, detail="Maximum 500 filenames per bulk redownload")
 
-    doc_map = db.get_documents_by_filenames(filenames)
+    def _work():
+        return db.get_documents_by_filenames(filenames)
+
+    doc_map = await asyncio.to_thread(_work)
     not_found = [f for f in filenames if f not in doc_map]
 
     results = []
@@ -4488,6 +4560,7 @@ async def bulk_redownload_documents(body: BulkFilenamesRequest, request: Request
             failed += 1
             results.append({"filename": filename, "success": False, "error": str(e)})
 
+    _subcategories_cache.invalidate()
     _stats_cache.invalidate()
     _bootstrap_cache.invalidate()
 
@@ -4524,7 +4597,10 @@ async def bulk_re_extract_documents(body: BulkFilenamesRequest, request: Request
     if len(filenames) > 500:
         raise HTTPException(status_code=400, detail="Maximum 500 filenames per bulk re-extract")
 
-    doc_map = db.get_documents_by_filenames(filenames)
+    def _resolve():
+        return db.get_documents_by_filenames(filenames)
+
+    doc_map = await asyncio.to_thread(_resolve)
     not_found = [f for f in filenames if f not in doc_map]
 
     from extractor import PDFExtractor, ImageExtractor, AudioVideoExtractor
@@ -4586,28 +4662,32 @@ async def bulk_re_extract_documents(body: BulkFilenamesRequest, request: Request
             result["id"] = doc_id
             result["path"] = doc["path"]
             result["is_hidden"] = doc.get("is_hidden", 0)
-            db.insert_document(result)
+
+            def _persist():
+                db.insert_document(result)
+                vector_updated = False
+                full_text = result.get("full_text", "")
+                if vector_store and full_text and len(full_text) > 100:
+                    try:
+                        vector_store.add_document(
+                            doc_id=doc_id,
+                            text=full_text,
+                            metadata={
+                                "filename": filename,
+                                "category": result.get("category", doc.get("category", "Unknown")),
+                            },
+                        )
+                        vector_store._save()
+                        vector_updated = True
+                    except Exception:
+                        pass
+                return vector_updated
+
+            vector_updated = await asyncio.to_thread(_persist)
 
             stale_thumb = THUMBNAILS_PATH / f"{doc_id}.jpg"
             if stale_thumb.exists():
                 stale_thumb.unlink()
-
-            vector_updated = False
-            full_text = result.get("full_text", "")
-            if vector_store and full_text and len(full_text) > 100:
-                try:
-                    vector_store.add_document(
-                        doc_id=doc_id,
-                        text=full_text,
-                        metadata={
-                            "filename": filename,
-                            "category": result.get("category", doc.get("category", "Unknown")),
-                        }
-                    )
-                    vector_store._save()
-                    vector_updated = True
-                except Exception:
-                    pass
 
             processed += 1
             results.append({
@@ -4621,6 +4701,7 @@ async def bulk_re_extract_documents(body: BulkFilenamesRequest, request: Request
             failed += 1
             results.append({"filename": filename, "success": False, "error": str(e)})
 
+    _subcategories_cache.invalidate()
     _stats_cache.invalidate()
     _bootstrap_cache.invalidate()
 
@@ -4671,11 +4752,15 @@ async def bulk_hide_documents(body: BulkHideRequest, request: Request, x_api_key
     
     if len(body.document_ids) > 1000:
         raise HTTPException(status_code=400, detail="Maximum 1000 documents per bulk operation")
-    
-    hidden_count = db.bulk_hide_documents(body.document_ids)
-    
+
+    def _work():
+        return db.bulk_hide_documents(body.document_ids)
+
+    hidden_count = await asyncio.to_thread(_work)
+
     # Invalidate all caches
     _categories_cache.invalidate()
+    _subcategories_cache.invalidate()
     _stats_cache.invalidate()
     _bootstrap_cache.invalidate()
     
@@ -4707,11 +4792,15 @@ async def bulk_unhide_documents(body: BulkHideRequest, request: Request, x_api_k
     
     if len(body.document_ids) > 1000:
         raise HTTPException(status_code=400, detail="Maximum 1000 documents per bulk operation")
-    
-    unhidden_count = db.bulk_unhide_documents(body.document_ids)
-    
+
+    def _work():
+        return db.bulk_unhide_documents(body.document_ids)
+
+    unhidden_count = await asyncio.to_thread(_work)
+
     # Invalidate all caches
     _categories_cache.invalidate()
+    _subcategories_cache.invalidate()
     _stats_cache.invalidate()
     _bootstrap_cache.invalidate()
     
@@ -4746,11 +4835,15 @@ async def bulk_hide_by_pattern(body: BulkHideByPatternRequest, request: Request,
     # Ensure there is at least one wildcard or it's a specific filename
     if '%' not in pattern:
         pattern = f"%{pattern}%"
-    
-    hidden_count = db.hide_documents_by_filename_pattern(pattern)
-    
+
+    def _work():
+        return db.hide_documents_by_filename_pattern(pattern)
+
+    hidden_count = await asyncio.to_thread(_work)
+
     # Invalidate all caches
     _categories_cache.invalidate()
+    _subcategories_cache.invalidate()
     _stats_cache.invalidate()
     _bootstrap_cache.invalidate()
     
@@ -4785,20 +4878,19 @@ async def bulk_hide_by_filenames(body: BulkHideByFilenamesRequest, request: Requ
     
     if body.action not in ("hide", "unhide"):
         raise HTTPException(status_code=400, detail="Action must be 'hide' or 'unhide'")
-    
-    if body.action == "hide":
-        result = db.bulk_hide_by_filenames(body.filenames)
-        count_key = "hidden_count"
-        event_type = "bulk_documents_hidden_by_filenames"
-    else:
-        result = db.bulk_unhide_by_filenames(body.filenames)
-        count_key = "unhidden_count"
-        event_type = "bulk_documents_unhidden_by_filenames"
-    
+
+    def _work():
+        if body.action == "hide":
+            return db.bulk_hide_by_filenames(body.filenames), "hidden_count", "bulk_documents_hidden_by_filenames"
+        return db.bulk_unhide_by_filenames(body.filenames), "unhidden_count", "bulk_documents_unhidden_by_filenames"
+
+    result, count_key, event_type = await asyncio.to_thread(_work)
+
     affected_count = result.get(count_key, 0)
     
     # Invalidate all caches
     _categories_cache.invalidate()
+    _subcategories_cache.invalidate()
     _stats_cache.invalidate()
     _bootstrap_cache.invalidate()
     
@@ -4827,8 +4919,12 @@ async def get_hidden_categories(request: Request, x_api_key: str = Header(None))
     
     if not db:
         raise HTTPException(status_code=503, detail="Database not initialized")
-    
-    return {"hidden_categories": db.get_hidden_categories()}
+
+    def _work():
+        return db.get_hidden_categories()
+
+    hidden = await asyncio.to_thread(_work)
+    return {"hidden_categories": hidden}
 
 
 @app.get("/api/admin/categories-visibility")
@@ -4840,8 +4936,12 @@ async def get_categories_visibility(request: Request, x_api_key: str = Header(No
     
     if not db:
         raise HTTPException(status_code=503, detail="Database not initialized")
-    
-    return {"categories": db.get_all_categories_with_visibility()}
+
+    def _work():
+        return db.get_all_categories_with_visibility()
+
+    categories = await asyncio.to_thread(_work)
+    return {"categories": categories}
 
 
 @app.post("/api/admin/categories/{category}/hide")
@@ -4857,16 +4957,21 @@ async def hide_category(category: str, request: Request, x_api_key: str = Header
     # URL decode the category name (handles spaces and special characters)
     from urllib.parse import unquote
     category = unquote(category)
-    
-    # Verify category exists
-    category_counts = db.get_category_counts(include_hidden=True)
-    if not any(c["category"] == category for c in category_counts):
+
+    def _work():
+        category_counts = db.get_category_counts(include_hidden=True)
+        if not any(c["category"] == category for c in category_counts):
+            return "missing", False
+        return "ok", db.hide_category(category)
+
+    status, success = await asyncio.to_thread(_work)
+    if status == "missing":
         raise HTTPException(status_code=404, detail=f"Category '{category}' not found")
-    
-    success = db.hide_category(category)
+
     if success:
         # Invalidate caches
         _categories_cache.invalidate()
+        _subcategories_cache.invalidate()
         _stats_cache.invalidate()
         _bootstrap_cache.invalidate()
         
@@ -4893,11 +4998,15 @@ async def unhide_category(category: str, request: Request, x_api_key: str = Head
     # URL decode the category name
     from urllib.parse import unquote
     category = unquote(category)
-    
-    success = db.unhide_category(category)
+
+    def _work():
+        return db.unhide_category(category)
+
+    success = await asyncio.to_thread(_work)
     if success:
         # Invalidate caches
         _categories_cache.invalidate()
+        _subcategories_cache.invalidate()
         _stats_cache.invalidate()
         _bootstrap_cache.invalidate()
         
@@ -4930,16 +5039,20 @@ async def search_documents_visibility(
         raise HTTPException(status_code=503, detail="Database not initialized")
     
     try:
-        docs = db.get_all_documents(
-            limit=limit, 
-            offset=offset, 
-            category=category,
-            file_type=file_type,
-            search=search,
-            include_hidden=True
-        )
-        total = db.count_documents(category=category, include_hidden=True)
-        
+        def _work():
+            docs = db.get_all_documents(
+                limit=limit,
+                offset=offset,
+                category=category,
+                file_type=file_type,
+                search=search,
+                include_hidden=True,
+            )
+            total = db.count_documents(category=category, include_hidden=True)
+            return docs, total
+
+        docs, total = await asyncio.to_thread(_work)
+
         return {
             "documents": docs,
             "total": total,
@@ -4979,7 +5092,10 @@ async def reclassify_documents(
         raise HTTPException(status_code=400, detail="No document_ids provided")
 
     try:
-        updated = db.update_file_type(body.document_ids, body.file_type)
+        def _work():
+            return db.update_file_type(body.document_ids, body.file_type)
+
+        updated = await asyncio.to_thread(_work)
         return {"success": True, "updated_count": updated}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error reclassifying documents: {str(e)}")
@@ -4995,8 +5111,8 @@ async def get_keywords():
     if not db:
         raise HTTPException(status_code=503, detail="Database not initialized")
     
-    keywords = db.get_keywords(active_only=True)
-    
+    keywords = await asyncio.to_thread(db.get_keywords, active_only=True)
+
     # Group by category
     grouped = {}
     for kw in keywords:
@@ -5021,8 +5137,12 @@ async def get_admin_keywords(request: Request, x_api_key: str = Header(None)):
     
     if not db:
         raise HTTPException(status_code=503, detail="Database not initialized")
-    
-    return {"keywords": db.get_keywords(active_only=False)}
+
+    def _work():
+        return db.get_keywords(active_only=False)
+
+    keywords = await asyncio.to_thread(_work)
+    return {"keywords": keywords}
 
 
 class AddKeywordRequest(BaseModel):
@@ -5044,15 +5164,18 @@ async def add_keyword(keyword_request: AddKeywordRequest, request: Request, x_ap
         raise HTTPException(status_code=503, detail="Database not initialized")
     
     client_ip, request_id = get_client_info(request)
-    
-    keyword_id = db.add_keyword(
-        name=keyword_request.name,
-        search_term=keyword_request.search_term,
-        category=keyword_request.category,
-        display_order=keyword_request.display_order,
-        is_active=keyword_request.is_active
-    )
-    
+
+    def _work():
+        return db.add_keyword(
+            name=keyword_request.name,
+            search_term=keyword_request.search_term,
+            category=keyword_request.category,
+            display_order=keyword_request.display_order,
+            is_active=keyword_request.is_active,
+        )
+
+    keyword_id = await asyncio.to_thread(_work)
+
     if keyword_id is None:
         raise HTTPException(status_code=400, detail="Keyword with this name already exists")
     
@@ -5092,16 +5215,19 @@ async def update_keyword(
         raise HTTPException(status_code=503, detail="Database not initialized")
     
     client_ip, request_id = get_client_info(request)
-    
-    success = db.update_keyword(
-        keyword_id=keyword_id,
-        name=update_request.name,
-        search_term=update_request.search_term,
-        category=update_request.category,
-        display_order=update_request.display_order,
-        is_active=update_request.is_active
-    )
-    
+
+    def _work():
+        return db.update_keyword(
+            keyword_id=keyword_id,
+            name=update_request.name,
+            search_term=update_request.search_term,
+            category=update_request.category,
+            display_order=update_request.display_order,
+            is_active=update_request.is_active,
+        )
+
+    success = await asyncio.to_thread(_work)
+
     if not success:
         raise HTTPException(status_code=404, detail="Keyword not found or duplicate name")
     
@@ -5128,13 +5254,16 @@ async def delete_keyword(keyword_id: int, request: Request, x_api_key: str = Hea
         raise HTTPException(status_code=503, detail="Database not initialized")
     
     client_ip, request_id = get_client_info(request)
-    
-    # Get keyword name before deletion for logging
-    keyword = db.get_keyword(keyword_id)
+
+    def _work():
+        keyword = db.get_keyword(keyword_id)
+        if not keyword:
+            return None, False
+        return keyword, db.delete_keyword(keyword_id)
+
+    keyword, success = await asyncio.to_thread(_work)
     keyword_name = keyword["name"] if keyword else f"ID {keyword_id}"
-    
-    success = db.delete_keyword(keyword_id)
-    
+
     if not success:
         raise HTTPException(status_code=404, detail="Keyword not found")
     
@@ -5161,10 +5290,12 @@ async def recount_keywords(request: Request, x_api_key: str = Header(None)):
         raise HTTPException(status_code=503, detail="Database not initialized")
     
     client_ip, request_id = get_client_info(request)
-    
-    # Perform the recount
-    counts = db.update_keyword_counts()
-    
+
+    def _work():
+        return db.update_keyword_counts()
+
+    counts = await asyncio.to_thread(_work)
+
     # Log the action
     security_logger.log_admin_action(
         client_ip=client_ip,
@@ -5188,9 +5319,12 @@ async def seed_keywords(request: Request, x_api_key: str = Header(None)):
         raise HTTPException(status_code=503, detail="Database not initialized")
     
     client_ip, request_id = get_client_info(request)
-    
-    count = db.seed_default_keywords()
-    
+
+    def _work():
+        return db.seed_default_keywords()
+
+    count = await asyncio.to_thread(_work)
+
     if count > 0:
         # Log the action
         security_logger.log_admin_action(
@@ -5217,13 +5351,12 @@ async def get_doj_completeness(request: Request, x_api_key: str = Header(None)):
     
     if not db:
         raise HTTPException(status_code=503, detail="Database not initialized")
-    
-    # Get manifest stats
-    manifest_stats = db.get_manifest_stats()
-    
-    # Get missing documents stats
-    missing_stats = db.get_missing_documents_stats()
-    
+
+    def _work():
+        return db.get_manifest_stats(), db.get_missing_documents_stats()
+
+    manifest_stats, missing_stats = await asyncio.to_thread(_work)
+
     return {
         "manifest": manifest_stats,
         "missing": missing_stats
@@ -5247,9 +5380,12 @@ async def get_missing_documents(
     
     if not db:
         raise HTTPException(status_code=503, detail="Database not initialized")
-    
-    missing_docs = db.get_missing_documents(dataset_num=dataset)
-    
+
+    def _work():
+        return db.get_missing_documents(dataset_num=dataset)
+
+    missing_docs = await asyncio.to_thread(_work)
+
     return {
         "missing_documents": missing_docs,
         "total": len(missing_docs)
@@ -5275,9 +5411,12 @@ async def get_doj_manifest(
     
     if not db:
         raise HTTPException(status_code=503, detail="Database not initialized")
-    
-    manifest = db.get_manifest(dataset_num=dataset, status=status)
-    
+
+    def _work():
+        return db.get_manifest(dataset_num=dataset, status=status)
+
+    manifest = await asyncio.to_thread(_work)
+
     return {
         "manifest": manifest,
         "total": len(manifest)
@@ -5301,9 +5440,12 @@ async def get_not_downloaded(
     
     if not db:
         raise HTTPException(status_code=503, detail="Database not initialized")
-    
-    not_downloaded = db.get_not_downloaded(dataset_num=dataset)
-    
+
+    def _work():
+        return db.get_not_downloaded(dataset_num=dataset)
+
+    not_downloaded = await asyncio.to_thread(_work)
+
     return {
         "not_downloaded": not_downloaded,
         "total": len(not_downloaded)
@@ -5332,9 +5474,12 @@ async def remove_missing_document(
         raise HTTPException(status_code=400, detail="dataset query parameter required")
     
     client_ip, request_id = get_client_info(request)
-    
-    success = db.remove_missing_document(filename, dataset)
-    
+
+    def _work():
+        return db.remove_missing_document(filename, dataset)
+
+    success = await asyncio.to_thread(_work)
+
     if success:
         security_logger.log_admin_action(
             client_ip=client_ip,

@@ -10,6 +10,7 @@ import hashlib
 import sqlite3
 import pickle
 import threading
+import queue
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 from contextlib import contextmanager
@@ -29,12 +30,18 @@ class Database:
         # Persistent connection – PRAGMAs are set once, not per call
         self._conn = sqlite3.connect(db_path, timeout=30.0, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
-        self._conn.execute("PRAGMA journal_mode=WAL")      # Write-ahead logging: concurrent reads during writes
-        self._conn.execute("PRAGMA busy_timeout=30000")    # Wait 30 seconds if locked instead of failing
-        self._conn.execute("PRAGMA synchronous=NORMAL")    # Faster commits, safe with WAL
-        self._conn.execute("PRAGMA cache_size=-64000")     # 64MB cache (negative = KB)
-        self._conn.execute("PRAGMA temp_store=MEMORY")     # Temp tables in memory
+        self._conn.execute("PRAGMA journal_mode=WAL")
+        self._conn.execute("PRAGMA busy_timeout=30000")
+        self._conn.execute("PRAGMA synchronous=NORMAL")
+        self._conn.execute("PRAGMA cache_size=-65536")
+        self._conn.execute("PRAGMA temp_store=MEMORY")
+        self._conn.execute("PRAGMA mmap_size=0")
         self._lock = threading.Lock()
+
+        self._read_local = threading.local()
+        self._telemetry_q = queue.Queue(maxsize=2000)
+        self._telemetry_thread = threading.Thread(target=self._telemetry_flusher, daemon=True)
+        self._telemetry_thread.start()
         self._init_db()
     
     @contextmanager
@@ -42,6 +49,39 @@ class Database:
         """Return the persistent connection under a lock (thread-safe, no open/close overhead)."""
         with self._lock:
             yield self._conn
+
+    @contextmanager
+    def get_read_connection(self, timeout_seconds: float = 0):
+        """Return a per-thread read-only connection. WAL mode allows concurrent readers.
+        If timeout_seconds > 0, queries that exceed the time limit raise OperationalError."""
+        conn = getattr(self._read_local, 'conn', None)
+        if conn is None:
+            conn = sqlite3.connect(self.db_path, timeout=30.0, check_same_thread=False)
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA query_only=ON")
+            conn.execute("PRAGMA busy_timeout=30000")
+            conn.execute("PRAGMA cache_size=-65536")
+            conn.execute("PRAGMA temp_store=MEMORY")
+            conn.execute("PRAGMA mmap_size=268435456")
+            self._read_local.conn = conn
+        if timeout_seconds > 0:
+            import time as _t
+            _deadline = _t.monotonic() + timeout_seconds
+            _check_count = [0]
+            def _check():
+                _check_count[0] += 1
+                if _t.monotonic() > _deadline:
+                    return 1
+                return 0
+            conn.set_progress_handler(_check, 2000)
+        try:
+            yield conn
+        except sqlite3.OperationalError:
+            raise
+        finally:
+            if timeout_seconds > 0:
+                conn.set_progress_handler(None, 0)
     
     def _init_db(self):
         """Initialize database schema"""
@@ -257,6 +297,13 @@ class Database:
                 "ON documents(category) WHERE is_hidden = 0"
             )
             conn.commit()
+
+            # Composite index for stats GROUP BY category, subcategory
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_docs_category_subcategory "
+                "ON documents(category, subcategory)"
+            )
+            conn.commit()
             
             # Drop the old narrower index — the covering index supersedes it
             conn.execute("DROP INDEX IF EXISTS idx_documents_hidden_filename")
@@ -290,21 +337,41 @@ class Database:
                                 client_ip: str = None, method: str = None, path: str = None,
                                 status_code: int = None, duration_ms: float = None,
                                 severity: str = None, data: dict = None):
-        """Insert a single telemetry event."""
+        """Queue a telemetry event for async background insertion (non-blocking)."""
+        row = (timestamp, log_source, event_type, client_ip, method, path,
+               status_code, duration_ms, severity,
+               json.dumps(data) if data else None)
         try:
-            with self.get_connection() as conn:
-                conn.execute(
-                    """INSERT INTO telemetry_events
-                       (timestamp, log_source, event_type, client_ip, method, path,
-                        status_code, duration_ms, severity, data)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (timestamp, log_source, event_type, client_ip, method, path,
-                     status_code, duration_ms, severity,
-                     json.dumps(data) if data else None)
-                )
+            self._telemetry_q.put_nowait(row)
+        except queue.Full:
+            pass
+
+    def _telemetry_flusher(self):
+        """Background thread: drains the telemetry queue and batch-inserts into SQLite."""
+        conn = sqlite3.connect(self.db_path, timeout=30.0, check_same_thread=False)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
+        conn.execute("PRAGMA busy_timeout=10000")
+        sql = ("INSERT INTO telemetry_events "
+               "(timestamp, log_source, event_type, client_ip, method, path, "
+               "status_code, duration_ms, severity, data) "
+               "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+        while True:
+            batch = []
+            try:
+                batch.append(self._telemetry_q.get(timeout=2.0))
+            except queue.Empty:
+                continue
+            while len(batch) < 100:
+                try:
+                    batch.append(self._telemetry_q.get_nowait())
+                except queue.Empty:
+                    break
+            try:
+                conn.executemany(sql, batch)
                 conn.commit()
-        except Exception:
-            pass  # never let telemetry break the app
+            except Exception:
+                pass
 
     def insert_telemetry_batch(self, rows: list):
         """Batch-insert telemetry rows. Each row is a tuple matching the column order."""
@@ -323,7 +390,7 @@ class Database:
 
     def query_telemetry(self, sql: str, params: tuple = ()) -> list:
         """Run a read-only SQL query against the database and return list of dicts."""
-        with self.get_connection() as conn:
+        with self.get_read_connection() as conn:
             cursor = conn.execute(sql, params)
             return [dict(row) for row in cursor.fetchall()]
 
@@ -452,7 +519,7 @@ class Database:
         Args:
             include_hidden: If False (default), excludes hidden documents and hidden categories
         """
-        with self.get_connection() as conn:
+        with self.get_read_connection(timeout_seconds=15) as conn:
             # Build query with optional filters
             sql = """
                 SELECT 
@@ -513,7 +580,7 @@ class Database:
         Args:
             include_hidden: If False (default), excludes hidden documents and hidden categories
         """
-        with self.get_connection() as conn:
+        with self.get_read_connection(timeout_seconds=10) as conn:
             sql = """
                 SELECT COUNT(*)
                 FROM documents_fts
@@ -563,7 +630,7 @@ class Database:
         Args:
             include_hidden: If False (default), excludes hidden documents and hidden categories
         """
-        with self.get_connection() as conn:
+        with self.get_read_connection(timeout_seconds=10) as conn:
             # Base match condition
             base_match = "documents_fts MATCH ?"
             base_params = [query]
@@ -659,7 +726,7 @@ class Database:
             include_hidden: If False, returns None for hidden documents or documents in hidden categories
             include_full_text: If False, omits full_text (faster and smaller for list/search use)
         """
-        with self.get_connection() as conn:
+        with self.get_read_connection() as conn:
             if include_full_text:
                 if include_hidden:
                     cursor = conn.execute(
@@ -699,7 +766,7 @@ class Database:
     
     def get_subcategory_counts(self, category: Optional[str] = None, include_hidden: bool = False) -> List[Dict[str, Any]]:
         """Get subcategory counts, optionally for a single category. Lighter than get_stats()."""
-        with self.get_connection() as conn:
+        with self.get_read_connection() as conn:
             if include_hidden:
                 if category:
                     cursor = conn.execute("""
@@ -742,7 +809,7 @@ class Database:
     
     def get_stats(self) -> Dict[str, Any]:
         """Get database statistics"""
-        with self.get_connection() as conn:
+        with self.get_read_connection() as conn:
             stats = {}
             
             cursor = conn.execute("SELECT COUNT(*), COALESCE(SUM(page_count), 0) FROM documents")
@@ -778,12 +845,12 @@ class Database:
     
     def get_category_counts(self, keyword: Optional[str] = None, include_hidden: bool = False) -> List[Dict[str, Any]]:
         """Get category counts, optionally filtered by keyword search
-        
+
         Args:
             keyword: Optional keyword to filter by
             include_hidden: If False (default), excludes hidden categories and hidden documents
         """
-        with self.get_connection() as conn:
+        with self.get_read_connection() as conn:
             if keyword:
                 # Use FTS to filter by keyword
                 escaped_keyword = keyword.replace('"', '""')
@@ -846,7 +913,7 @@ class Database:
             search: Searches both filename AND subcategory (for admin document search)
             include_hidden: If False (default), excludes hidden documents and hidden categories
         """
-        with self.get_connection() as conn:
+        with self.get_read_connection() as conn:
             params = []
             conditions = []
             
@@ -924,7 +991,7 @@ class Database:
         Returns (documents_list, total_count). Uses a separate COUNT(*) query
         so the data query can short-circuit via covering index after LIMIT rows.
         """
-        with self.get_connection() as conn:
+        with self.get_read_connection() as conn:
             params = []
             conditions = []
             if not include_hidden:
@@ -972,7 +1039,7 @@ class Database:
         Args:
             include_hidden: If False (default), excludes hidden documents and hidden categories
         """
-        with self.get_connection() as conn:
+        with self.get_read_connection() as conn:
             params = []
             conditions = []
             
@@ -1039,7 +1106,7 @@ class Database:
     
     def get_summary(self, doc_id: str) -> Optional[Dict[str, Any]]:
         """Get a cached summary for a document"""
-        with self.get_connection() as conn:
+        with self.get_read_connection() as conn:
             cursor = conn.execute(
                 "SELECT summary, created_at FROM summaries WHERE document_id = ?",
                 (doc_id,)
@@ -1144,7 +1211,7 @@ class Database:
     
     def get_setting(self, key: str, default: str = None) -> Optional[str]:
         """Get a setting value by key"""
-        with self.get_connection() as conn:
+        with self.get_read_connection() as conn:
             cursor = conn.execute(
                 "SELECT value FROM settings WHERE key = ?", (key,)
             )
@@ -1162,7 +1229,7 @@ class Database:
     
     def get_all_settings(self) -> Dict[str, str]:
         """Get all settings as a dictionary"""
-        with self.get_connection() as conn:
+        with self.get_read_connection() as conn:
             cursor = conn.execute("SELECT key, value FROM settings")
             return {row["key"]: row["value"] for row in cursor.fetchall()}
     
@@ -1176,7 +1243,7 @@ class Database:
         Args:
             include_hidden: If False (default), excludes hidden documents and hidden categories
         """
-        with self.get_connection() as conn:
+        with self.get_read_connection() as conn:
             if include_hidden:
                 cursor = conn.execute("""
                     SELECT 
@@ -1275,7 +1342,7 @@ class Database:
         Returns:
             List of keyword dictionaries
         """
-        with self.get_connection() as conn:
+        with self.get_read_connection() as conn:
             if active_only:
                 cursor = conn.execute("""
                     SELECT id, name, search_term, category, document_count, display_order, is_active, created_at
@@ -1808,7 +1875,7 @@ class Database:
 
         text_col = ", d.full_text" if include_text else ""
 
-        with self.get_connection() as conn:
+        with self.get_read_connection() as conn:
             params = []
             conditions = []
             
@@ -2223,7 +2290,7 @@ class Database:
     
     def is_category_hidden(self, category: str) -> bool:
         """Check if a category is hidden"""
-        with self.get_connection() as conn:
+        with self.get_read_connection() as conn:
             cursor = conn.execute(
                 "SELECT 1 FROM hidden_categories WHERE category = ?",
                 (category,)
@@ -2253,7 +2320,7 @@ class Database:
         Returns:
             True if document exists and is visible, False otherwise
         """
-        with self.get_connection() as conn:
+        with self.get_read_connection() as conn:
             cursor = conn.execute("""
                 SELECT d.id 
                 FROM documents d
@@ -2293,29 +2360,59 @@ class VectorStore:
         self.embeddings = []
         self.metadata = []
         self.model = None
+        self._embeddings_matrix = None
+        self._embeddings_norms = None
+        self._embedding_count = 0
         
         self._load()
     
     def _load(self):
-        """Load existing embeddings from disk"""
+        """Load metadata from disk; embeddings are loaded lazily on first search."""
         if self.embeddings_file.exists() and self.metadata_file.exists():
             try:
-                with open(self.embeddings_file, 'rb') as f:
-                    self.embeddings = pickle.load(f)
                 with open(self.metadata_file, 'rb') as f:
                     self.metadata = pickle.load(f)
-                print(f"Loaded {len(self.embeddings)} embeddings from disk")
+                self._embedding_count = len(self.metadata)
+                print(f"Loaded {self._embedding_count} embeddings metadata from disk (matrix deferred)")
             except Exception as e:
-                print(f"Error loading embeddings: {e}")
-                self.embeddings = []
+                print(f"Error loading metadata: {e}")
                 self.metadata = []
+                self._embedding_count = 0
+
+    def _ensure_matrix(self):
+        """Lazy-load the embeddings matrix on first use."""
+        if self._embeddings_matrix is not None:
+            return True
+        if not self.embeddings_file.exists():
+            return False
+        try:
+            with open(self.embeddings_file, 'rb') as f:
+                raw = pickle.load(f)
+            if raw:
+                self._embeddings_matrix = np.array(raw, dtype=np.float32)
+                self._embeddings_norms = np.linalg.norm(self._embeddings_matrix, axis=1)
+                self._embedding_count = self._embeddings_matrix.shape[0]
+            del raw
+            print(f"Loaded embeddings matrix ({self._embedding_count} vectors)")
+            return self._embeddings_matrix is not None
+        except Exception as e:
+            print(f"Error loading embeddings matrix: {e}")
+            return False
     
     def _save(self):
         """Save embeddings to disk"""
+        embs_to_save = self.embeddings if self.embeddings else (
+            [row for row in self._embeddings_matrix] if self._embeddings_matrix is not None else []
+        )
         with open(self.embeddings_file, 'wb') as f:
-            pickle.dump(self.embeddings, f)
+            pickle.dump(embs_to_save, f)
         with open(self.metadata_file, 'wb') as f:
             pickle.dump(self.metadata, f)
+        if self.embeddings:
+            self._embeddings_matrix = np.array(self.embeddings, dtype=np.float32)
+            self._embeddings_norms = np.linalg.norm(self._embeddings_matrix, axis=1)
+        elif self._embeddings_matrix is not None:
+            self._embeddings_norms = np.linalg.norm(self._embeddings_matrix, axis=1)
     
     def _get_model(self):
         """Lazy load the embedding model with GPU support"""
@@ -2403,21 +2500,17 @@ class VectorStore:
         
         self._save()
     
-    def search(self, query: str, n_results: int = 10, 
+    def search(self, query: str, n_results: int = 10,
                category: Optional[str] = None) -> List[Dict[str, Any]]:
         """Semantic search for documents"""
         model = self._get_model()
-        if model is None or not self.embeddings:
+        if model is None or not self._ensure_matrix():
             return []
-        
-        # Encode query
+
         query_embedding = model.encode(query, convert_to_numpy=True)
-        
-        # Calculate cosine similarities
-        embeddings_matrix = np.array(self.embeddings)
-        similarities = np.dot(embeddings_matrix, query_embedding) / (
-            np.linalg.norm(embeddings_matrix, axis=1) * np.linalg.norm(query_embedding)
-        )
+
+        query_norm = np.linalg.norm(query_embedding)
+        similarities = np.dot(self._embeddings_matrix, query_embedding) / (self._embeddings_norms * query_norm)
         
         # Get top results
         results = []
@@ -2447,7 +2540,9 @@ class VectorStore:
     
     def get_count(self) -> int:
         """Get number of documents in store"""
-        return len(self.embeddings)
+        if self._embeddings_matrix is not None:
+            return self._embeddings_matrix.shape[0]
+        return getattr(self, '_embedding_count', len(self.embeddings))
 
 
 def build_index(base_path: str, force: bool = False, 

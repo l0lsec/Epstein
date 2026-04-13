@@ -1456,7 +1456,6 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
             if content_length:
                 response_size = int(content_length)
         
-        # Log the request
         self.security_logger.log_request(
             request_id=request_id,
             method=request.method,

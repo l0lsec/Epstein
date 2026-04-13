@@ -1209,6 +1209,9 @@ body {
 .stats-container {
     margin-top: var(--space-lg);
     margin-bottom: var(--space-xl);
+    max-width: 600px;
+    margin-left: auto;
+    margin-right: auto;
 }
 
 .stats-title {
