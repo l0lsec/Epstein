@@ -2199,8 +2199,9 @@ class MediaExtractor:
 
 if __name__ == "__main__":
     import sys
-    
-    base_path = sys.argv[1] if len(sys.argv) > 1 else "/Users/user/Documents/Epstein"
+
+    default_base = Path(__file__).resolve().parent.parent
+    base_path = sys.argv[1] if len(sys.argv) > 1 else str(default_base)
     extractor = MediaExtractor(base_path)
     
     print("Starting media extraction...")

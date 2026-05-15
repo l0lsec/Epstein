@@ -3,13 +3,21 @@
 set -euo pipefail
 
 # ─── Config ──────────────────────────────────────────────────────────────────
-SSH_HOST="REDACTED-HOST"
-SSH_USER="sedriclouissaint"
+# Load optional local overrides from .deploy.env (gitignored).
+# Copy .deploy.env.example -> .deploy.env and edit before first run.
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+if [ -f "${SCRIPT_DIR}/.deploy.env" ]; then
+    # shellcheck disable=SC1091
+    source "${SCRIPT_DIR}/.deploy.env"
+fi
+
+SSH_HOST="${SSH_HOST:?Set SSH_HOST in .deploy.env (copy from .deploy.env.example)}"
+SSH_USER="${SSH_USER:?Set SSH_USER in .deploy.env (copy from .deploy.env.example)}"
+REMOTE_DIR="${REMOTE_DIR:-/opt/epstein}"
+SERVICE_NAME="${SERVICE_NAME:-epstein}"
 SSH_TARGET="${SSH_USER}@${SSH_HOST}"
-REMOTE_DIR="/opt/epstein"
 BACKUP_DIR="${REMOTE_DIR}/.deploy-backup"
 VENV_PIP="${REMOTE_DIR}/venv/bin/pip"
-SERVICE_NAME="epstein"
 
 # Files that require a service restart (Python process must reload)
 RESTART_PATTERNS="^backend/|^run\.py$|^requirements\.txt$"
@@ -72,8 +80,10 @@ success "SSH connection OK"
 # ─── Rollback mode ──────────────────────────────────────────────────────────
 if [ "$ROLLBACK" = true ]; then
     info "Rolling back to previous deploy backup..."
-    ssh "${SSH_TARGET}" bash -s <<'ROLLBACK_EOF'
-        REMOTE_DIR="/opt/epstein"
+    ssh "${SSH_TARGET}" bash -s -- "$REMOTE_DIR" "$SSH_USER" "$SERVICE_NAME" <<'ROLLBACK_EOF'
+        REMOTE_DIR="$1"
+        SSH_USER="$2"
+        SERVICE_NAME="$3"
         BACKUP_DIR="${REMOTE_DIR}/.deploy-backup"
         if [ ! -d "$BACKUP_DIR" ]; then
             echo "ERROR: No backup found at $BACKUP_DIR"
@@ -86,10 +96,10 @@ if [ "$ROLLBACK" = true ]; then
             fi
         done
         [ -f "${BACKUP_DIR}/run.py" ] && sudo cp -f "${BACKUP_DIR}/run.py" "${REMOTE_DIR}/"
-        sudo chown -R user:user "$REMOTE_DIR"
-        sudo systemctl restart epstein
+        sudo chown -R "${SSH_USER}:${SSH_USER}" "$REMOTE_DIR"
+        sudo systemctl restart "$SERVICE_NAME"
         sleep 3
-        systemctl is-active epstein
+        systemctl is-active "$SERVICE_NAME"
 ROLLBACK_EOF
     success "Rollback complete and service restarted"
     exit 0
@@ -235,8 +245,9 @@ fi
 
 # ─── Pre-deploy backup on server ────────────────────────────────────────────
 info "Creating backup of current production files on server..."
-ssh "${SSH_TARGET}" bash -s <<'BACKUP_EOF'
-    REMOTE_DIR="/opt/epstein"
+ssh "${SSH_TARGET}" bash -s -- "$REMOTE_DIR" "$SSH_USER" <<'BACKUP_EOF'
+    REMOTE_DIR="$1"
+    SSH_USER="$2"
     BACKUP_DIR="${REMOTE_DIR}/.deploy-backup"
     sudo rm -rf "$BACKUP_DIR"
     sudo mkdir -p "${BACKUP_DIR}/backend" "${BACKUP_DIR}/frontend" "${BACKUP_DIR}/scripts"
@@ -244,7 +255,7 @@ ssh "${SSH_TARGET}" bash -s <<'BACKUP_EOF'
     sudo cp -f ${REMOTE_DIR}/frontend/* "${BACKUP_DIR}/frontend/" 2>/dev/null || true
     sudo cp -f ${REMOTE_DIR}/scripts/*.py "${BACKUP_DIR}/scripts/" 2>/dev/null || true
     sudo cp -f "${REMOTE_DIR}/run.py" "${BACKUP_DIR}/" 2>/dev/null || true
-    sudo chown -R user:user "$BACKUP_DIR"
+    sudo chown -R "${SSH_USER}:${SSH_USER}" "$BACKUP_DIR"
 BACKUP_EOF
 success "Backup created at ${BACKUP_DIR}/"
 
@@ -294,10 +305,17 @@ fi
 
 # ─── Remote install ──────────────────────────────────────────────────────────
 info "Installing files on server..."
-ssh "${SSH_TARGET}" bash -s -- "$NEEDS_RESTART" "$( [ -n "$REQS_CHANGED" ] && echo true || echo false )" <<'INSTALL_EOF'
+ssh "${SSH_TARGET}" bash -s -- \
+    "$NEEDS_RESTART" \
+    "$( [ -n "$REQS_CHANGED" ] && echo true || echo false )" \
+    "$REMOTE_DIR" \
+    "$SSH_USER" \
+    "$SERVICE_NAME" <<'INSTALL_EOF'
     NEEDS_RESTART="$1"
     NEEDS_PIP="$2"
-    REMOTE_DIR="/opt/epstein"
+    REMOTE_DIR="$3"
+    SSH_USER="$4"
+    SERVICE_NAME="$5"
     STAGING="/tmp/epstein-deploy"
 
     # Copy staged files to production
@@ -308,7 +326,7 @@ ssh "${SSH_TARGET}" bash -s -- "$NEEDS_RESTART" "$( [ -n "$REQS_CHANGED" ] && ec
     [ -f "${STAGING}/requirements.txt" ]             && sudo cp -f ${STAGING}/requirements.txt ${REMOTE_DIR}/
 
     # Fix ownership
-    sudo chown -R user:user "$REMOTE_DIR"
+    sudo chown -R "${SSH_USER}:${SSH_USER}" "$REMOTE_DIR"
 
     # Install deps if requirements.txt changed
     if [ "$NEEDS_PIP" = "true" ]; then
@@ -318,14 +336,14 @@ ssh "${SSH_TARGET}" bash -s -- "$NEEDS_RESTART" "$( [ -n "$REQS_CHANGED" ] && ec
 
     # Restart service if needed
     if [ "$NEEDS_RESTART" = "true" ]; then
-        echo "[INFO] Restarting ${REMOTE_DIR} service..."
-        sudo systemctl restart epstein
+        echo "[INFO] Restarting ${SERVICE_NAME} service..."
+        sudo systemctl restart "$SERVICE_NAME"
         sleep 3
-        if systemctl is-active --quiet epstein; then
+        if systemctl is-active --quiet "$SERVICE_NAME"; then
             echo "[OK] Service is active"
         else
             echo "[ERR] Service failed to start!"
-            sudo journalctl -u epstein --no-pager -n 20
+            sudo journalctl -u "$SERVICE_NAME" --no-pager -n 20
             exit 1
         fi
     else

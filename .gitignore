@@ -2,6 +2,7 @@
 .env
 .env.local
 .env.*.local
+.deploy.env
 
 # Python
 __pycache__/
@@ -13,9 +14,10 @@ venv/
 ENV/
 env/
 
-# IDE
+# IDE / editor
 .idea/
 .vscode/
+.cursor/
 *.swp
 *.swo
 
@@ -35,6 +37,8 @@ Court Records/
 DOJ Disclosures/
 FBI Vault/
 extracted_text/
+.cache/
+.temp_downloads/
 
 *.db*
 *.mdc

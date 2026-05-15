@@ -2770,5 +2770,6 @@ def build_index(base_path: str, force: bool = False,
 
 if __name__ == "__main__":
     import sys
-    base_path = sys.argv[1] if len(sys.argv) > 1 else "/Users/user/Documents/Epstein"
+    default_base = Path(__file__).resolve().parent.parent
+    base_path = sys.argv[1] if len(sys.argv) > 1 else str(default_base)
     build_index(base_path)
