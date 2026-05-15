@@ -51,7 +51,7 @@ If you operate a public deployment, please honor takedown requests from victims,
 
 **Total: ~45,700+ documents**
 
-Documents are downloaded from the official sources by scripts under `scripts/` (see below). The repo does not ship the documents themselves.
+The repo does not ship the documents themselves and does not bundle downloaders for them. Obtain the files directly from the official sources linked above and place them under the directory names listed in the architecture tree (e.g. `DOJ Disclosures/`, `FOIA/`, `CourtRecords/`, `House Disclosures/`). Once the files are on disk, `python run.py extract` and `python run.py index` will pick them up.
 
 ---
 
@@ -91,22 +91,18 @@ cp .env.example .env
 
 At minimum, `OPENAI_API_KEY` enables the Ask AI and Summary features. Everything else has reasonable defaults.
 
-### 3. Download Documents
+### 3. Place Documents
 
-```bash
-# DOJ disclosures (main collection)
-python scripts/download_doj_disclosures.py
+Download files from the official sources linked in the Document Collection table above and place them under the matching directory:
 
-# FOIA releases
-python scripts/download_foia.py
+| Source | Local directory |
+|--------|-----------------|
+| DOJ Disclosures | `DOJ Disclosures/` |
+| FOIA releases | `FOIA/` |
+| Court Records | `CourtRecords/` |
+| House Disclosures | `House Disclosures/` |
 
-# Court records
-python scripts/download_court_records.py
-
-# House Oversight Committee (Google Drive)
-python scripts/download_gdrive.py "https://drive.google.com/drive/folders/FOLDER_ID" \
-    -o "./House Disclosures"
-```
+The repo intentionally does not bundle downloaders. Any tool that preserves the original filenames will work (`wget`, `curl`, `gdown`, browser bulk-downloaders, etc.).
 
 ### 4. Extract, Index, and Run
 
@@ -184,19 +180,7 @@ Epstein/
 │   ├── favicon.svg
 │   ├── og-image.png          OpenGraph preview image
 │   └── sitemap.xml
-├── scripts/
-│   ├── download_doj_disclosures.py    Primary DOJ collection downloader
-│   ├── download_foia.py               FOIA releases (FBI/CBP/BOP/Florida)
-│   ├── download_court_records.py      Court filings
-│   ├── download_gdrive.py             Google Drive folder downloader (House)
-│   ├── setup_court_records.py         One-shot court-records bootstrap
-│   ├── process_new_downloads.py       Re-extract + re-index for newly downloaded files
-│   ├── migrate_doj_subcategories.py   Schema migration: DOJ subcategories
-│   ├── migrate_hashes.py              Schema migration: file content hashes
-│   ├── migrate_telemetry.py           Schema migration: telemetry tables
-│   ├── cleanup_migration.py           Post-migration cleanup
-│   └── scrape.js                      Headless-browser DOJ link scraper
-├── run.py                    Unified CLI (setup, extract, index, server, admin tasks)
+├── run.py                    Unified CLI (extract, index, server, admin tasks)
 ├── deploy.sh                 Optional systemd-deploy helper (parameterized via .deploy.env)
 ├── requirements.txt
 ├── .env.example
@@ -225,9 +209,8 @@ python run.py [COMMAND] [SOURCE] [FLAGS]
 
 | Command | Description |
 |---------|-------------|
-| `all` _(default)_ | Run `setup` then start the server |
-| `setup` | Download, extract, and index (full bootstrap) |
-| `download` | Download files from configured sources only |
+| `all` _(default)_ | Run setup (extract + index) then start the server |
+| `setup` | Extract and index everything already on disk |
 | `extract` | Extract text from PDFs, images, audio, and video |
 | `index` | (Re)build the FTS5 + vector index |
 | `server` | Start the API + UI only |
@@ -238,77 +221,19 @@ python run.py [COMMAND] [SOURCE] [FLAGS]
 | `rebuild-db` | Drop and rebuild the database from extracted text |
 | `generate-thumbnails` | Regenerate PDF/image thumbnails |
 
+> Note: the legacy `download` / `--doj-datasets` flow expects bundled downloader modules under `scripts/`. The public release does not ship those modules, so the download steps will print an "obtain files manually" message and exit. Place documents on disk under the directory names listed in Quick Start; `extract` and `index` work without any downloaders.
+
 ### Flags
 
 | Flag | Description |
 |------|-------------|
-| `--force` | Force re-extraction / re-download of all files |
+| `--force` | Force re-extraction of all files |
 | `--full-setup` | Force a complete rebuild end-to-end |
 | `--reindex` | Rebuild the index before starting the server |
 | `--host HOST` | Server host (default `0.0.0.0`) |
 | `--port PORT` | Server port (default `8000`) |
 | `--category NAME`, `-c` | Category for `add` |
-| `--doj-datasets LIST` | Comma-separated DOJ dataset slugs to limit `setup`/`download` |
 | `--workers N`, `-w` | Extraction worker count (default 8) |
-
----
-
-## Download Scripts
-
-### DOJ Disclosures (`download_doj_disclosures.py`)
-
-Primary downloader for the official DOJ Epstein Document Library.
-
-```bash
-python scripts/download_doj_disclosures.py
-python scripts/download_doj_disclosures.py --force        # Re-download everything
-python scripts/download_doj_disclosures.py --datasets d1,d2  # Specific datasets
-```
-
-### FOIA Files (`download_foia.py`)
-
-Downloads FOIA releases from `https://www.justice.gov/epstein/foia` organized by agency (CBP, FBI, BOP, Florida).
-
-```bash
-python scripts/download_foia.py                  # Skip existing
-python scripts/download_foia.py --check-updates  # Detect re-released files
-python scripts/download_foia.py --force          # Re-download all
-python scripts/download_foia.py --output /path   # Custom destination
-```
-
-### Court Records (`download_court_records.py`)
-
-Same shape as FOIA, sourced from `https://www.justice.gov/epstein/court-records`.
-
-```bash
-python scripts/download_court_records.py
-python scripts/download_court_records.py --check-updates
-python scripts/download_court_records.py --force
-```
-
-### Google Drive (`download_gdrive.py`)
-
-For House Oversight Committee releases (and any other Drive folder).
-
-```bash
-python scripts/download_gdrive.py "https://drive.google.com/drive/folders/FOLDER_ID"
-python scripts/download_gdrive.py "https://drive.google.com/drive/folders/FOLDER_ID" --list-only
-python scripts/download_gdrive.py "https://drive.google.com/drive/folders/FOLDER_ID" -o "./House Disclosures"
-python scripts/download_gdrive.py "https://drive.google.com/drive/folders/FOLDER_ID" --force
-```
-
-Idempotent. Files that fail (Drive permission errors, viruses-scan refusals, etc.) are logged to `_failed_downloads.txt`.
-
-### Detecting Re-Releases
-
-`--check-updates` (`-u`) compares remote file size against the local copy. If they differ, the old file is archived with a timestamped suffix (e.g., `document_20260115_143022.pdf`) and the new version is downloaded under the original name.
-
-| Flag | Short | Description | Scripts |
-|------|-------|-------------|---------|
-| `--output PATH` | `-o` | Custom output directory | All |
-| `--force` | `-f` | Force re-download of all files | All |
-| `--check-updates` | `-u` | Check for updated files on server | FOIA, Court Records |
-| `--list-only` | `-l` | List without downloading | Google Drive |
 
 ---
 

@@ -90,7 +90,7 @@ if [ "$ROLLBACK" = true ]; then
             exit 1
         fi
         # Restore each backed-up directory
-        for dir in backend frontend scripts; do
+        for dir in backend frontend; do
             if [ -d "${BACKUP_DIR}/${dir}" ]; then
                 sudo cp -f "${BACKUP_DIR}/${dir}/"* "${REMOTE_DIR}/${dir}/"
             fi
@@ -112,18 +112,18 @@ CURRENT_SHA=$(git rev-parse HEAD)
 
 if [ "$DEPLOY_ALL" = true ]; then
     info "Deploying ALL code files (--all flag)"
-    CHANGED_FILES=$(git ls-files -- backend/ frontend/ scripts/ run.py requirements.txt)
+    CHANGED_FILES=$(git ls-files -- backend/ frontend/ run.py requirements.txt)
 else
     # Fetch the last deployed commit SHA from the server
     LAST_DEPLOYED_SHA=$(ssh "${SSH_TARGET}" "cat ${REMOTE_DIR}/.deploy-sha 2>/dev/null" || true)
 
     if [ -z "$LAST_DEPLOYED_SHA" ]; then
         info "No previous deploy marker found on server — deploying all code files"
-        CHANGED_FILES=$(git ls-files -- backend/ frontend/ scripts/ run.py requirements.txt)
+        CHANGED_FILES=$(git ls-files -- backend/ frontend/ run.py requirements.txt)
     elif [ "$LAST_DEPLOYED_SHA" = "$CURRENT_SHA" ]; then
         # Same commit — check for uncommitted local changes
         CHANGED_FILES=$(git diff --name-only HEAD 2>/dev/null || true)
-        UNTRACKED=$(git ls-files --others --exclude-standard -- backend/ frontend/ scripts/ run.py requirements.txt 2>/dev/null || true)
+        UNTRACKED=$(git ls-files --others --exclude-standard -- backend/ frontend/ run.py requirements.txt 2>/dev/null || true)
         if [ -n "$UNTRACKED" ]; then
             CHANGED_FILES=$(printf "%s\n%s" "$CHANGED_FILES" "$UNTRACKED" | sort -u)
         fi
@@ -134,10 +134,10 @@ else
     else
         info "Last deployed: ${LAST_DEPLOYED_SHA:0:7} -> Current: ${CURRENT_SHA:0:7}"
         # Diff between last deployed commit and current HEAD + any uncommitted changes
-        CHANGED_FILES=$(git diff --name-only "$LAST_DEPLOYED_SHA" HEAD 2>/dev/null || git ls-files -- backend/ frontend/ scripts/ run.py requirements.txt)
+        CHANGED_FILES=$(git diff --name-only "$LAST_DEPLOYED_SHA" HEAD 2>/dev/null || git ls-files -- backend/ frontend/ run.py requirements.txt)
         # Also include uncommitted changes on top of HEAD
         UNCOMMITTED=$(git diff --name-only HEAD 2>/dev/null || true)
-        UNTRACKED=$(git ls-files --others --exclude-standard -- backend/ frontend/ scripts/ run.py requirements.txt 2>/dev/null || true)
+        UNTRACKED=$(git ls-files --others --exclude-standard -- backend/ frontend/ run.py requirements.txt 2>/dev/null || true)
         if [ -n "$UNCOMMITTED" ] || [ -n "$UNTRACKED" ]; then
             CHANGED_FILES=$(printf "%s\n%s\n%s" "$CHANGED_FILES" "$UNCOMMITTED" "$UNTRACKED" | sort -u)
         fi
@@ -145,7 +145,7 @@ else
 fi
 
 # Filter to only files in deployable directories
-DEPLOY_FILES=$(echo "$CHANGED_FILES" | grep -E '^(backend/|frontend/|scripts/|run\.py$|requirements\.txt$)' || true)
+DEPLOY_FILES=$(echo "$CHANGED_FILES" | grep -E '^(backend/|frontend/|run\.py$|requirements\.txt$)' || true)
 
 if [ -z "$DEPLOY_FILES" ]; then
     warn "No deployable files changed. Nothing to do."
@@ -168,7 +168,6 @@ success "Safety scan passed — no database or data files"
 # ─── Determine what categories changed ───────────────────────────────────────
 BACKEND_CHANGED=$(echo "$DEPLOY_FILES" | grep -E '^backend/' || true)
 FRONTEND_CHANGED=$(echo "$DEPLOY_FILES" | grep -E '^frontend/' || true)
-SCRIPTS_CHANGED=$(echo "$DEPLOY_FILES" | grep -E '^scripts/' || true)
 RUNPY_CHANGED=$(echo "$DEPLOY_FILES" | grep -E '^run\.py$' || true)
 REQS_CHANGED=$(echo "$DEPLOY_FILES" | grep -E '^requirements\.txt$' || true)
 
@@ -250,10 +249,9 @@ ssh "${SSH_TARGET}" bash -s -- "$REMOTE_DIR" "$SSH_USER" <<'BACKUP_EOF'
     SSH_USER="$2"
     BACKUP_DIR="${REMOTE_DIR}/.deploy-backup"
     sudo rm -rf "$BACKUP_DIR"
-    sudo mkdir -p "${BACKUP_DIR}/backend" "${BACKUP_DIR}/frontend" "${BACKUP_DIR}/scripts"
+    sudo mkdir -p "${BACKUP_DIR}/backend" "${BACKUP_DIR}/frontend"
     sudo cp -f ${REMOTE_DIR}/backend/*.py "${BACKUP_DIR}/backend/" 2>/dev/null || true
     sudo cp -f ${REMOTE_DIR}/frontend/* "${BACKUP_DIR}/frontend/" 2>/dev/null || true
-    sudo cp -f ${REMOTE_DIR}/scripts/*.py "${BACKUP_DIR}/scripts/" 2>/dev/null || true
     sudo cp -f "${REMOTE_DIR}/run.py" "${BACKUP_DIR}/" 2>/dev/null || true
     sudo chown -R "${SSH_USER}:${SSH_USER}" "$BACKUP_DIR"
 BACKUP_EOF
@@ -261,7 +259,7 @@ success "Backup created at ${BACKUP_DIR}/"
 
 # ─── Stage files on server ───────────────────────────────────────────────────
 info "Preparing staging directories on server..."
-ssh "${SSH_TARGET}" "rm -rf /tmp/epstein-deploy && mkdir -p /tmp/epstein-deploy/{backend,frontend,scripts}"
+ssh "${SSH_TARGET}" "rm -rf /tmp/epstein-deploy && mkdir -p /tmp/epstein-deploy/{backend,frontend}"
 
 # SCP each category of changed files
 if [ -n "$BACKEND_CHANGED" ]; then
@@ -281,14 +279,6 @@ if [ -n "$FRONTEND_CHANGED" ]; then
         fi
     done
     success "Frontend files uploaded"
-fi
-
-if [ -n "$SCRIPTS_CHANGED" ]; then
-    info "Uploading script files..."
-    scp -q scripts/*.py "${SSH_TARGET}:/tmp/epstein-deploy/scripts/"
-    # scripts/ also has scrape.js
-    [ -f scripts/scrape.js ] && scp -q scripts/scrape.js "${SSH_TARGET}:/tmp/epstein-deploy/scripts/"
-    success "Script files uploaded"
 fi
 
 if [ -n "$RUNPY_CHANGED" ]; then
@@ -321,7 +311,6 @@ ssh "${SSH_TARGET}" bash -s -- \
     # Copy staged files to production
     [ -n "$(ls ${STAGING}/backend/ 2>/dev/null)" ]  && sudo cp -f ${STAGING}/backend/*  ${REMOTE_DIR}/backend/
     [ -n "$(ls ${STAGING}/frontend/ 2>/dev/null)" ] && sudo cp -f ${STAGING}/frontend/* ${REMOTE_DIR}/frontend/
-    [ -n "$(ls ${STAGING}/scripts/ 2>/dev/null)" ]  && sudo cp -f ${STAGING}/scripts/*  ${REMOTE_DIR}/scripts/
     [ -f "${STAGING}/run.py" ]                       && sudo cp -f ${STAGING}/run.py     ${REMOTE_DIR}/
     [ -f "${STAGING}/requirements.txt" ]             && sudo cp -f ${STAGING}/requirements.txt ${REMOTE_DIR}/
 

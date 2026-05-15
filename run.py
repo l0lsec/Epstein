@@ -132,12 +132,12 @@ def setup_foia(force=False):
         
         return result['failed'] == 0
     except ImportError as e:
-        print(f"⚠ Could not import FOIA download script: {e}")
-        print("  Run manually: python scripts/download_foia.py")
+        print(f"⚠ FOIA downloader not bundled with this repo: {e}")
+        print(f"  Place FOIA files under: {foia_dir}")
+        print("  (download from https://www.justice.gov/epstein/foia)")
         return False
     except Exception as e:
         print(f"⚠ Error downloading FOIA files: {e}")
-        print("  You can run manually: python scripts/download_foia.py")
         return False
 
 
@@ -181,12 +181,12 @@ def setup_court_records(force=False):
         
         return result['failed'] == 0
     except ImportError as e:
-        print(f"⚠ Could not import court records setup script: {e}")
-        print("  Run manually: python scripts/setup_court_records.py")
+        print(f"⚠ Court records downloader not bundled with this repo: {e}")
+        print(f"  Place court records under: {court_records_dir}")
+        print("  (download from https://www.justice.gov/epstein/court-records)")
         return False
     except Exception as e:
         print(f"⚠ Error downloading court records: {e}")
-        print("  You can run manually: python scripts/setup_court_records.py")
         return False
 
 
@@ -255,12 +255,12 @@ def setup_doj_disclosures(force=False, datasets=None):
         
         return result['failed'] == 0
     except ImportError as e:
-        print(f"⚠ Could not import DOJ Disclosures download script: {e}")
-        print("  Run manually: python scripts/download_doj_disclosures.py")
+        print(f"⚠ DOJ Disclosures downloader not bundled with this repo: {e}")
+        print(f"  Place DOJ Disclosures under: {doj_dir}")
+        print("  (download from https://www.justice.gov/epstein/doj-disclosures)")
         return False
     except Exception as e:
         print(f"⚠ Error downloading DOJ Disclosures: {e}")
-        print("  You can run manually: python scripts/download_doj_disclosures.py")
         return False
 
 
@@ -736,7 +736,6 @@ Examples:
 DOJ Disclosures (Data Sets 1-12, auto-detects existing folders):
   python run.py download                             # Download all sources (auto-detects data sets)
   python run.py download --doj-datasets 9,10,11,12   # Download only specific data sets
-  python scripts/download_doj_disclosures.py -d 9    # Download Data Set 9 only (standalone)
   
 Adding new files (PDFs, audio, video):
   python run.py add /path/to/file.pdf                    # Add single PDF
