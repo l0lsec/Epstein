@@ -49,7 +49,7 @@ If you operate a public deployment, please honor takedown requests from victims,
 | Court Records | ~12,100 | Legal filings from various cases | [justice.gov/epstein/court-records](https://www.justice.gov/epstein/court-records) |
 | House Disclosures | ~18,800 | DOJ-OGR scanned documents (JPG/TIF), video (MP4), audio (WAV) | House Oversight Committee (Google Drive) |
 
-**Total: ~45,700+ documents**
+**Total: ~1,187,106+ documents**
 
 The repo does not ship the documents themselves and does not bundle downloaders for them. Obtain the files directly from the official sources linked above and place them under the directory names listed in the architecture tree (e.g. `DOJ Disclosures/`, `FOIA/`, `CourtRecords/`, `House Disclosures/`). Once the files are on disk, `python run.py extract` and `python run.py index` will pick them up.
 
