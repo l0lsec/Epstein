@@ -1,0 +1,7 @@
+# GitHub repository "Sponsor" button configuration.
+# Docs: https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/displaying-a-sponsor-button-in-your-repository
+
+github: l0lsec
+custom:
+  - "https://www.paypal.com/donate/?business=KRYTAPVDR46SY&no_recurring=0&item_name=Your+support+helps+cover+server+costs+and+keeps+this+information+freely+accessible+to+researchers%2C+journalists%2C+and+the+public.&currency_code=USD"
+  - "https://epsteinfta.com/#donate-section"

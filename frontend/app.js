@@ -192,6 +192,10 @@ function applyPublicSettings(settings) {
         if (askNavBtn) askNavBtn.style.display = 'none';
         if (askView) askView.style.display = 'none';
     }
+    initMonetization({
+        adsEnabled: settings.ads_enabled === true,
+        affiliateEnabled: settings.affiliate_enabled !== false
+    });
 }
 
 function cacheElements() {
@@ -2083,7 +2087,10 @@ async function openDocument(docId, index = -1) {
         // Show modal
         elements.modal.classList.remove('hidden');
         document.body.style.overflow = 'hidden';
-        
+        document.body.classList.add('modal-open');
+
+        try { onDocumentModalOpened(); } catch (e) { /* monetization is best-effort */ }
+
     } catch (error) {
         console.error('Error loading document:', error);
         alert('Failed to load document.');
@@ -2093,6 +2100,7 @@ async function openDocument(docId, index = -1) {
 function closeModal() {
     elements.modal.classList.add('hidden');
     document.body.style.overflow = '';
+    document.body.classList.remove('modal-open');
     state.currentDocument = null;
     // Clear PDF iframe to stop loading
     if (elements.pdfIframe) {
@@ -2959,3 +2967,399 @@ function escapeCSVField(field) {
     return '"' + str.replace(/"/g, '""') + '"';
 }
 
+/* =============================================================================
+   Monetization: donation panel, donate modal, crypto, affiliate strip, ads.
+   All revenue surfaces live below this line.
+   ============================================================================= */
+
+// ---- Configuration (fill in your own links / addresses) ---------------------
+// Stripe Payment Links: create at https://dashboard.stripe.com/payment-links
+// Crypto.com Pay button: create at https://crypto.com/business/pay  (or paste your hosted-checkout link)
+// Crypto wallet addresses: paste your receive addresses from your crypto.com app
+// Ko-fi: https://ko-fi.com/<your-handle>
+// GitHub Sponsors: https://github.com/sponsors/<your-handle>
+// Ad network: paste your Ezoic site id or AdSense client id; leave blank to keep ad placeholders dormant.
+const DONATE_CONFIG = {
+    stripe: {
+        // null = button disabled; replace with full Payment Link URLs to enable.
+        amount5:  null, // e.g. "https://buy.stripe.com/test_abc..."
+        amount10: null,
+        amount25: null,
+        amount50: null,
+        custom:   null  // a "name your price" Payment Link
+    },
+    crypto: {
+        // Hosted Crypto.com Pay checkout link (single button). Leave null to hide.
+        cryptoComPayUrl: null,
+        // Manual wallet addresses fallback. Empty array hides the section.
+        wallets: [
+            // { coin: "BTC",  address: "bc1q..." },
+            // { coin: "ETH",  address: "0x..." },
+            // { coin: "USDC", address: "0x..." },
+            // { coin: "SOL",  address: "..." }
+        ]
+    },
+    github: {
+        // Set to null to hide the GitHub Sponsors button until the program is set up.
+        sponsorsUrl: "https://github.com/sponsors/l0lsec"
+    },
+    kofi: {
+        url: null // e.g. "https://ko-fi.com/yourhandle"
+    },
+    // Trigger the donate modal once after this many document opens, then snooze 30 days.
+    modalTrigger: {
+        docsBeforePrompt: 5,
+        snoozeDays: 30
+    }
+};
+
+// Ad network configuration. Until one of these is filled in, ad slots stay as
+// dormant placeholders (hidden via the admin "ads_enabled" toggle anyway).
+const AD_CONFIG = {
+    // Ezoic site id (numeric). When set + ads_enabled, the Ezoic loader is injected.
+    ezoicSiteId: null,
+    // AdSense client id (e.g. "ca-pub-1234567890123456"). Used as fallback if no Ezoic id.
+    adsenseClientId: null
+};
+
+// Amazon Associates items. Replace ASIN + tag to enable.
+// Leave AFFILIATE_TAG blank to keep the section hidden.
+const AFFILIATE_TAG = ""; // e.g. "l0lsec-20"
+const AFFILIATE_ITEMS = [
+    {
+        title: "Filthy Rich",
+        author: "James Patterson & John Connolly",
+        asin: "B07CY3HZBL",
+        cover: "https://m.media-amazon.com/images/I/91MJUygH-DL._SY342_.jpg"
+    },
+    {
+        title: "Perversion of Justice",
+        author: "Julie K. Brown",
+        asin: "0062950622",
+        cover: "https://m.media-amazon.com/images/I/81E7Br5w8ML._SY342_.jpg"
+    },
+    {
+        title: "Relentless Pursuit",
+        author: "Bradley J. Edwards",
+        asin: "1982128097",
+        cover: "https://m.media-amazon.com/images/I/81rRwlOObCL._SY342_.jpg"
+    },
+    {
+        title: "Epstein: Dead Men Tell No Tales",
+        author: "Dylan Howard & Melissa Cronin",
+        asin: "1510755810",
+        cover: "https://m.media-amazon.com/images/I/71F0z0G7e8L._SY342_.jpg"
+    }
+];
+
+// ---- Donate panel: tab switching, init from config --------------------------
+function initDonatePanel(root) {
+    if (!root) return;
+    const tabs = root.querySelectorAll('.donate-tab');
+    const panels = root.querySelectorAll('.donate-tab-panel');
+    if (!tabs.length) return;
+
+    tabs.forEach(tab => {
+        if (tab.__donateBound) return;
+        tab.__donateBound = true;
+        tab.addEventListener('click', () => {
+            const name = tab.dataset.donateTab;
+            tabs.forEach(t => {
+                t.classList.toggle('active', t === tab);
+                t.setAttribute('aria-selected', t === tab ? 'true' : 'false');
+            });
+            panels.forEach(p => p.classList.toggle('active', p.dataset.donatePanel === name));
+        });
+    });
+
+    // Stripe amount buttons
+    const grid = root.querySelector('#stripe-amount-grid');
+    const fineprint = root.querySelector('#stripe-fineprint');
+    if (grid) {
+        grid.innerHTML = '';
+        const presets = [
+            { key: 'amount5',  label: '$5'  },
+            { key: 'amount10', label: '$10' },
+            { key: 'amount25', label: '$25' },
+            { key: 'amount50', label: '$50' }
+        ];
+        let anyConfigured = false;
+        presets.forEach(p => {
+            const url = DONATE_CONFIG.stripe[p.key];
+            if (!url) return;
+            anyConfigured = true;
+            const a = document.createElement('a');
+            a.className = 'donate-amount-btn';
+            a.href = url;
+            a.target = '_blank';
+            a.rel = 'noopener noreferrer';
+            a.textContent = p.label;
+            grid.appendChild(a);
+        });
+        if (DONATE_CONFIG.stripe.custom) {
+            anyConfigured = true;
+            const a = document.createElement('a');
+            a.className = 'donate-amount-btn custom';
+            a.href = DONATE_CONFIG.stripe.custom;
+            a.target = '_blank';
+            a.rel = 'noopener noreferrer';
+            a.textContent = 'Choose amount';
+            grid.appendChild(a);
+        }
+        if (fineprint) fineprint.style.display = anyConfigured ? 'none' : '';
+    }
+
+    // Crypto.com Pay link
+    const cryptoLink = root.querySelector('#crypto-pay-link');
+    if (cryptoLink) {
+        if (DONATE_CONFIG.crypto.cryptoComPayUrl) {
+            cryptoLink.href = DONATE_CONFIG.crypto.cryptoComPayUrl;
+            cryptoLink.style.display = '';
+        } else {
+            cryptoLink.style.display = 'none';
+        }
+    }
+
+    // Crypto wallet addresses + copy buttons
+    const addrContainer = root.querySelector('#crypto-addresses');
+    if (addrContainer) {
+        addrContainer.innerHTML = '';
+        (DONATE_CONFIG.crypto.wallets || []).forEach(w => {
+            if (!w || !w.address) return;
+            const row = document.createElement('div');
+            row.className = 'crypto-address';
+            row.innerHTML = `
+                <span class="crypto-address-coin">${escapeHtml(w.coin || '')}</span>
+                <span class="crypto-address-value" title="${escapeHtml(w.address)}">${escapeHtml(w.address)}</span>
+                <button type="button" class="crypto-address-copy">Copy</button>
+            `;
+            const btn = row.querySelector('.crypto-address-copy');
+            btn.addEventListener('click', () => copyToClipboard(w.address, btn));
+            addrContainer.appendChild(row);
+        });
+    }
+
+    // GitHub Sponsors
+    const ghLink = root.querySelector('#github-sponsors-link');
+    if (ghLink) {
+        if (DONATE_CONFIG.github.sponsorsUrl) {
+            ghLink.href = DONATE_CONFIG.github.sponsorsUrl;
+            ghLink.style.display = '';
+        } else {
+            ghLink.style.display = 'none';
+        }
+    }
+
+    // Ko-fi
+    const kofiLink = root.querySelector('#kofi-link');
+    if (kofiLink) {
+        if (DONATE_CONFIG.kofi.url) {
+            kofiLink.href = DONATE_CONFIG.kofi.url;
+            kofiLink.style.display = '';
+        } else {
+            kofiLink.style.display = 'none';
+        }
+    }
+}
+
+function escapeHtml(str) {
+    return String(str)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
+async function copyToClipboard(text, btnEl) {
+    try {
+        if (navigator.clipboard && window.isSecureContext) {
+            await navigator.clipboard.writeText(text);
+        } else {
+            const ta = document.createElement('textarea');
+            ta.value = text;
+            ta.style.position = 'fixed';
+            ta.style.opacity = '0';
+            document.body.appendChild(ta);
+            ta.select();
+            document.execCommand('copy');
+            document.body.removeChild(ta);
+        }
+        if (btnEl) {
+            const original = btnEl.textContent;
+            btnEl.textContent = 'Copied!';
+            btnEl.classList.add('copied');
+            setTimeout(() => {
+                btnEl.textContent = original;
+                btnEl.classList.remove('copied');
+            }, 1500);
+        }
+    } catch (e) {
+        console.warn('Clipboard copy failed', e);
+        if (btnEl) {
+            btnEl.textContent = 'Press Ctrl+C';
+            setTimeout(() => { btnEl.textContent = 'Copy'; }, 1500);
+        }
+    }
+}
+
+// ---- Donate modal trigger ---------------------------------------------------
+function onDocumentModalOpened() {
+    try {
+        const key = 'docOpensSinceLastDonatePrompt';
+        const snoozeKey = 'donatePromptSnoozedUntil';
+        const now = Date.now();
+        const snoozedUntil = parseInt(localStorage.getItem(snoozeKey) || '0', 10);
+        if (snoozedUntil && now < snoozedUntil) return;
+
+        const count = parseInt(localStorage.getItem(key) || '0', 10) + 1;
+        localStorage.setItem(key, String(count));
+        if (count >= DONATE_CONFIG.modalTrigger.docsBeforePrompt) {
+            // Defer until the user has been looking at the doc for a few seconds;
+            // showing it instantly feels jarring.
+            setTimeout(() => {
+                openDonateModal('auto');
+                localStorage.setItem(key, '0');
+            }, 4000);
+        }
+    } catch (e) { /* localStorage may be blocked */ }
+}
+
+function openDonateModal(source) {
+    const modal = document.getElementById('donate-modal');
+    const body = document.getElementById('donate-modal-body');
+    const footerPanel = document.querySelector('#donate-section .donate-panel');
+    if (!modal || !body) return;
+
+    // Move the footer panel into the modal (preserves any state) and re-init.
+    if (footerPanel && !body.contains(footerPanel)) {
+        body.appendChild(footerPanel);
+    }
+    initDonatePanel(body.querySelector('.donate-panel'));
+    modal.classList.remove('hidden');
+    document.body.classList.add('modal-open');
+    if (source === 'auto') {
+        // Snooze auto-prompts for 30 days regardless of action.
+        const ms = DONATE_CONFIG.modalTrigger.snoozeDays * 24 * 60 * 60 * 1000;
+        localStorage.setItem('donatePromptSnoozedUntil', String(Date.now() + ms));
+    }
+}
+
+function closeDonateModal() {
+    const modal = document.getElementById('donate-modal');
+    const body = document.getElementById('donate-modal-body');
+    const footerSection = document.querySelector('#donate-section .donate-content');
+    const panel = body ? body.querySelector('.donate-panel') : null;
+    // Move the panel back to the footer so the page still has its persistent donate UI.
+    if (footerSection && panel) {
+        const note = footerSection.querySelector('.donate-note');
+        if (note) {
+            footerSection.insertBefore(panel, note);
+        } else {
+            footerSection.appendChild(panel);
+        }
+    }
+    if (modal) modal.classList.add('hidden');
+    document.body.classList.remove('modal-open');
+}
+
+// Make modal helpers globally reachable (called from inline onclick attrs).
+window.openDonateModal = openDonateModal;
+window.closeDonateModal = closeDonateModal;
+
+// ---- Banner dismiss ---------------------------------------------------------
+function dismissDonationBanner() {
+    const banner = document.getElementById('donation-banner');
+    if (banner) banner.classList.add('dismissed');
+    try {
+        const ms = 7 * 24 * 60 * 60 * 1000;
+        localStorage.setItem('donationBannerDismissedUntil', String(Date.now() + ms));
+    } catch (e) {}
+}
+window.dismissDonationBanner = dismissDonationBanner;
+
+function maybeHideBannerFromCookie() {
+    try {
+        const until = parseInt(localStorage.getItem('donationBannerDismissedUntil') || '0', 10);
+        if (until && Date.now() < until) {
+            const banner = document.getElementById('donation-banner');
+            if (banner) banner.classList.add('dismissed');
+        }
+    } catch (e) {}
+}
+
+// ---- Affiliate strip --------------------------------------------------------
+function renderAffiliateStrip(enabled) {
+    const section = document.getElementById('affiliate-section');
+    const strip = document.getElementById('affiliate-strip');
+    if (!section || !strip) return;
+    if (!enabled || !AFFILIATE_TAG || !AFFILIATE_ITEMS.length) {
+        section.style.display = 'none';
+        return;
+    }
+    section.style.display = '';
+    strip.innerHTML = '';
+    AFFILIATE_ITEMS.forEach(item => {
+        const a = document.createElement('a');
+        a.className = 'affiliate-card';
+        a.href = `https://www.amazon.com/dp/${encodeURIComponent(item.asin)}/?tag=${encodeURIComponent(AFFILIATE_TAG)}`;
+        a.target = '_blank';
+        a.rel = 'sponsored noopener noreferrer';
+        a.innerHTML = `
+            <img class="affiliate-card-cover" src="${escapeHtml(item.cover || '')}" alt="${escapeHtml(item.title)} cover" loading="lazy">
+            <h3 class="affiliate-card-title">${escapeHtml(item.title)}</h3>
+            <span class="affiliate-card-author">${escapeHtml(item.author || '')}</span>
+        `;
+        strip.appendChild(a);
+    });
+}
+
+// ---- Ads loader -------------------------------------------------------------
+let _adsLoaded = false;
+function loadAdNetwork(enabled) {
+    if (!enabled || _adsLoaded) {
+        document.querySelectorAll('.ad-slot').forEach(s => {
+            if (!enabled) s.style.display = 'none';
+        });
+        return;
+    }
+    if (AD_CONFIG.ezoicSiteId) {
+        const s = document.createElement('script');
+        s.async = true;
+        s.src = `//www.ezojs.com/ezoic/sa.min.js`;
+        s.onload = () => {
+            try {
+                window.ezstandalone = window.ezstandalone || {};
+                window.ezstandalone.cmd = window.ezstandalone.cmd || [];
+                window.ezstandalone.cmd.push(function () {
+                    window.ezstandalone.showAds && window.ezstandalone.showAds();
+                });
+            } catch (e) { console.warn('Ezoic init failed', e); }
+        };
+        document.head.appendChild(s);
+        _adsLoaded = true;
+        return;
+    }
+    if (AD_CONFIG.adsenseClientId) {
+        const s = document.createElement('script');
+        s.async = true;
+        s.crossOrigin = 'anonymous';
+        s.src = `https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=${encodeURIComponent(AD_CONFIG.adsenseClientId)}`;
+        document.head.appendChild(s);
+        _adsLoaded = true;
+        return;
+    }
+    // No network configured yet: keep dormant placeholders hidden.
+    document.querySelectorAll('.ad-slot').forEach(s => { s.style.display = 'none'; });
+}
+
+// ---- Top-level monetization init -------------------------------------------
+function initMonetization(opts) {
+    const adsEnabled = !!(opts && opts.adsEnabled);
+    const affiliateEnabled = !(opts && opts.affiliateEnabled === false);
+
+    initDonatePanel(document.querySelector('#donate-section .donate-panel'));
+    maybeHideBannerFromCookie();
+    renderAffiliateStrip(affiliateEnabled);
+    loadAdNetwork(adsEnabled);
+}

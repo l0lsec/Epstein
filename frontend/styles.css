@@ -3798,3 +3798,412 @@ a.modal-tab.doj-link {
     }
 }
 
+/* =============================================================================
+   Monetization: ad slots, multi-rail donate panel, donate modal, affiliate strip
+   ============================================================================= */
+
+/* Banner dismiss button */
+.banner-dismiss {
+    background: transparent;
+    border: none;
+    color: var(--text-secondary);
+    font-size: 1.4rem;
+    line-height: 1;
+    cursor: pointer;
+    padding: 0 var(--space-sm);
+    margin-left: var(--space-sm);
+    opacity: 0.6;
+    transition: opacity var(--transition-fast);
+}
+
+.banner-dismiss:hover {
+    opacity: 1;
+    color: var(--text-primary);
+}
+
+.donation-banner.dismissed {
+    display: none !important;
+}
+
+/* Ad slots: fixed minimum height to reserve space and prevent layout shift (CLS) */
+.ad-slot {
+    position: relative;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 100%;
+    max-width: 970px;
+    margin: var(--space-lg) auto;
+    background: var(--bg-secondary);
+    border: 1px dashed var(--border);
+    border-radius: 6px;
+    overflow: hidden;
+}
+
+.ad-slot.hidden,
+.ad-slot[hidden],
+body.modal-open .ad-slot {
+    display: none !important;
+}
+
+.ad-slot-leaderboard {
+    min-height: 90px;
+}
+
+.ad-slot-rectangle {
+    min-height: 250px;
+    max-width: 336px;
+}
+
+.ad-slot-label {
+    position: absolute;
+    top: 4px;
+    left: 8px;
+    font-size: 0.65rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--text-muted);
+    pointer-events: none;
+    opacity: 0.7;
+}
+
+/* When the ad network has filled the slot, hide the placeholder dashed border + label */
+.ad-slot.ad-filled {
+    background: transparent;
+    border: none;
+}
+
+.ad-slot.ad-filled .ad-slot-label {
+    display: none;
+}
+
+@media (max-width: 768px) {
+    .ad-slot-leaderboard {
+        min-height: 100px;
+    }
+    .ad-slot-rectangle {
+        min-height: 250px;
+    }
+}
+
+/* Multi-rail donate panel */
+.donate-panel {
+    margin: var(--space-lg) auto var(--space-md);
+    max-width: 520px;
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    overflow: hidden;
+    text-align: left;
+}
+
+.donate-tabs {
+    display: flex;
+    flex-wrap: wrap;
+    border-bottom: 1px solid var(--border);
+    background: var(--bg-secondary);
+}
+
+.donate-tab {
+    flex: 1 1 auto;
+    min-width: 70px;
+    padding: var(--space-sm) var(--space-md);
+    background: transparent;
+    color: var(--text-secondary);
+    border: none;
+    border-bottom: 2px solid transparent;
+    font-family: var(--font-body);
+    font-size: 0.9rem;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all var(--transition-fast);
+}
+
+.donate-tab:hover {
+    color: var(--text-primary);
+    background: var(--bg-tertiary);
+}
+
+.donate-tab.active {
+    color: var(--accent);
+    border-bottom-color: var(--accent);
+    background: var(--bg-tertiary);
+}
+
+.donate-tab-panel {
+    display: none;
+    padding: var(--space-lg);
+}
+
+.donate-tab-panel.active {
+    display: block;
+}
+
+.donate-panel-desc {
+    color: var(--text-secondary);
+    font-size: 0.9rem;
+    line-height: 1.5;
+    margin-bottom: var(--space-md);
+}
+
+.donate-panel-fineprint {
+    margin-top: var(--space-md);
+    font-size: 0.78rem;
+    color: var(--text-muted);
+    line-height: 1.45;
+}
+
+.donate-panel .donate-btn {
+    width: 100%;
+    justify-content: center;
+}
+
+/* Card amount grid (Stripe Payment Links) */
+.donate-amount-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: var(--space-sm);
+}
+
+.donate-amount-btn {
+    padding: var(--space-md) var(--space-sm);
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    font-family: var(--font-body);
+    font-size: 1rem;
+    font-weight: 600;
+    cursor: pointer;
+    text-decoration: none;
+    text-align: center;
+    transition: all var(--transition-fast);
+}
+
+.donate-amount-btn:hover {
+    border-color: var(--accent);
+    color: var(--accent);
+    transform: translateY(-1px);
+}
+
+.donate-amount-btn.custom {
+    grid-column: span 3;
+    background: var(--accent);
+    color: var(--bg-primary);
+    border-color: var(--accent);
+}
+
+.donate-amount-btn.custom:hover {
+    background: #ddb52e;
+    color: var(--bg-primary);
+}
+
+/* Crypto addresses */
+.crypto-btn {
+    background: linear-gradient(135deg, #002d74 0%, #0066cc 100%);
+    color: white;
+    margin-bottom: var(--space-md);
+}
+
+.crypto-btn:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 4px 12px rgba(0, 102, 204, 0.3);
+}
+
+.crypto-addresses {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-sm);
+}
+
+.crypto-address {
+    display: flex;
+    align-items: center;
+    gap: var(--space-sm);
+    padding: var(--space-sm) var(--space-md);
+    background: var(--bg-primary);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+}
+
+.crypto-address-coin {
+    flex: 0 0 auto;
+    font-weight: 700;
+    font-size: 0.85rem;
+    color: var(--accent);
+    min-width: 40px;
+}
+
+.crypto-address-value {
+    flex: 1 1 auto;
+    font-family: var(--font-mono, monospace);
+    font-size: 0.78rem;
+    color: var(--text-secondary);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.crypto-address-copy {
+    flex: 0 0 auto;
+    padding: 4px 10px;
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border);
+    color: var(--text-primary);
+    border-radius: 4px;
+    font-size: 0.75rem;
+    cursor: pointer;
+    transition: all var(--transition-fast);
+}
+
+.crypto-address-copy:hover {
+    border-color: var(--accent);
+    color: var(--accent);
+}
+
+.crypto-address-copy.copied {
+    background: var(--accent);
+    color: var(--bg-primary);
+    border-color: var(--accent);
+}
+
+/* GitHub Sponsors / Ko-fi buttons */
+.github-btn {
+    background: #24292e;
+    color: white;
+}
+
+.github-btn:hover {
+    background: #1b1f23;
+    transform: translateY(-2px);
+    box-shadow: 0 4px 12px rgba(36, 41, 46, 0.3);
+}
+
+.kofi-btn {
+    background: #ff5e5b;
+    color: white;
+}
+
+.kofi-btn:hover {
+    background: #e54e4b;
+    transform: translateY(-2px);
+    box-shadow: 0 4px 12px rgba(255, 94, 91, 0.3);
+}
+
+/* Donate modal */
+.donate-modal-content {
+    max-width: 560px;
+    width: 92%;
+}
+
+.donate-modal-content .modal-header {
+    padding: var(--space-xl) var(--space-xl) 0;
+    text-align: center;
+}
+
+.donate-modal-subtitle {
+    color: var(--text-secondary);
+    font-size: 0.95rem;
+    line-height: 1.6;
+    margin: var(--space-md) 0 0;
+}
+
+.donate-modal-body {
+    padding: var(--space-md) var(--space-xl) var(--space-xl);
+}
+
+.donate-modal-body .donate-panel {
+    margin-top: var(--space-md);
+}
+
+/* Affiliate strip */
+.affiliate-section {
+    margin-top: var(--space-2xl);
+}
+
+.affiliate-strip {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+    gap: var(--space-md);
+    margin: var(--space-lg) 0;
+}
+
+.affiliate-card {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-sm);
+    padding: var(--space-md);
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    text-decoration: none;
+    color: var(--text-primary);
+    transition: all var(--transition-fast);
+}
+
+.affiliate-card:hover {
+    border-color: var(--accent);
+    transform: translateY(-2px);
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
+}
+
+.affiliate-card-cover {
+    width: 100%;
+    aspect-ratio: 2 / 3;
+    background: var(--bg-primary);
+    border-radius: 4px;
+    object-fit: cover;
+    display: block;
+}
+
+.affiliate-card-title {
+    font-family: var(--font-display);
+    font-size: 0.95rem;
+    font-weight: 500;
+    color: var(--text-primary);
+    line-height: 1.3;
+    margin: 0;
+}
+
+.affiliate-card-author {
+    font-size: 0.8rem;
+    color: var(--text-muted);
+}
+
+.affiliate-disclosure {
+    font-size: 0.78rem;
+    color: var(--text-muted);
+    line-height: 1.5;
+    font-style: italic;
+    margin-top: var(--space-md);
+}
+
+@media (max-width: 768px) {
+    .donate-tabs {
+        flex-wrap: wrap;
+    }
+    .donate-tab {
+        flex: 1 1 33.333%;
+        font-size: 0.8rem;
+        padding: var(--space-sm);
+    }
+    .donate-amount-grid {
+        grid-template-columns: repeat(2, 1fr);
+    }
+    .donate-amount-btn.custom {
+        grid-column: span 2;
+    }
+    .crypto-address {
+        flex-wrap: wrap;
+    }
+    .crypto-address-value {
+        order: 3;
+        flex: 1 1 100%;
+        white-space: normal;
+        word-break: break-all;
+    }
+    .affiliate-strip {
+        grid-template-columns: repeat(2, 1fr);
+    }
+}
+

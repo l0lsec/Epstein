@@ -2624,6 +2624,8 @@ async function loadContentData() {
         loadStatusPageSettings(),
         loadAskAIStatus(),
         loadPinnedDocsStatus(),
+        loadAdsStatus(),
+        loadAffiliateStatus(),
         loadPinnedDocuments(),
         loadKeywords(),
         loadDojCompleteness(),
@@ -2924,6 +2926,102 @@ async function togglePinnedDocs(enabled) {
         alert('Error updating setting: ' + error.message);
         // Revert toggle
         const toggle = document.getElementById('pinned-docs-toggle');
+        if (toggle) toggle.checked = !enabled;
+    }
+}
+
+async function loadAdsStatus() {
+    try {
+        const response = await authFetch(`${window.location.origin}/api/admin/settings`);
+        if (!response.ok) throw new Error('Failed to load settings');
+        const settings = await response.json();
+
+        // Default OFF: only enable after an ad network is wired up in app.js AD_CONFIG.
+        const isEnabled = settings.ads_enabled === 'true';
+        const toggle = document.getElementById('ads-toggle');
+        const statusEl = document.getElementById('ads-status');
+
+        if (toggle) toggle.checked = isEnabled;
+        if (statusEl) {
+            statusEl.innerHTML = isEnabled
+                ? '<span style="color: var(--success);">✓ Display ads are currently <strong>enabled</strong> on the frontend</span>'
+                : '<span style="color: var(--text-muted);">Display ads are currently <strong>disabled</strong></span>';
+        }
+    } catch (error) {
+        console.error('Error loading Ads status:', error);
+        const statusEl = document.getElementById('ads-status');
+        if (statusEl) statusEl.innerHTML = '<span style="color: var(--danger);">Error loading status</span>';
+    }
+}
+
+async function toggleAds(enabled) {
+    try {
+        const response = await authFetch(`${window.location.origin}/api/admin/settings`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ key: 'ads_enabled', value: enabled ? 'true' : 'false' })
+        });
+
+        if (!response.ok) throw new Error('Failed to update setting');
+
+        const statusEl = document.getElementById('ads-status');
+        if (statusEl) {
+            statusEl.innerHTML = enabled
+                ? '<span style="color: var(--success);">✓ Display ads are now <strong>enabled</strong></span>'
+                : '<span style="color: var(--text-muted);">Display ads are now <strong>disabled</strong></span>';
+        }
+    } catch (error) {
+        console.error('Error toggling Ads:', error);
+        alert('Error updating setting: ' + error.message);
+        const toggle = document.getElementById('ads-toggle');
+        if (toggle) toggle.checked = !enabled;
+    }
+}
+
+async function loadAffiliateStatus() {
+    try {
+        const response = await authFetch(`${window.location.origin}/api/admin/settings`);
+        if (!response.ok) throw new Error('Failed to load settings');
+        const settings = await response.json();
+
+        // Default ON; strip stays hidden anyway until AFFILIATE_TAG is set in app.js.
+        const isEnabled = settings.affiliate_enabled !== 'false';
+        const toggle = document.getElementById('affiliate-toggle');
+        const statusEl = document.getElementById('affiliate-status');
+
+        if (toggle) toggle.checked = isEnabled;
+        if (statusEl) {
+            statusEl.innerHTML = isEnabled
+                ? '<span style="color: var(--success);">✓ Affiliate strip is currently <strong>visible</strong> (if a tag is configured)</span>'
+                : '<span style="color: var(--warning);">⚠️ Affiliate strip is currently <strong>hidden</strong> from the frontend</span>';
+        }
+    } catch (error) {
+        console.error('Error loading Affiliate status:', error);
+        const statusEl = document.getElementById('affiliate-status');
+        if (statusEl) statusEl.innerHTML = '<span style="color: var(--danger);">Error loading status</span>';
+    }
+}
+
+async function toggleAffiliate(enabled) {
+    try {
+        const response = await authFetch(`${window.location.origin}/api/admin/settings`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ key: 'affiliate_enabled', value: enabled ? 'true' : 'false' })
+        });
+
+        if (!response.ok) throw new Error('Failed to update setting');
+
+        const statusEl = document.getElementById('affiliate-status');
+        if (statusEl) {
+            statusEl.innerHTML = enabled
+                ? '<span style="color: var(--success);">✓ Affiliate strip is now <strong>visible</strong></span>'
+                : '<span style="color: var(--warning);">⚠️ Affiliate strip is now <strong>hidden</strong></span>';
+        }
+    } catch (error) {
+        console.error('Error toggling Affiliate:', error);
+        alert('Error updating setting: ' + error.message);
+        const toggle = document.getElementById('affiliate-toggle');
         if (toggle) toggle.checked = !enabled;
     }
 }

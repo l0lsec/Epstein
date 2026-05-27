@@ -1886,6 +1886,54 @@
                 </div>
             </div>
 
+            <!-- Display Ads Toggle -->
+            <div class="card" style="margin-bottom: var(--space-lg);">
+                <div class="card-header">
+                    <span class="card-title">💰 Display Ads</span>
+                </div>
+                <div class="card-body">
+                    <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: var(--space-md);">
+                        <div>
+                            <p style="margin-bottom: var(--space-xs); font-weight: 500;">Enable Display Ads</p>
+                            <p style="font-size: 0.85rem; color: var(--text-muted);">
+                                Show ad-network ads (Ezoic / AdSense) on search, browse, about, and Ask AI pages. Ads are never shown inside the document modal. Keep OFF until a network is configured in <code>app.js</code> <code>AD_CONFIG</code>.
+                            </p>
+                        </div>
+                        <label class="toggle-switch">
+                            <input type="checkbox" id="ads-toggle" onchange="toggleAds(this.checked)">
+                            <span class="toggle-slider"></span>
+                        </label>
+                    </div>
+                    <div id="ads-status" style="padding: var(--space-sm) var(--space-md); background: var(--bg-tertiary); border-radius: 6px; font-size: 0.85rem;">
+                        Loading status...
+                    </div>
+                </div>
+            </div>
+
+            <!-- Affiliate Links Toggle -->
+            <div class="card" style="margin-bottom: var(--space-lg);">
+                <div class="card-header">
+                    <span class="card-title">📚 Affiliate Links (Further Reading)</span>
+                </div>
+                <div class="card-body">
+                    <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: var(--space-md);">
+                        <div>
+                            <p style="margin-bottom: var(--space-xs); font-weight: 500;">Enable Amazon Associates Strip</p>
+                            <p style="font-size: 0.85rem; color: var(--text-muted);">
+                                Show the "Further Reading" book strip in the About page. Items + tag are configured in <code>app.js</code> <code>AFFILIATE_ITEMS</code> / <code>AFFILIATE_TAG</code>. Strip stays hidden until a tag is set.
+                            </p>
+                        </div>
+                        <label class="toggle-switch">
+                            <input type="checkbox" id="affiliate-toggle" onchange="toggleAffiliate(this.checked)">
+                            <span class="toggle-slider"></span>
+                        </label>
+                    </div>
+                    <div id="affiliate-status" style="padding: var(--space-sm) var(--space-md); background: var(--bg-tertiary); border-radius: 6px; font-size: 0.85rem;">
+                        Loading status...
+                    </div>
+                </div>
+            </div>
+
             <!-- Pinned Documents Toggle -->
             <div class="card" style="margin-bottom: var(--space-lg);">
                 <div class="card-header">
@@ -2482,7 +2530,7 @@
         </div>
     </main>
 
-    <script src="/static/admin.js?v=20"></script>
+    <script src="/static/admin.js?v=21"></script>
 </body>
 </html>
 

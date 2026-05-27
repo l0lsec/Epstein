@@ -1045,6 +1045,10 @@ def _build_and_cache_bootstrap() -> dict:
     public_settings = {
         "ask_ai_enabled": settings.get("ask_ai_enabled", "true") == "true",
         "pinned_documents_enabled": settings.get("pinned_documents_enabled", "true") == "true",
+        # Default OFF for ads: only flips on after an ad network is wired up in app.js AD_CONFIG.
+        "ads_enabled": settings.get("ads_enabled", "false") == "true",
+        # Default ON: the Amazon Associates strip stays hidden anyway until a tag is configured in app.js.
+        "affiliate_enabled": settings.get("affiliate_enabled", "true") == "true",
     }
 
     browse_limit = 24
@@ -3484,7 +3488,9 @@ async def get_public_settings():
     # Only expose certain settings to the public
     public_settings = {
         "ask_ai_enabled": settings.get("ask_ai_enabled", "true") == "true",
-        "pinned_documents_enabled": settings.get("pinned_documents_enabled", "true") == "true"
+        "pinned_documents_enabled": settings.get("pinned_documents_enabled", "true") == "true",
+        "ads_enabled": settings.get("ads_enabled", "false") == "true",
+        "affiliate_enabled": settings.get("affiliate_enabled", "true") == "true",
     }
     
     return public_settings

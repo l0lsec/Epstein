@@ -37,7 +37,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Crimson+Pro:wght@400;500;600&family=JetBrains+Mono:wght@400;500&family=Source+Sans+3:wght@300;400;500;600;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="/static/styles.css?v=50">
+    <link rel="stylesheet" href="/static/styles.css?v=51">
     
     <!-- Structured Data (JSON-LD) -->
     <script type="application/ld+json">
@@ -102,10 +102,10 @@
         </div>
     </header>
 
-    <div class="donation-banner">
-        
-        <span class="banner-text">💛 Support this project! Your donation helps keep this archive accessible to everyone. 💛</span>
-        <a href="https://www.paypal.com/donate/?business=KRYTAPVDR46SY&no_recurring=0&item_name=Your+support+helps+cover+server+costs+and+keeps+this+information+freely+accessible+to+researchers%2C+journalists%2C+and+the+public.&currency_code=USD" class="banner-btn" target="_blank" rel="noopener noreferrer">Donate Now</a>
+    <div class="donation-banner" id="donation-banner">
+        <span class="banner-text">Server costs are growing with the archive. If this site has helped you, a small donation keeps it free and online.</span>
+        <button type="button" class="banner-btn" onclick="openDonateModal('banner')">Support the Archive</button>
+        <button type="button" class="banner-dismiss" onclick="dismissDonationBanner()" aria-label="Dismiss banner">&times;</button>
     </div>
 
     <main class="main">
@@ -268,6 +268,10 @@
                 </div>
             </div>
             
+            <div class="ad-slot ad-slot-leaderboard" id="ad-slot-search-top" data-ad-slot="search-top" aria-hidden="true">
+                <span class="ad-slot-label">Advertisement</span>
+            </div>
+
             <div id="search-results" class="results-container hidden">
                 <div class="results-header">
                     <h2 class="results-title">Results</h2>
@@ -385,6 +389,10 @@
                 </div>
             </div>
             
+            <div class="ad-slot ad-slot-leaderboard" id="ad-slot-browse-top" data-ad-slot="browse-top" aria-hidden="true">
+                <span class="ad-slot-label">Advertisement</span>
+            </div>
+
             <div id="documents-grid" class="documents-grid"></div>
             
             <div class="pagination">
@@ -434,6 +442,10 @@
                     </div>
                 </div>
                 
+                <div class="ad-slot ad-slot-rectangle" id="ad-slot-ask-bottom" data-ad-slot="ask-bottom" aria-hidden="true">
+                    <span class="ad-slot-label">Advertisement</span>
+                </div>
+
                 <div class="example-questions">
                     <h4>Example Questions</h4>
                     <div class="example-grid">
@@ -521,6 +533,19 @@
                     <p>This platform does not endorse or promote any narrative, theory, or interpretation. It exists solely to make public records searchable, verifiable, and preserved exactly as released.</p>
                 </div>
                 
+                <div class="about-section affiliate-section" id="affiliate-section" style="display:none;">
+                    <h2>Further Reading</h2>
+                    <p>Books, documentaries, and longform investigations that go deeper than the primary-source documents alone.</p>
+                    <div class="affiliate-strip" id="affiliate-strip">
+                        <!-- Populated by app.js from AFFILIATE_ITEMS -->
+                    </div>
+                    <p class="affiliate-disclosure">As an Amazon Associate, this site earns from qualifying purchases. Affiliate revenue helps cover server costs and does not influence what documents are surfaced.</p>
+                </div>
+
+                <div class="ad-slot ad-slot-rectangle" id="ad-slot-about" data-ad-slot="about" aria-hidden="true">
+                    <span class="ad-slot-label">Advertisement</span>
+                </div>
+
                 <div class="about-section creator">
                     <h2>Created By</h2>
                     <p><strong>Sedric Louissaint,</strong> a cybersecurity geek, penetration tester, and professional mixed martial artist.</p>
@@ -726,6 +751,21 @@
                 </div>
             </div>
         </div>
+
+        <!-- Donate Modal -->
+        <div id="donate-modal" class="modal hidden">
+            <div class="modal-backdrop" onclick="closeDonateModal()"></div>
+            <div class="modal-content donate-modal-content">
+                <button class="modal-close" onclick="closeDonateModal()" aria-label="Close">&times;</button>
+                <div class="modal-header">
+                    <h2 id="donate-modal-title">Help Keep the Archive Free</h2>
+                    <p id="donate-modal-subtitle" class="donate-modal-subtitle">You&rsquo;ve been digging through the documents &mdash; thank you. The server bill grows with the archive. A small donation keeps this online and ad-light for everyone.</p>
+                </div>
+                <div id="donate-modal-body" class="donate-modal-body">
+                    <!-- The donate-panel from the footer is moved here when the modal opens -->
+                </div>
+            </div>
+        </div>
     </main>
 
     <footer class="footer">
@@ -734,21 +774,70 @@
                 <div class="donate-content">
                     <h3>Support This Project</h3>
                     <p>This archive is maintained through public donations. Your support helps cover server costs and keeps this information freely accessible.</p>
-                    <div class="donate-buttons">
-                        <form action="https://www.paypal.com/donate" method="post" target="_blank">
-                            <input type="hidden" name="business" value="KRYTAPVDR46SY" />
-                            <input type="hidden" name="no_recurring" value="0" />
-                            <input type="hidden" name="item_name" value="Your support helps cover server costs and keeps this information freely accessible to researchers, journalists, and the public." />
-                            <input type="hidden" name="currency_code" value="USD" />
-                            <button type="submit" class="donate-btn paypal-btn">
-                                <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor">
-                                    <path d="M7.076 21.337H2.47a.641.641 0 0 1-.633-.74L4.944 3.384a.769.769 0 0 1 .759-.645h6.393c2.117 0 3.59.478 4.375 1.42.737.885.987 2.168.74 3.803-.302 2.008-.987 3.57-2.041 4.65-1.106 1.133-2.686 1.708-4.7 1.708h-2.32a.769.769 0 0 0-.76.646l-.74 4.742a.641.641 0 0 1-.633.629h-.94z"/>
-                                </svg>
-                                Donate with PayPal
-                            </button>
-                        </form>
+
+                    <div class="donate-panel" id="donate-panel">
+                        <div class="donate-tabs" role="tablist">
+                            <button type="button" class="donate-tab active" data-donate-tab="paypal" role="tab" aria-selected="true">PayPal</button>
+                            <button type="button" class="donate-tab" data-donate-tab="card" role="tab" aria-selected="false">Card</button>
+                            <button type="button" class="donate-tab" data-donate-tab="crypto" role="tab" aria-selected="false">Crypto</button>
+                            <button type="button" class="donate-tab" data-donate-tab="github" role="tab" aria-selected="false">GitHub</button>
+                            <button type="button" class="donate-tab" data-donate-tab="kofi" role="tab" aria-selected="false">Ko-fi</button>
+                        </div>
+
+                        <div class="donate-tab-panel active" data-donate-panel="paypal">
+                            <p class="donate-panel-desc">One-time or recurring donations via PayPal. No PayPal account required &mdash; debit/credit cards accepted on the PayPal page.</p>
+                            <form action="https://www.paypal.com/donate" method="post" target="_blank" rel="noopener noreferrer">
+                                <input type="hidden" name="business" value="KRYTAPVDR46SY" />
+                                <input type="hidden" name="no_recurring" value="0" />
+                                <input type="hidden" name="item_name" value="Your support helps cover server costs and keeps this information freely accessible to researchers, journalists, and the public." />
+                                <input type="hidden" name="currency_code" value="USD" />
+                                <button type="submit" class="donate-btn paypal-btn">
+                                    <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor">
+                                        <path d="M7.076 21.337H2.47a.641.641 0 0 1-.633-.74L4.944 3.384a.769.769 0 0 1 .759-.645h6.393c2.117 0 3.59.478 4.375 1.42.737.885.987 2.168.74 3.803-.302 2.008-.987 3.57-2.041 4.65-1.106 1.133-2.686 1.708-4.7 1.708h-2.32a.769.769 0 0 0-.76.646l-.74 4.742a.641.641 0 0 1-.633.629h-.94z"/>
+                                    </svg>
+                                    Donate with PayPal
+                                </button>
+                            </form>
+                        </div>
+
+                        <div class="donate-tab-panel" data-donate-panel="card">
+                            <p class="donate-panel-desc">Pay with any debit or credit card via Stripe. Pick an amount below.</p>
+                            <div class="donate-amount-grid" id="stripe-amount-grid">
+                                <!-- Populated by app.js with links from DONATE_CONFIG.stripe -->
+                            </div>
+                            <p class="donate-panel-fineprint" id="stripe-fineprint" style="display:none;">Card payments not configured yet.</p>
+                        </div>
+
+                        <div class="donate-tab-panel" data-donate-panel="crypto">
+                            <p class="donate-panel-desc">Pay with crypto via Crypto.com Pay, or send directly to one of the wallets below.</p>
+                            <a id="crypto-pay-link" class="donate-btn crypto-btn" href="#" target="_blank" rel="noopener noreferrer" style="display:none;">
+                                <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M12 0 2 6v12l10 6 10-6V6L12 0zm0 2.31 7.92 4.75L12 11.81 4.08 7.06 12 2.31zM4 8.69l7 4.2v8.2l-7-4.2v-8.2zm9 12.4v-8.2l7-4.2v8.2l-7 4.2z"/></svg>
+                                Pay with Crypto.com
+                            </a>
+                            <div class="crypto-addresses" id="crypto-addresses">
+                                <!-- Populated by app.js from DONATE_CONFIG.crypto -->
+                            </div>
+                            <p class="donate-panel-fineprint">Send only the matching coin to each address. Wrong-chain transfers cannot be recovered.</p>
+                        </div>
+
+                        <div class="donate-tab-panel" data-donate-panel="github">
+                            <p class="donate-panel-desc">For developers, journalists, and researchers who use the open-source code. Recurring monthly tiers available.</p>
+                            <a id="github-sponsors-link" class="donate-btn github-btn" href="https://github.com/sponsors/l0lsec" target="_blank" rel="noopener noreferrer">
+                                <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M12 .297c-6.63 0-12 5.373-12 12 0 5.303 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61C4.422 18.07 3.633 17.7 3.633 17.7c-1.087-.744.084-.729.084-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.399 3-.405 1.02.006 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 22.092 24 17.592 24 12.297c0-6.627-5.373-12-12-12"/></svg>
+                                Sponsor on GitHub
+                            </a>
+                        </div>
+
+                        <div class="donate-tab-panel" data-donate-panel="kofi">
+                            <p class="donate-panel-desc">Buy us a coffee &mdash; the fastest way to make a one-time donation.</p>
+                            <a id="kofi-link" class="donate-btn kofi-btn" href="#" target="_blank" rel="noopener noreferrer" style="display:none;">
+                                <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M23.881 8.948c-.773-4.085-4.859-4.593-4.859-4.593H.723c-.604 0-.679.798-.679.798s-.082 7.324-.022 11.822c.164 2.424 2.586 2.672 2.586 2.672s8.267-.023 11.966-.049c2.438-.426 2.683-2.566 2.658-3.734 4.352.24 7.422-2.831 6.649-6.916zm-11.062 3.511c-1.246 1.453-4.011 3.976-4.011 3.976s-.121.119-.31.023c-.076-.057-.108-.09-.108-.09-.443-.441-3.368-3.049-4.034-3.954-.709-.965-1.041-2.7-.091-3.71.951-1.01 3.005-1.086 4.363.407 0 0 1.565-1.782 3.468-.963 1.904.82 1.832 3.011.723 4.311zm6.173.478c-.928.116-1.682.028-1.682.028V7.284h1.77s1.971.551 1.971 2.638c0 1.913-.985 2.667-2.059 3.015z"/></svg>
+                                Support on Ko-fi
+                            </a>
+                        </div>
                     </div>
-                    <p class="donate-note">Thank you for supporting transparency.</p>
+
+                    <p class="donate-note">Thank you for supporting transparency. Donations are not tax-deductible.</p>
                 </div>
             </div>
             
@@ -796,7 +885,7 @@
     </footer>
 
     <script src="https://www.google.com/recaptcha/api.js?render=6Lf9EDYsAAAAANDlA_xYFIM7Ylccgmc24LhZgDIr" async defer onerror="window.__recaptchaFailed=true"></script>
-    <script src="/static/app.js?v=43"></script></invoke>
+    <script src="/static/app.js?v=44"></script>
 </body>
 </html>
 
