@@ -3825,65 +3825,19 @@ a.modal-tab.doj-link {
     display: none !important;
 }
 
-/* Ad slots: fixed minimum height to reserve space and prevent layout shift (CLS) */
+/* Ad slots: per Ezoic guidance, the placeholder div must have NO styling and
+   NO reserved space (reserving height can leave empty white boxes when an ad
+   doesn't fill). We only center the wrapper and add vertical breathing room. */
 .ad-slot {
-    position: relative;
-    display: flex;
-    align-items: center;
-    justify-content: center;
     width: 100%;
-    max-width: 970px;
     margin: var(--space-lg) auto;
-    background: var(--bg-secondary);
-    border: 1px dashed var(--border);
-    border-radius: 6px;
-    overflow: hidden;
+    text-align: center;
 }
 
 .ad-slot.hidden,
 .ad-slot[hidden],
 body.modal-open .ad-slot {
     display: none !important;
-}
-
-.ad-slot-leaderboard {
-    min-height: 90px;
-}
-
-.ad-slot-rectangle {
-    min-height: 250px;
-    max-width: 336px;
-}
-
-.ad-slot-label {
-    position: absolute;
-    top: 4px;
-    left: 8px;
-    font-size: 0.65rem;
-    text-transform: uppercase;
-    letter-spacing: 0.08em;
-    color: var(--text-muted);
-    pointer-events: none;
-    opacity: 0.7;
-}
-
-/* When the ad network has filled the slot, hide the placeholder dashed border + label */
-.ad-slot.ad-filled {
-    background: transparent;
-    border: none;
-}
-
-.ad-slot.ad-filled .ad-slot-label {
-    display: none;
-}
-
-@media (max-width: 768px) {
-    .ad-slot-leaderboard {
-        min-height: 100px;
-    }
-    .ad-slot-rectangle {
-        min-height: 250px;
-    }
 }
 
 /* Multi-rail donate panel */

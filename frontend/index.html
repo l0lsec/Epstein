@@ -37,8 +37,16 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Crimson+Pro:wght@400;500;600&family=JetBrains+Mono:wght@400;500&family=Source+Sans+3:wght@300;400;500;600;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="/static/styles.css?v=51">
-    
+    <link rel="stylesheet" href="/static/styles.css?v=52">
+
+    <!-- Ezoic header scripts (EzoicAds JavaScript integration) -->
+    <script async src="//www.ezojs.com/ezoic/sa.min.js"></script>
+    <script>
+        window.ezstandalone = window.ezstandalone || {};
+        ezstandalone.cmd = ezstandalone.cmd || [];
+    </script>
+    <script src="//ezoicanalytics.com/analytics.js"></script>
+
     <!-- Structured Data (JSON-LD) -->
     <script type="application/ld+json">
     {
@@ -268,9 +276,7 @@
                 </div>
             </div>
             
-            <div class="ad-slot ad-slot-leaderboard" id="ad-slot-search-top" data-ad-slot="search-top" aria-hidden="true">
-                <span class="ad-slot-label">Advertisement</span>
-            </div>
+            <div class="ad-slot ad-slot-leaderboard" id="ad-slot-search-top" data-ad-slot="search-top" aria-hidden="true"></div>
 
             <div id="search-results" class="results-container hidden">
                 <div class="results-header">
@@ -389,9 +395,7 @@
                 </div>
             </div>
             
-            <div class="ad-slot ad-slot-leaderboard" id="ad-slot-browse-top" data-ad-slot="browse-top" aria-hidden="true">
-                <span class="ad-slot-label">Advertisement</span>
-            </div>
+            <div class="ad-slot ad-slot-leaderboard" id="ad-slot-browse-top" data-ad-slot="browse-top" aria-hidden="true"></div>
 
             <div id="documents-grid" class="documents-grid"></div>
             
@@ -442,9 +446,7 @@
                     </div>
                 </div>
                 
-                <div class="ad-slot ad-slot-rectangle" id="ad-slot-ask-bottom" data-ad-slot="ask-bottom" aria-hidden="true">
-                    <span class="ad-slot-label">Advertisement</span>
-                </div>
+                <div class="ad-slot ad-slot-rectangle" id="ad-slot-ask-bottom" data-ad-slot="ask-bottom" aria-hidden="true"></div>
 
                 <div class="example-questions">
                     <h4>Example Questions</h4>
@@ -542,9 +544,7 @@
                     <p class="affiliate-disclosure">As an Amazon Associate, this site earns from qualifying purchases. Affiliate revenue helps cover server costs and does not influence what documents are surfaced.</p>
                 </div>
 
-                <div class="ad-slot ad-slot-rectangle" id="ad-slot-about" data-ad-slot="about" aria-hidden="true">
-                    <span class="ad-slot-label">Advertisement</span>
-                </div>
+                <div class="ad-slot ad-slot-rectangle" id="ad-slot-about" data-ad-slot="about" aria-hidden="true"></div>
 
                 <div class="about-section creator">
                     <h2>Created By</h2>
@@ -885,7 +885,7 @@
     </footer>
 
     <script src="https://www.google.com/recaptcha/api.js?render=6Lf9EDYsAAAAANDlA_xYFIM7Ylccgmc24LhZgDIr" async defer onerror="window.__recaptchaFailed=true"></script>
-    <script src="/static/app.js?v=44"></script>
+    <script src="/static/app.js?v=45"></script>
 </body>
 </html>
 

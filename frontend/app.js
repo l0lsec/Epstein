@@ -2982,21 +2982,22 @@ function escapeCSVField(field) {
 const DONATE_CONFIG = {
     stripe: {
         // null = button disabled; replace with full Payment Link URLs to enable.
-        amount5:  null, // e.g. "https://buy.stripe.com/test_abc..."
-        amount10: null,
-        amount25: null,
-        amount50: null,
-        custom:   null  // a "name your price" Payment Link
+        amount5:  "https://buy.stripe.com/14AaERcSF7h17VZd8McjS00", // e.g. "https://buy.stripe.com/test_abc..."
+        amount10: "https://buy.stripe.com/bJe3cpdWJdFp0txc4IcjS01",
+        amount25: "https://buy.stripe.com/00wbIVdWJ6cX2BFfgUcjS02",
+        amount50: "https://buy.stripe.com/14AaER8Cpatd1xBgkYcjS03",
+        custom:   "https://buy.stripe.com/dRm4gt05T7h12BF6KocjS04"  // a "name your price" Payment Link
     },
     crypto: {
         // Hosted Crypto.com Pay checkout link (single button). Leave null to hide.
         cryptoComPayUrl: null,
         // Manual wallet addresses fallback. Empty array hides the section.
         wallets: [
-            // { coin: "BTC",  address: "bc1q..." },
-            // { coin: "ETH",  address: "0x..." },
-            // { coin: "USDC", address: "0x..." },
-            // { coin: "SOL",  address: "..." }
+             { coin: "BTC",  address: "3L4b2tzZbt1mwY2bHJLBTKWjMRYuFQddLj" },
+             { coin: "ETH",  address: "0x62c2e5a1d1B39C6a9C9565170eEc1c8027f8F24c" },
+             { coin: "USDC", address: "0x62c2e5a1d1B39C6a9C9565170eEc1c8027f8F24c" },
+             { coin: "LTC", address: "M9vxo2iRjALXa8fXphRrgXeJwXwPZN48Hp" },
+             { coin: "SOL",  address: "FwoPX5TJwmnN6VMbukd5vpecH3TvggEmkcWDPFiHHwjQ" }
         ]
     },
     github: {
@@ -3004,7 +3005,7 @@ const DONATE_CONFIG = {
         sponsorsUrl: "https://github.com/sponsors/l0lsec"
     },
     kofi: {
-        url: null // e.g. "https://ko-fi.com/yourhandle"
+        url: "https://ko-fi.com/epsteinfta" // e.g. "https://ko-fi.com/yourhandle"
     },
     // Trigger the donate modal once after this many document opens, then snooze 30 days.
     modalTrigger: {
@@ -3013,12 +3014,24 @@ const DONATE_CONFIG = {
     }
 };
 
-// Ad network configuration. Until one of these is filled in, ad slots stay as
-// dormant placeholders (hidden via the admin "ads_enabled" toggle anyway).
+// Ad network configuration. The Ezoic header scripts load statically from
+// index.html <head>; this only controls which placeholders get ads rendered.
+// Fill in each numeric placement ID from your Ezoic dashboard
+// (Ad Placements -> create placement -> copy the numeric ID). Slots with a
+// null ID are skipped. Until at least one ID is set, no ads render even when
+// the admin "ads_enabled" toggle is on.
 const AD_CONFIG = {
-    // Ezoic site id (numeric). When set + ads_enabled, the Ezoic loader is injected.
-    ezoicSiteId: null,
-    // AdSense client id (e.g. "ca-pub-1234567890123456"). Used as fallback if no Ezoic id.
+    ezoic: {
+        enabled: true,
+        placeholders: {
+            'search-top': null,   // e.g. 101 -> #ad-slot-search-top
+            'browse-top': null,   // e.g. 102 -> #ad-slot-browse-top
+            'ask-bottom': null,   // e.g. 103 -> #ad-slot-ask-bottom
+            'about':      null    // e.g. 104 -> #ad-slot-about
+        }
+    },
+    // AdSense client id (e.g. "ca-pub-1234567890123456"). Untouched fallback
+    // used only when Ezoic is disabled / has no placeholder IDs.
     adsenseClientId: null
 };
 
@@ -3315,31 +3328,53 @@ function renderAffiliateStrip(enabled) {
 }
 
 // ---- Ads loader -------------------------------------------------------------
+// The Ezoic header scripts (sa.min.js / analytics.js) load statically from the
+// page <head>. This only renders ads into the slots that have a dashboard ID.
 let _adsLoaded = false;
+function hideAllAdSlots() {
+    document.querySelectorAll('.ad-slot').forEach(s => { s.style.display = 'none'; });
+}
 function loadAdNetwork(enabled) {
     if (!enabled || _adsLoaded) {
-        document.querySelectorAll('.ad-slot').forEach(s => {
-            if (!enabled) s.style.display = 'none';
-        });
+        if (!enabled) hideAllAdSlots();
         return;
     }
-    if (AD_CONFIG.ezoicSiteId) {
-        const s = document.createElement('script');
-        s.async = true;
-        s.src = `//www.ezojs.com/ezoic/sa.min.js`;
-        s.onload = () => {
+
+    const ezoic = AD_CONFIG.ezoic || {};
+    const placeholderMap = ezoic.placeholders || {};
+
+    if (ezoic.enabled) {
+        // Inject a bare Ezoic placeholder div into each known slot that has an ID.
+        // Per Ezoic docs, the placeholder div must have NO styling of its own.
+        const ids = [];
+        document.querySelectorAll('.ad-slot[data-ad-slot]').forEach(slot => {
+            const key = slot.dataset.adSlot;
+            const id = placeholderMap[key];
+            if (!id) {
+                slot.style.display = 'none';
+                return;
+            }
+            const phId = `ezoic-pub-ad-placeholder-${id}`;
+            if (!document.getElementById(phId)) {
+                const ph = document.createElement('div');
+                ph.id = phId;
+                slot.appendChild(ph);
+            }
+            ids.push(id);
+        });
+
+        if (ids.length && window.ezstandalone) {
             try {
-                window.ezstandalone = window.ezstandalone || {};
                 window.ezstandalone.cmd = window.ezstandalone.cmd || [];
                 window.ezstandalone.cmd.push(function () {
-                    window.ezstandalone.showAds && window.ezstandalone.showAds();
+                    window.ezstandalone.showAds && window.ezstandalone.showAds(...ids);
                 });
-            } catch (e) { console.warn('Ezoic init failed', e); }
-        };
-        document.head.appendChild(s);
-        _adsLoaded = true;
+                _adsLoaded = true;
+            } catch (e) { console.warn('Ezoic showAds failed', e); }
+        }
         return;
     }
+
     if (AD_CONFIG.adsenseClientId) {
         const s = document.createElement('script');
         s.async = true;
@@ -3349,8 +3384,9 @@ function loadAdNetwork(enabled) {
         _adsLoaded = true;
         return;
     }
+
     // No network configured yet: keep dormant placeholders hidden.
-    document.querySelectorAll('.ad-slot').forEach(s => { s.style.display = 'none'; });
+    hideAllAdSlots();
 }
 
 // ---- Top-level monetization init -------------------------------------------

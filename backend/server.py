@@ -879,6 +879,24 @@ async def sitemap_xml():
     return FileResponse(sitemap_path, status_code=404)
 
 
+@app.get("/ads.txt")
+async def ads_txt():
+    """Serve ads.txt for ad-network (Ezoic) authorization.
+
+    Ezoic's "Ads.txt Manager" approach is preferred: set ADS_TXT_REDIRECT_URL
+    to your managed URL (e.g. https://srv.adstxtmanager.com/XXXXX/epsteinfta.com)
+    and we 301 to it so Ezoic can keep the authorized-seller list current.
+    Falls back to a static frontend/ads.txt for the manual line-list approach.
+    """
+    redirect_url = os.getenv("ADS_TXT_REDIRECT_URL", "").strip()
+    if redirect_url:
+        return RedirectResponse(url=redirect_url, status_code=301)
+    ads_path = STATIC_PATH / "ads.txt"
+    if ads_path.exists():
+        return FileResponse(ads_path, media_type="text/plain")
+    return Response(status_code=404)
+
+
 def get_maintenance_status_data() -> dict:
     """Helper function to get current maintenance status data.
     
