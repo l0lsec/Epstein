@@ -879,7 +879,7 @@ async def sitemap_xml():
     return FileResponse(sitemap_path, status_code=404)
 
 
-@app.get("/ads.txt")
+@app.api_route("/ads.txt", methods=["GET", "HEAD"])
 async def ads_txt():
     """Serve ads.txt for ad-network (Ezoic) authorization.
 
