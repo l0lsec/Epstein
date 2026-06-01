@@ -1401,6 +1401,14 @@ body {
     color: var(--text-secondary);
 }
 
+.browse-logo {
+    display: block;
+    width: 140px;
+    height: auto;
+    margin: var(--space-lg) auto 0 auto;
+    border-radius: 12px;
+}
+
 .browse-filters {
     display: flex;
     flex-wrap: wrap;
@@ -3045,6 +3053,14 @@ a.modal-tab.doj-link {
     max-width: 600px;
     margin: 0 auto;
     text-align: center;
+}
+
+.footer-logo {
+    display: block;
+    width: 96px;
+    height: auto;
+    margin: 0 auto var(--space-md) auto;
+    border-radius: 10px;
 }
 
 .donate-content h3 {
