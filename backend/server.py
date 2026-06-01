@@ -37,36 +37,6 @@ from security_logger import (
 import httpx
 
 
-# Allowed referers for document downloads (anti-scraping)
-# Includes: own domain, localhost, social media in-app browsers, ChatGPT
-ALLOWED_REFERERS = os.getenv(
-    "ALLOWED_REFERERS", 
-    ",".join([
-        # Own domain
-        "https://epsteinfta.com",
-        "https://www.epsteinfta.com",
-        "http://localhost",
-        # Social media (in-app browsers)
-        "https://www.facebook.com",
-        "https://m.facebook.com",
-        "https://l.facebook.com",
-        "https://lm.facebook.com",
-        "https://twitter.com",
-        "https://x.com",
-        "https://t.co",
-        "https://www.instagram.com",
-        "https://l.instagram.com",
-        "https://www.linkedin.com",
-        "https://www.reddit.com",
-        "https://old.reddit.com",
-        "https://www.tiktok.com",
-        # ChatGPT / OpenAI
-        "https://chat.openai.com",
-        "https://chatgpt.com",
-    ])
-).split(",")
-
-
 # IP Geolocation cache and helper
 _ip_geo_cache = {}
 
@@ -1844,26 +1814,6 @@ async def get_document_file(doc_id: str, request: Request):
     """
     client_ip, request_id = get_client_info(request)
     
-    # Referer validation - redirect direct API access to main site
-    referer = request.headers.get("referer", "")
-    if not any(referer.startswith(allowed) for allowed in ALLOWED_REFERERS):
-        # Log with full referer for triage - helps identify legitimate referers to add
-        security_logger.log_security_event(
-            event_type="referer_redirect",
-            severity="medium",
-            client_ip=client_ip,
-            message=f"Document access redirected - referer not in allowlist",
-            request_id=request_id,
-            document_id=doc_id,
-            referer=referer[:200] if referer else "EMPTY",
-            user_agent=request.headers.get("user-agent", "")[:200]
-        )
-        # Redirect to main site with document context
-        return RedirectResponse(
-            url=f"https://epsteinfta.com/?doc={doc_id}",
-            status_code=302
-        )
-    
     if not db:
         raise HTTPException(status_code=503, detail="Database not initialized")
     
@@ -2157,9 +2107,6 @@ async def get_document_thumbnail(doc_id: str, request: Request):
         return FileResponse(
             path=thumbnail_path,
             media_type="image/jpeg",
-            headers={
-                'Cache-Control': 'public, max-age=86400',  # Cache for 24 hours
-            }
         )
     
     doc = await asyncio.to_thread(db.get_document, doc_id, include_hidden=False, include_full_text=False)
@@ -2187,9 +2134,6 @@ async def get_document_thumbnail(doc_id: str, request: Request):
         return FileResponse(
             path=thumbnail_path,
             media_type="image/jpeg",
-            headers={
-                'Cache-Control': 'public, max-age=86400',  # Cache for 24 hours
-            }
         )
     
     raise HTTPException(status_code=404, detail="Could not generate thumbnail")
