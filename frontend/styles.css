@@ -3285,6 +3285,47 @@ a.modal-tab.doj-link {
     font-size: 0.85rem;
 }
 
+.footer-links {
+    margin-top: var(--space-sm);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: var(--space-sm);
+}
+
+.footer-link {
+    color: var(--text-secondary);
+    text-decoration: none;
+    cursor: pointer;
+    transition: color var(--transition-fast);
+}
+
+.footer-link:hover {
+    color: var(--accent);
+}
+
+.footer-link-sep {
+    color: var(--text-muted);
+}
+
+.privacy-updated {
+    color: var(--text-muted);
+    margin-bottom: var(--space-lg);
+}
+
+.about-logo {
+    display: flex;
+    justify-content: center;
+    margin: var(--space-lg) 0 var(--space-2xl);
+}
+
+.about-logo img {
+    width: 280px;
+    max-width: 70%;
+    height: auto;
+    border-radius: 12px;
+}
+
 .footer a {
     color: var(--accent);
     text-decoration: none;

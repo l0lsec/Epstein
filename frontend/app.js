@@ -758,6 +758,7 @@ function switchView(viewName) {
         loadDocuments();
     }
 }
+window.switchView = switchView;
 
 async function loadStats() {
     try {
