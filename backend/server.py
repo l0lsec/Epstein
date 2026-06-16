@@ -76,6 +76,12 @@ _stats_cache = ResponseCache(ttl_seconds=3600)  # Stats cached for 1h; admin act
 _categories_cache = ResponseCache(ttl_seconds=3600)  # Categories cached for 1h; admin actions call invalidate() on change
 _bootstrap_cache = ResponseCache(ttl_seconds=86400)  # Bootstrap cached for 24h; admin actions invalidate on change
 _maintenance_cache = ResponseCache(ttl_seconds=120)
+# Heavy admin-dashboard aggregations cached briefly so the auto-refreshing admin console
+# can't re-fire ~10 expensive queries every few seconds and starve the thread pool.
+_admin_cache = ResponseCache(ttl_seconds=30)
+# Wall-clock ceiling (seconds) for heavy admin read queries so a runaway one aborts and
+# releases its thread-pool worker instead of hanging for minutes.
+_ADMIN_QUERY_TIMEOUT = 20
 _bootstrap_refreshing = False  # Guard to prevent concurrent background rebuilds
 
 _categories_lock = asyncio.Lock()
@@ -2493,6 +2499,10 @@ async def get_telemetry_overview(request: Request, x_api_key: str = Header(None)
     if not is_authorized:
         raise HTTPException(status_code=401, detail=error)
 
+    cached = _admin_cache.get("telemetry_overview")
+    if cached:
+        return cached
+
     def _build():
         now = datetime.utcnow()
         hour_ago = (now - timedelta(hours=1)).isoformat()
@@ -2551,7 +2561,9 @@ async def get_telemetry_overview(request: Request, x_api_key: str = Header(None)
             }
         }
 
-    return await asyncio.to_thread(_build)
+    result = await asyncio.to_thread(_build)
+    _admin_cache.set("telemetry_overview", result)
+    return result
 
 
 @app.get("/api/admin/telemetry/requests")
@@ -3782,9 +3794,11 @@ async def get_hidden_documents(
     if not db:
         raise HTTPException(status_code=503, detail="Database not initialized")
 
+    # Not cached: this list is reloaded by the admin UI immediately after a hide/unhide and
+    # must stay fresh. It is cheap anyway (covering index on a read connection).
     def _work():
-        docs = db.get_hidden_documents(limit=limit, offset=offset)
-        total = db.count_hidden_documents()
+        docs = db.get_hidden_documents(limit=limit, offset=offset, timeout_seconds=_ADMIN_QUERY_TIMEOUT)
+        total = db.count_hidden_documents(timeout_seconds=_ADMIN_QUERY_TIMEOUT)
         return docs, total
 
     docs, total = await asyncio.to_thread(_work)
@@ -4903,11 +4917,17 @@ async def get_categories_visibility(request: Request, x_api_key: str = Header(No
     if not db:
         raise HTTPException(status_code=503, detail="Database not initialized")
 
+    cached = _admin_cache.get("categories_visibility")
+    if cached:
+        return cached
+
     def _work():
-        return db.get_all_categories_with_visibility()
+        return db.get_all_categories_with_visibility(timeout_seconds=_ADMIN_QUERY_TIMEOUT)
 
     categories = await asyncio.to_thread(_work)
-    return {"categories": categories}
+    result = {"categories": categories}
+    _admin_cache.set("categories_visibility", result)
+    return result
 
 
 @app.post("/api/admin/categories/{category}/hide")
@@ -4940,7 +4960,8 @@ async def hide_category(category: str, request: Request, x_api_key: str = Header
         _subcategories_cache.invalidate()
         _stats_cache.invalidate()
         _bootstrap_cache.invalidate()
-        
+        _admin_cache.invalidate()
+
         security_logger.log_system_event(
             "category_hidden",
             f"Category hidden by admin: {category}",
@@ -4975,7 +4996,8 @@ async def unhide_category(category: str, request: Request, x_api_key: str = Head
         _subcategories_cache.invalidate()
         _stats_cache.invalidate()
         _bootstrap_cache.invalidate()
-        
+        _admin_cache.invalidate()
+
         security_logger.log_system_event(
             "category_unhidden",
             f"Category unhidden by admin: {category}",
@@ -5318,15 +5340,22 @@ async def get_doj_completeness(request: Request, x_api_key: str = Header(None)):
     if not db:
         raise HTTPException(status_code=503, detail="Database not initialized")
 
+    cached = _admin_cache.get("doj_completeness")
+    if cached:
+        return cached
+
     def _work():
-        return db.get_manifest_stats(), db.get_missing_documents_stats()
+        return (db.get_manifest_stats(timeout_seconds=_ADMIN_QUERY_TIMEOUT),
+                db.get_missing_documents_stats(timeout_seconds=_ADMIN_QUERY_TIMEOUT))
 
     manifest_stats, missing_stats = await asyncio.to_thread(_work)
 
-    return {
+    result = {
         "manifest": manifest_stats,
         "missing": missing_stats
     }
+    _admin_cache.set("doj_completeness", result)
+    return result
 
 
 @app.get("/api/admin/missing-documents")

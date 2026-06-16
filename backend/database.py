@@ -27,6 +27,11 @@ class Database:
     
     def __init__(self, db_path: str):
         self.db_path = db_path
+        # Telemetry lives in its OWN database file so its constant per-request writes never
+        # bloat the main DB's WAL. On a large DB under sustained read load the WAL cannot
+        # checkpoint (a reader snapshot is always held), so co-locating telemetry made the
+        # main WAL grow without bound and froze every read. See _wal_checkpointer below.
+        self.telemetry_db_path = self._derive_telemetry_path(db_path)
         # Persistent connection – PRAGMAs are set once, not per call
         self._conn = sqlite3.connect(db_path, timeout=30.0, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
@@ -35,13 +40,20 @@ class Database:
         self._conn.execute("PRAGMA synchronous=NORMAL")
         self._conn.execute("PRAGMA cache_size=-65536")
         self._conn.execute("PRAGMA temp_store=MEMORY")
-        self._conn.execute("PRAGMA mmap_size=0")
+        self._conn.execute("PRAGMA mmap_size=268435456")  # let the writer use the page cache too
+        self._conn.execute("PRAGMA journal_size_limit=67108864")  # truncate WAL back to <=64MB on checkpoint
         self._lock = threading.Lock()
 
         self._read_local = threading.local()
         self._telemetry_q = queue.Queue(maxsize=2000)
+        self._init_telemetry_db()
         self._telemetry_thread = threading.Thread(target=self._telemetry_flusher, daemon=True)
         self._telemetry_thread.start()
+        # Periodically checkpoint+truncate the main WAL. Autocheckpoint piggybacks on a writer
+        # commit and is defeated by ever-present concurrent readers, so the WAL can balloon;
+        # this dedicated thread guarantees it gets reset.
+        self._checkpoint_thread = threading.Thread(target=self._wal_checkpointer, daemon=True)
+        self._checkpoint_thread.start()
         self._init_db()
     
     @contextmanager
@@ -64,6 +76,7 @@ class Database:
             conn.execute("PRAGMA cache_size=-65536")
             conn.execute("PRAGMA temp_store=MEMORY")
             conn.execute("PRAGMA mmap_size=268435456")
+            conn.execute("PRAGMA journal_size_limit=67108864")
             self._read_local.conn = conn
         if timeout_seconds > 0:
             import time as _t
@@ -82,7 +95,71 @@ class Database:
         finally:
             if timeout_seconds > 0:
                 conn.set_progress_handler(None, 0)
-    
+
+    @staticmethod
+    def _derive_telemetry_path(db_path: str) -> str:
+        """Sibling telemetry DB next to the main DB (e.g. /opt/epstein/telemetry.db)."""
+        if db_path == ":memory:":
+            return ":memory:"
+        d = os.path.dirname(os.path.abspath(db_path))
+        return os.path.join(d, "telemetry.db")
+
+    def _init_telemetry_db(self):
+        """Create the separate telemetry database file and its schema."""
+        conn = sqlite3.connect(self.telemetry_db_path, timeout=30.0, check_same_thread=False)
+        try:
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA synchronous=NORMAL")
+            conn.execute("PRAGMA busy_timeout=10000")
+            conn.execute("PRAGMA journal_size_limit=67108864")
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS telemetry_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp TEXT NOT NULL,
+                    log_source TEXT NOT NULL,
+                    event_type TEXT NOT NULL,
+                    client_ip TEXT,
+                    method TEXT,
+                    path TEXT,
+                    status_code INTEGER,
+                    duration_ms REAL,
+                    severity TEXT,
+                    data TEXT
+                )
+            """)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_tel_timestamp ON telemetry_events(timestamp)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_tel_source_type ON telemetry_events(log_source, event_type)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_tel_event_type ON telemetry_events(event_type, timestamp)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_tel_ip ON telemetry_events(client_ip)")
+            conn.commit()
+        finally:
+            conn.close()
+
+    def get_telemetry_read_connection(self):
+        """Per-thread read-only connection to the telemetry database."""
+        conn = getattr(self._read_local, 'tel_conn', None)
+        if conn is None:
+            conn = sqlite3.connect(self.telemetry_db_path, timeout=30.0, check_same_thread=False)
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA query_only=ON")
+            conn.execute("PRAGMA busy_timeout=10000")
+            self._read_local.tel_conn = conn
+        return conn
+
+    def _wal_checkpointer(self):
+        """Background thread: periodically checkpoint+truncate the main DB WAL so it can
+        never grow without bound under sustained concurrent read load."""
+        import time as _t
+        conn = sqlite3.connect(self.db_path, timeout=60.0, check_same_thread=False)
+        conn.execute("PRAGMA busy_timeout=60000")
+        conn.execute("PRAGMA journal_size_limit=67108864")
+        while True:
+            _t.sleep(30)
+            try:
+                conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            except Exception:
+                pass
+
     def _init_db(self):
         """Initialize database schema"""
         with self.get_connection() as conn:
@@ -348,27 +425,9 @@ class Database:
             conn.execute("DROP INDEX IF EXISTS idx_documents_hidden_filename")
             conn.commit()
 
-            # ── Telemetry events table ──
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS telemetry_events (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    timestamp TEXT NOT NULL,
-                    log_source TEXT NOT NULL,
-                    event_type TEXT NOT NULL,
-                    client_ip TEXT,
-                    method TEXT,
-                    path TEXT,
-                    status_code INTEGER,
-                    duration_ms REAL,
-                    severity TEXT,
-                    data TEXT
-                )
-            """)
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_tel_timestamp ON telemetry_events(timestamp)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_tel_source_type ON telemetry_events(log_source, event_type)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_tel_event_type ON telemetry_events(event_type, timestamp)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_tel_ip ON telemetry_events(client_ip)")
-            conn.commit()
+            # Telemetry now lives in a SEPARATE database file (see _init_telemetry_db) so its
+            # per-request writes don't bloat this DB's WAL. Any legacy telemetry_events table
+            # in this file is left in place (untouched) and simply no longer read/written.
 
     # ── Telemetry helpers ──
 
@@ -386,11 +445,12 @@ class Database:
             pass
 
     def _telemetry_flusher(self):
-        """Background thread: drains the telemetry queue and batch-inserts into SQLite."""
-        conn = sqlite3.connect(self.db_path, timeout=30.0, check_same_thread=False)
+        """Background thread: drains the telemetry queue and batch-inserts into the telemetry DB."""
+        conn = sqlite3.connect(self.telemetry_db_path, timeout=30.0, check_same_thread=False)
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA synchronous=NORMAL")
         conn.execute("PRAGMA busy_timeout=10000")
+        conn.execute("PRAGMA journal_size_limit=67108864")
         sql = ("INSERT INTO telemetry_events "
                "(timestamp, log_source, event_type, client_ip, method, path, "
                "status_code, duration_ms, severity, data) "
@@ -413,10 +473,12 @@ class Database:
                 pass
 
     def insert_telemetry_batch(self, rows: list):
-        """Batch-insert telemetry rows. Each row is a tuple matching the column order."""
+        """Batch-insert telemetry rows into the telemetry DB. Each row matches the column order."""
         if not rows:
             return 0
-        with self.get_connection() as conn:
+        conn = sqlite3.connect(self.telemetry_db_path, timeout=30.0, check_same_thread=False)
+        try:
+            conn.execute("PRAGMA busy_timeout=10000")
             conn.executemany(
                 """INSERT INTO telemetry_events
                    (timestamp, log_source, event_type, client_ip, method, path,
@@ -425,22 +487,37 @@ class Database:
                 rows
             )
             conn.commit()
+        finally:
+            conn.close()
         return len(rows)
 
-    def query_telemetry(self, sql: str, params: tuple = ()) -> list:
-        """Run a read-only SQL query against the database and return list of dicts."""
-        with self.get_read_connection() as conn:
+    def query_telemetry(self, sql: str, params: tuple = (), timeout_seconds: float = 0) -> list:
+        """Run a read-only SQL query against the telemetry DB and return list of dicts.
+        If timeout_seconds > 0, a query exceeding it is interrupted (raises OperationalError)."""
+        conn = self.get_telemetry_read_connection()
+        if timeout_seconds > 0:
+            import time as _t
+            _deadline = _t.monotonic() + timeout_seconds
+            conn.set_progress_handler(lambda: 1 if _t.monotonic() > _deadline else 0, 2000)
+        try:
             cursor = conn.execute(sql, params)
             return [dict(row) for row in cursor.fetchall()]
+        finally:
+            if timeout_seconds > 0:
+                conn.set_progress_handler(None, 0)
 
     def clear_telemetry(self, log_source: str = None):
-        """Delete telemetry rows, optionally filtered by log_source."""
-        with self.get_connection() as conn:
+        """Delete telemetry rows from the telemetry DB, optionally filtered by log_source."""
+        conn = sqlite3.connect(self.telemetry_db_path, timeout=30.0, check_same_thread=False)
+        try:
+            conn.execute("PRAGMA busy_timeout=10000")
             if log_source:
                 conn.execute("DELETE FROM telemetry_events WHERE log_source = ?", (log_source,))
             else:
                 conn.execute("DELETE FROM telemetry_events")
             conn.commit()
+        finally:
+            conn.close()
 
     def rebuild_fts(self, progress_callback=None):
         """Rebuild the FTS5 index to fix sync issues.
@@ -1656,13 +1733,13 @@ class Database:
             conn.commit()
             return cursor.rowcount > 0
     
-    def get_missing_documents_stats(self) -> Dict[str, Any]:
+    def get_missing_documents_stats(self, timeout_seconds: float = 0) -> Dict[str, Any]:
         """Get statistics on missing documents
-        
+
         Returns:
             Dictionary with total count and counts by dataset
         """
-        with self.get_connection() as conn:
+        with self.get_read_connection(timeout_seconds=timeout_seconds) as conn:
             # Total count
             cursor = conn.execute("SELECT COUNT(*) FROM missing_documents")
             total = cursor.fetchone()[0]
@@ -1769,13 +1846,13 @@ class Database:
             cursor = conn.execute(sql, params)
             return [dict(row) for row in cursor.fetchall()]
     
-    def get_manifest_stats(self) -> Dict[str, Any]:
+    def get_manifest_stats(self, timeout_seconds: float = 0) -> Dict[str, Any]:
         """Get completeness statistics from manifest
-        
+
         Returns:
             Dictionary with total and per-dataset status counts
         """
-        with self.get_connection() as conn:
+        with self.get_read_connection(timeout_seconds=timeout_seconds) as conn:
             # Overall counts by status
             cursor = conn.execute("""
                 SELECT status, COUNT(*) as count
@@ -2057,9 +2134,9 @@ class Database:
             row = cursor.fetchone()
             return row and row[0] == 1
     
-    def get_hidden_documents(self, limit: int = 100, offset: int = 0) -> List[Dict[str, Any]]:
+    def get_hidden_documents(self, limit: int = 100, offset: int = 0, timeout_seconds: float = 0) -> List[Dict[str, Any]]:
         """Get all hidden documents (for admin panel)"""
-        with self.get_read_connection() as conn:
+        with self.get_read_connection(timeout_seconds=timeout_seconds) as conn:
             cursor = conn.execute("""
                 SELECT id, filename, path, category, subcategory, file_type, 
                        page_count, char_count, is_hidden
@@ -2070,9 +2147,9 @@ class Database:
             """, (limit, offset))
             return [dict(row) for row in cursor.fetchall()]
     
-    def count_hidden_documents(self) -> int:
+    def count_hidden_documents(self, timeout_seconds: float = 0) -> int:
         """Count total hidden documents"""
-        with self.get_read_connection() as conn:
+        with self.get_read_connection(timeout_seconds=timeout_seconds) as conn:
             cursor = conn.execute("SELECT COUNT(*) FROM documents WHERE is_hidden = 1")
             return cursor.fetchone()[0]
     
@@ -2370,9 +2447,10 @@ class Database:
             """, (doc_id,))
             return cursor.fetchone() is not None
     
-    def get_all_categories_with_visibility(self) -> List[Dict[str, Any]]:
-        """Get all categories with their visibility status and document counts (for admin)"""
-        with self.get_connection() as conn:
+    def get_all_categories_with_visibility(self, timeout_seconds: float = 0) -> List[Dict[str, Any]]:
+        """Get all categories with their visibility status and document counts (for admin).
+        Uses a read connection (was incorrectly on the write lock) with an optional timeout."""
+        with self.get_read_connection(timeout_seconds=timeout_seconds) as conn:
             cursor = conn.execute("""
                 SELECT 
                     d.category,
