@@ -3039,6 +3039,56 @@ a.modal-tab.doj-link {
     transform: translateY(-1px);
 }
 
+/* Share Bar */
+.share-bar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: center;
+    gap: var(--space-sm);
+    font-family: var(--font-body);
+    font-size: 0.85rem;
+    color: var(--text-secondary);
+}
+
+.share-bar-label {
+    color: var(--text-muted);
+}
+
+.share-bar-link {
+    color: var(--text-secondary);
+    text-decoration: none;
+    transition: color var(--transition-fast);
+}
+
+.share-bar-link:hover {
+    color: var(--accent);
+    text-decoration: underline;
+}
+
+.share-bar-sep {
+    color: var(--text-muted);
+}
+
+.share-bar-copied {
+    color: var(--success);
+    font-size: 0.8rem;
+    opacity: 0;
+    transition: opacity var(--transition-base);
+}
+
+.share-bar-top {
+    padding: var(--space-sm) var(--space-lg);
+    background: var(--accent-glow);
+    border-bottom: 1px solid var(--border);
+}
+
+.share-bar-footer {
+    margin-top: var(--space-md);
+    padding-top: var(--space-md);
+    border-top: 1px solid var(--border);
+}
+
 /* Footer */
 .footer {
     border-top: 1px solid var(--border);
@@ -3487,6 +3537,11 @@ a.modal-tab.doj-link {
 
     .age-gate-content h1 {
         font-size: 1.4rem;
+    }
+
+    .share-bar {
+        font-size: 0.78rem;
+        gap: var(--space-xs);
     }
 }
 

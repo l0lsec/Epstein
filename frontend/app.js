@@ -1478,15 +1478,6 @@ function displayQueryFeedback(parsedQuery) {
     elements.queryFeedback.classList.remove('hidden');
 }
 
-/**
- * Escape HTML to prevent XSS
- */
-function escapeHtml(text) {
-    const div = document.createElement('div');
-    div.textContent = text;
-    return div.innerHTML;
-}
-
 function renderSearchResults(data) {
     // Filter out results from user-excluded categories (client-side filtering)
     let filteredResults = data.results || [];
@@ -2688,30 +2679,24 @@ function handleSearchShare(platform) {
     }
 }
 
-function escapeHtml(text) {
-    if (!text) return '';
-    const div = document.createElement('div');
-    div.textContent = text;
-    return div.innerHTML;
-}
-
 /**
  * Copy text to clipboard with iOS fallback
  * iOS Safari doesn't support navigator.clipboard in all contexts
  */
-async function copyToClipboard(text) {
+async function copyToClipboard(text, btnEl) {
+    let ok = false;
     // Try the modern Clipboard API first
     if (navigator.clipboard && navigator.clipboard.writeText) {
         try {
             await navigator.clipboard.writeText(text);
-            return true;
+            ok = true;
         } catch (err) {
             console.log('Clipboard API failed, trying fallback:', err);
         }
     }
     
-    // Fallback for iOS and older browsers
-    try {
+    // Fallback to execCommand only if the async Clipboard API didn't succeed
+    if (!ok) try {
         // Create a temporary textarea
         const textarea = document.createElement('textarea');
         textarea.value = text;
@@ -2747,7 +2732,7 @@ async function copyToClipboard(text) {
         document.body.removeChild(textarea);
         
         if (success) {
-            return true;
+            ok = true;
         } else {
             throw new Error('execCommand copy failed');
         }
@@ -2755,8 +2740,21 @@ async function copyToClipboard(text) {
         console.error('Fallback copy failed:', err);
         // Last resort: show prompt with the URL
         prompt('Copy this link:', text);
-        return false;
+        ok = false;
     }
+
+    // Optional inline button feedback when a button element is passed
+    if (btnEl) {
+        const original = btnEl.textContent;
+        btnEl.textContent = ok ? 'Copied!' : 'Press Ctrl+C';
+        if (ok) btnEl.classList.add('copied');
+        setTimeout(() => {
+            btnEl.textContent = original;
+            btnEl.classList.remove('copied');
+        }, 1500);
+    }
+
+    return ok;
 }
 
 /**
@@ -3176,6 +3174,10 @@ function initDonatePanel(root) {
     }
 }
 
+/**
+ * Escape HTML to prevent XSS. Also escapes quotes so the output is safe inside
+ * HTML attribute values, not just text content.
+ */
 function escapeHtml(str) {
     return String(str)
         .replace(/&/g, '&amp;')
@@ -3183,38 +3185,6 @@ function escapeHtml(str) {
         .replace(/>/g, '&gt;')
         .replace(/"/g, '&quot;')
         .replace(/'/g, '&#39;');
-}
-
-async function copyToClipboard(text, btnEl) {
-    try {
-        if (navigator.clipboard && window.isSecureContext) {
-            await navigator.clipboard.writeText(text);
-        } else {
-            const ta = document.createElement('textarea');
-            ta.value = text;
-            ta.style.position = 'fixed';
-            ta.style.opacity = '0';
-            document.body.appendChild(ta);
-            ta.select();
-            document.execCommand('copy');
-            document.body.removeChild(ta);
-        }
-        if (btnEl) {
-            const original = btnEl.textContent;
-            btnEl.textContent = 'Copied!';
-            btnEl.classList.add('copied');
-            setTimeout(() => {
-                btnEl.textContent = original;
-                btnEl.classList.remove('copied');
-            }, 1500);
-        }
-    } catch (e) {
-        console.warn('Clipboard copy failed', e);
-        if (btnEl) {
-            btnEl.textContent = 'Press Ctrl+C';
-            setTimeout(() => { btnEl.textContent = 'Copy'; }, 1500);
-        }
-    }
 }
 
 // ---- Donate modal trigger ---------------------------------------------------
