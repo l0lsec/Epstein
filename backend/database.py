@@ -124,7 +124,15 @@ class Database:
                     VALUES('delete', old.rowid, old.id, old.filename, old.full_text);
                 END;
                 
-                CREATE TRIGGER IF NOT EXISTS documents_au AFTER UPDATE ON documents BEGIN
+                -- Scoped to FTS columns only: AFTER UPDATE OF ... means this trigger does
+                -- NOT fire for metadata-only updates (is_hidden, file_type), which would
+                -- otherwise re-tokenize the entire full_text blob and freeze the write lock.
+                CREATE TRIGGER IF NOT EXISTS documents_au
+                AFTER UPDATE OF id, filename, full_text ON documents
+                WHEN old.full_text IS NOT new.full_text
+                     OR old.filename IS NOT new.filename
+                     OR old.id IS NOT new.id
+                BEGIN
                     INSERT INTO documents_fts(documents_fts, rowid, id, filename, full_text)
                     VALUES('delete', old.rowid, old.id, old.filename, old.full_text);
                     INSERT INTO documents_fts(rowid, id, filename, full_text)
@@ -264,7 +272,38 @@ class Database:
             # Migration: Normalize is_hidden NULLs to 0 for clean index equality scans
             conn.execute("UPDATE documents SET is_hidden = 0 WHERE is_hidden IS NULL")
             conn.commit()
-            
+
+            # Migration: rescope the FTS update trigger on pre-existing databases.
+            # The original documents_au fired AFTER UPDATE on ANY column and re-tokenized the
+            # entire full_text into FTS5 — so a metadata-only write like "UPDATE documents SET
+            # is_hidden = 1" did seconds of pointless FTS work while holding the global write
+            # lock, freezing the server. CREATE TRIGGER IF NOT EXISTS above can't replace an
+            # existing trigger, so detect the old form and recreate it scoped to FTS columns.
+            try:
+                row = conn.execute(
+                    "SELECT sql FROM sqlite_master WHERE type='trigger' AND name='documents_au'"
+                ).fetchone()
+                existing_sql = row[0] if row else ""
+                if existing_sql and "UPDATE OF" not in existing_sql:
+                    conn.execute("DROP TRIGGER IF EXISTS documents_au")
+                    conn.execute("""
+                        CREATE TRIGGER documents_au
+                        AFTER UPDATE OF id, filename, full_text ON documents
+                        WHEN old.full_text IS NOT new.full_text
+                             OR old.filename IS NOT new.filename
+                             OR old.id IS NOT new.id
+                        BEGIN
+                            INSERT INTO documents_fts(documents_fts, rowid, id, filename, full_text)
+                            VALUES('delete', old.rowid, old.id, old.filename, old.full_text);
+                            INSERT INTO documents_fts(rowid, id, filename, full_text)
+                            VALUES (new.rowid, new.id, new.filename, new.full_text);
+                        END;
+                    """)
+                    conn.commit()
+                    print("✅ Rescoped documents_au FTS trigger to FTS columns only (was firing on every update)")
+            except Exception as e:
+                print(f"Note: documents_au trigger migration skipped: {e}")
+
             # Migration: Reclassify image-format files that contain OCR text as "document"
             try:
                 cursor = conn.execute(
@@ -2010,7 +2049,7 @@ class Database:
     
     def is_document_hidden(self, doc_id: str) -> bool:
         """Check if a specific document is hidden"""
-        with self.get_connection() as conn:
+        with self.get_read_connection() as conn:
             cursor = conn.execute(
                 "SELECT is_hidden FROM documents WHERE id = ?",
                 (doc_id,)
@@ -2020,7 +2059,7 @@ class Database:
     
     def get_hidden_documents(self, limit: int = 100, offset: int = 0) -> List[Dict[str, Any]]:
         """Get all hidden documents (for admin panel)"""
-        with self.get_connection() as conn:
+        with self.get_read_connection() as conn:
             cursor = conn.execute("""
                 SELECT id, filename, path, category, subcategory, file_type, 
                        page_count, char_count, is_hidden
@@ -2033,7 +2072,7 @@ class Database:
     
     def count_hidden_documents(self) -> int:
         """Count total hidden documents"""
-        with self.get_connection() as conn:
+        with self.get_read_connection() as conn:
             cursor = conn.execute("SELECT COUNT(*) FROM documents WHERE is_hidden = 1")
             return cursor.fetchone()[0]
     
