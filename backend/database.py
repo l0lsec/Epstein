@@ -11,6 +11,7 @@ import sqlite3
 import pickle
 import threading
 import queue
+import time
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 from contextlib import contextmanager
@@ -45,6 +46,11 @@ class Database:
         self._lock = threading.Lock()
 
         self._read_local = threading.local()
+        # Short-TTL cache for telemetry read queries (append-only data; dashboard tolerates
+        # slight staleness), so repeated admin loads don't re-scan the large telemetry table.
+        self._tel_cache = {}
+        self._tel_cache_ttl = 60.0
+        self._tel_cache_lock = threading.Lock()
         self._telemetry_q = queue.Queue(maxsize=2000)
         self._init_telemetry_db()
         self._telemetry_thread = threading.Thread(target=self._telemetry_flusher, daemon=True)
@@ -131,6 +137,12 @@ class Database:
             conn.execute("CREATE INDEX IF NOT EXISTS idx_tel_source_type ON telemetry_events(log_source, event_type)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_tel_event_type ON telemetry_events(event_type, timestamp)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_tel_ip ON telemetry_events(client_ip)")
+            # Composite indexes for the admin telemetry dashboard aggregations (filter by
+            # log_source, then window/group by timestamp/ip/status/path).
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_tel_src_ts ON telemetry_events(log_source, timestamp)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_tel_src_ip ON telemetry_events(log_source, client_ip)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_tel_src_status ON telemetry_events(log_source, status_code)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_tel_src_path ON telemetry_events(log_source, path)")
             conn.commit()
         finally:
             conn.close()
@@ -493,18 +505,30 @@ class Database:
 
     def query_telemetry(self, sql: str, params: tuple = (), timeout_seconds: float = 0) -> list:
         """Run a read-only SQL query against the telemetry DB and return list of dicts.
+        Results are cached for a short TTL (telemetry is append-only; the admin dashboard
+        tolerates slight staleness) so repeated dashboard loads don't re-scan the large table.
         If timeout_seconds > 0, a query exceeding it is interrupted (raises OperationalError)."""
+        key = (sql, params)
+        now = time.monotonic()
+        with self._tel_cache_lock:
+            hit = self._tel_cache.get(key)
+            if hit is not None and hit[1] > now:
+                return hit[0]
         conn = self.get_telemetry_read_connection()
         if timeout_seconds > 0:
-            import time as _t
-            _deadline = _t.monotonic() + timeout_seconds
-            conn.set_progress_handler(lambda: 1 if _t.monotonic() > _deadline else 0, 2000)
+            _deadline = now + timeout_seconds
+            conn.set_progress_handler(lambda: 1 if time.monotonic() > _deadline else 0, 2000)
         try:
             cursor = conn.execute(sql, params)
-            return [dict(row) for row in cursor.fetchall()]
+            rows = [dict(row) for row in cursor.fetchall()]
         finally:
             if timeout_seconds > 0:
                 conn.set_progress_handler(None, 0)
+        with self._tel_cache_lock:
+            self._tel_cache[key] = (rows, now + self._tel_cache_ttl)
+            if len(self._tel_cache) > 1000:
+                self._tel_cache = {k: v for k, v in self._tel_cache.items() if v[1] > now}
+        return rows
 
     def clear_telemetry(self, log_source: str = None):
         """Delete telemetry rows from the telemetry DB, optionally filtered by log_source."""

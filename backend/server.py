@@ -9,6 +9,7 @@ import asyncio
 import uuid
 import time as _time
 import threading as _threading
+from concurrent.futures import ThreadPoolExecutor
 import concurrent.futures as _cf
 import sqlite3
 from html import escape as html_escape
@@ -2375,6 +2376,14 @@ async def get_document_summary(doc_id: str, request: Request, regenerate: bool =
 LOG_DIR = BASE_PATH / "logs"
 
 
+# Telemetry reads run on a dedicated, bounded thread pool so heavy aggregations over the
+# large telemetry table can never exhaust the default thread pool that serves public requests.
+_telemetry_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="telemetry")
+
+async def _run_tel(fn, *args):
+    """Run a telemetry function on the dedicated bounded telemetry pool."""
+    return await asyncio.get_event_loop().run_in_executor(_telemetry_executor, fn, *args)
+
 def _tel(sql: str, params: tuple = ()) -> list:
     """Shorthand: run a telemetry query against the database, return list of dicts."""
     if not db:
@@ -2382,10 +2391,10 @@ def _tel(sql: str, params: tuple = ()) -> list:
     return db.query_telemetry(sql, params)
 
 async def _atel(sql: str, params: tuple = ()) -> list:
-    """Async version of _tel — runs the query in a thread."""
+    """Async version of _tel — runs on the dedicated telemetry pool."""
     if not db:
         return []
-    return await asyncio.to_thread(db.query_telemetry, sql, params)
+    return await _run_tel(db.query_telemetry, sql, params)
 
 
 def _json_val(col: str, key: str) -> str:
@@ -2561,7 +2570,7 @@ async def get_telemetry_overview(request: Request, x_api_key: str = Header(None)
             }
         }
 
-    result = await asyncio.to_thread(_build)
+    result = await _run_tel(_build)
     _admin_cache.set("telemetry_overview", result)
     return result
 
@@ -2806,7 +2815,7 @@ async def get_ai_telemetry(request: Request, x_api_key: str = Header(None)):
             "top_questions": [{"question": r["q"], "count": r["c"]} for r in tq_rows]
         }
 
-    return await asyncio.to_thread(_build)
+    return await _run_tel(_build)
 
 
 @app.get("/api/admin/telemetry/security")
@@ -2841,7 +2850,7 @@ async def get_security_telemetry(request: Request, x_api_key: str = Header(None)
             "blocked_sessions": len(get_blocked_sessions())
         }
 
-    return await asyncio.to_thread(_build)
+    return await _run_tel(_build)
 
 
 @app.get("/api/admin/telemetry/errors")
@@ -2867,7 +2876,7 @@ async def get_error_telemetry(request: Request, x_api_key: str = Header(None)):
             "recent_errors": recent_errors
         }
 
-    return await asyncio.to_thread(_build)
+    return await _run_tel(_build)
 
 
 @app.get("/api/admin/telemetry/visitors")
@@ -2921,7 +2930,7 @@ async def get_visitor_telemetry(request: Request, x_api_key: str = Header(None))
 
         return uv_today, uv_week, daily_unique, user_agents, top_referrers, top_ips
 
-    uv_today, uv_week, daily_unique, user_agents, top_referrers, top_ips = await asyncio.to_thread(_build)
+    uv_today, uv_week, daily_unique, user_agents, top_referrers, top_ips = await _run_tel(_build)
     await enrich_with_geo(top_ips, 'client_ip', limit=20)
 
     return {
