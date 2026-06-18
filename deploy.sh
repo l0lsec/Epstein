@@ -183,47 +183,39 @@ if [ "$FORCE_RESTART" = true ]; then
 fi
 
 # ─── Cache busting ───────────────────────────────────────────────────────────
+# Bump ?v=N query strings so browsers re-fetch changed JS/CSS. On a real run the
+# edits are committed further below so they don't linger as uncommitted diffs
+# (which would make every later run re-detect them and re-bump forever). On a
+# dry run nothing is written, so no revert dance is needed.
 CACHE_BUMPED=false
+BUMPED_FILES=""
+
+bump_version() {  # $1 = asset filename (e.g. app.js)   $2 = html file to edit
+    local asset="$1" file="$2" cur new
+    echo "$JS_CSS_CHANGED" | grep -q "$asset" || return 0
+    cur=$(sed -n "s/.*${asset}?v=\([0-9]*\).*/\1/p" "$file" | head -1)
+    cur=${cur:-0}
+    new=$((cur + 1))
+    if [ "$DRY_RUN" = false ]; then
+        sed -i.bak "s/${asset}?v=${cur}/${asset}?v=${new}/" "$file" && rm -f "${file}.bak"
+        case " $BUMPED_FILES " in *" $file "*) ;; *) BUMPED_FILES="$BUMPED_FILES $file" ;; esac
+        success "Bumped ${asset} v=${cur} -> v=${new} in $(basename "$file")"
+    else
+        info "Would bump ${asset} v=${cur} -> v=${new} in $(basename "$file")"
+    fi
+    CACHE_BUMPED=true
+}
+
 if [ -n "$FRONTEND_CHANGED" ]; then
-    # Check if any cacheable frontend files changed (js, css)
     JS_CSS_CHANGED=$(echo "$FRONTEND_CHANGED" | grep -E '\.(js|css)$' || true)
     if [ -n "$JS_CSS_CHANGED" ]; then
-        info "Frontend JS/CSS changed — auto-bumping cache versions..."
-
-        # Bump styles.css?v=N in index.html
-        if echo "$JS_CSS_CHANGED" | grep -q "styles\.css"; then
-            CURRENT_V=$(sed -n 's/.*styles\.css?v=\([0-9]*\).*/\1/p' frontend/index.html | head -1)
-            CURRENT_V=${CURRENT_V:-0}
-            NEW_V=$((CURRENT_V + 1))
-            sed -i.bak "s/styles\.css?v=${CURRENT_V}/styles.css?v=${NEW_V}/" frontend/index.html && rm -f frontend/index.html.bak
-            success "Bumped styles.css v=${CURRENT_V} -> v=${NEW_V} in index.html"
-            CACHE_BUMPED=true
-        fi
-
-        # Bump app.js?v=N in index.html
-        if echo "$JS_CSS_CHANGED" | grep -q "app\.js"; then
-            CURRENT_V=$(sed -n 's/.*app\.js?v=\([0-9]*\).*/\1/p' frontend/index.html | head -1)
-            CURRENT_V=${CURRENT_V:-0}
-            NEW_V=$((CURRENT_V + 1))
-            sed -i.bak "s/app\.js?v=${CURRENT_V}/app.js?v=${NEW_V}/" frontend/index.html && rm -f frontend/index.html.bak
-            success "Bumped app.js v=${CURRENT_V} -> v=${NEW_V} in index.html"
-            CACHE_BUMPED=true
-        fi
-
-        # Bump admin.js?v=N in admin.html
-        if echo "$JS_CSS_CHANGED" | grep -q "admin\.js"; then
-            CURRENT_V=$(sed -n 's/.*admin\.js?v=\([0-9]*\).*/\1/p' frontend/admin.html | head -1)
-            CURRENT_V=${CURRENT_V:-0}
-            NEW_V=$((CURRENT_V + 1))
-            sed -i.bak "s/admin\.js?v=${CURRENT_V}/admin.js?v=${NEW_V}/" frontend/admin.html && rm -f frontend/admin.html.bak
-            success "Bumped admin.js v=${CURRENT_V} -> v=${NEW_V} in admin.html"
-            CACHE_BUMPED=true
-        fi
+        info "Frontend JS/CSS changed — bumping cache versions..."
+        bump_version 'styles.css' frontend/index.html
+        bump_version 'app.js'     frontend/index.html
+        bump_version 'admin.js'   frontend/admin.html
+    else
+        warn "Frontend changed but no JS/CSS files — skipping cache bust"
     fi
-fi
-
-if [ "$CACHE_BUMPED" = false ] && [ -n "$FRONTEND_CHANGED" ]; then
-    warn "Frontend changed but no JS/CSS files — skipping cache bust"
 fi
 
 # ─── Dry run stops here ─────────────────────────────────────────────────────
@@ -234,15 +226,25 @@ if [ "$DRY_RUN" = true ]; then
     echo "$DEPLOY_FILES" | while read -r f; do echo "    $f"; done
     echo -e "  Service restart: $([ "$NEEDS_RESTART" = true ] && echo -e "${YELLOW}YES${NC}" || echo -e "${GREEN}NO (zero downtime)${NC}")"
     echo -e "  Pip install:     $([ -n "$REQS_CHANGED" ] && echo -e "${YELLOW}YES${NC}" || echo "NO")"
-    echo -e "  Cache bumped:    $([ "$CACHE_BUMPED" = true ] && echo "YES" || echo "NO")"
+    echo -e "  Cache bump:      $([ "$CACHE_BUMPED" = true ] && echo "YES (would bump)" || echo "NO")"
     echo ""
-    warn "Dry run — no files were deployed."
-    # Revert cache bumps made locally during dry run
-    if [ "$CACHE_BUMPED" = true ]; then
-        git checkout -- frontend/index.html frontend/admin.html 2>/dev/null || true
-        warn "Reverted local cache bump changes"
-    fi
+    warn "Dry run — no files were deployed or modified."
     exit 0
+fi
+
+# ─── Persist cache bumps so re-runs are idempotent ───────────────────────────
+# The ?v= bumps mutate index.html/admin.html. Committing them here means a
+# re-run with no further source changes diffs clean against the recorded SHA
+# and exits "nothing to do" — instead of re-detecting the bump and looping.
+if [ "$CACHE_BUMPED" = true ] && [ -n "$BUMPED_FILES" ]; then
+    info "Committing cache-version bumps so re-runs stay idempotent..."
+    git add -- $BUMPED_FILES 2>/dev/null || true
+    if git commit -q -m "deploy: bump frontend cache versions" -- $BUMPED_FILES 2>/dev/null; then
+        CURRENT_SHA=$(git rev-parse HEAD)
+        success "Committed cache bumps (${CURRENT_SHA:0:7})"
+    else
+        warn "Nothing to commit for cache bumps (continuing)"
+    fi
 fi
 
 # ─── Pre-deploy backup on server ────────────────────────────────────────────
@@ -260,41 +262,27 @@ ssh "${SSH_TARGET}" bash -s -- "$REMOTE_DIR" "$SSH_USER" <<'BACKUP_EOF'
 BACKUP_EOF
 success "Backup created at ${BACKUP_DIR}/"
 
-# ─── Stage files on server ───────────────────────────────────────────────────
-info "Preparing staging directories on server..."
-ssh "${SSH_TARGET}" "rm -rf /tmp/epstein-deploy && mkdir -p /tmp/epstein-deploy/{backend,frontend}"
-
-# SCP each category of changed files
-if [ -n "$BACKEND_CHANGED" ]; then
-    info "Uploading backend files..."
-    scp -q backend/*.py "${SSH_TARGET}:/tmp/epstein-deploy/backend/"
-    success "Backend files uploaded"
+# ─── Upload exactly the changed files (file-scoped, paths preserved) ─────────
+# Only the files in DEPLOY_FILES are transferred — not whole categories — so a
+# one-file change ships one file and unrelated working-tree edits never ride
+# along. tar preserves each file's repo-relative path (backend/x.py,
+# frontend/y.html, run.py, ...) and uses a single connection.
+EXISTING_FILES=$(echo "$DEPLOY_FILES" | while read -r f; do [ -n "$f" ] && [ -f "$f" ] && echo "$f"; done)
+if [ -z "$EXISTING_FILES" ]; then
+    warn "Changed paths are all deletions — nothing to upload. Done."
+    exit 0
 fi
+N_FILES=$(echo "$EXISTING_FILES" | grep -c .)
 
-if [ -n "$FRONTEND_CHANGED" ]; then
-    info "Uploading frontend files..."
-    # Only copy safe frontend file types
-    for ext in html js css svg xml png; do
-        # Use a subshell so glob failures don't kill the script
-        files=$(ls frontend/*.${ext} 2>/dev/null || true)
-        if [ -n "$files" ]; then
-            scp -q frontend/*.${ext} "${SSH_TARGET}:/tmp/epstein-deploy/frontend/"
-        fi
-    done
-    success "Frontend files uploaded"
-fi
+info "Uploading ${N_FILES} changed file(s) to server..."
+ssh "${SSH_TARGET}" "rm -rf /tmp/epstein-deploy && mkdir -p /tmp/epstein-deploy"
 
-if [ -n "$RUNPY_CHANGED" ]; then
-    info "Uploading run.py..."
-    scp -q run.py "${SSH_TARGET}:/tmp/epstein-deploy/"
-    success "run.py uploaded"
-fi
-
-if [ -n "$REQS_CHANGED" ]; then
-    info "Uploading requirements.txt..."
-    scp -q requirements.txt "${SSH_TARGET}:/tmp/epstein-deploy/"
-    success "requirements.txt uploaded"
-fi
+LIST_FILE=$(mktemp)
+echo "$EXISTING_FILES" > "$LIST_FILE"
+# COPYFILE_DISABLE stops macOS tar from emitting ._ AppleDouble sidecar files.
+COPYFILE_DISABLE=1 tar -czf - -T "$LIST_FILE" | ssh "${SSH_TARGET}" "tar -xzf - -C /tmp/epstein-deploy"
+rm -f "$LIST_FILE"
+success "Uploaded ${N_FILES} file(s)"
 
 # ─── Remote install ──────────────────────────────────────────────────────────
 info "Installing files on server..."
@@ -311,19 +299,18 @@ ssh "${SSH_TARGET}" bash -s -- \
     SERVICE_NAME="$5"
     STAGING="/tmp/epstein-deploy"
 
-    # Copy staged files to production
-    [ -n "$(ls ${STAGING}/backend/ 2>/dev/null)" ]  && sudo cp -f ${STAGING}/backend/*  ${REMOTE_DIR}/backend/
-    [ -n "$(ls ${STAGING}/frontend/ 2>/dev/null)" ] && sudo cp -f ${STAGING}/frontend/* ${REMOTE_DIR}/frontend/
-    [ -f "${STAGING}/run.py" ]                       && sudo cp -f ${STAGING}/run.py     ${REMOTE_DIR}/
-    [ -f "${STAGING}/requirements.txt" ]             && sudo cp -f ${STAGING}/requirements.txt ${REMOTE_DIR}/
-
-    # Fix ownership — scope to deployed targets only.
+    # Copy exactly the staged (changed) files to production, preserving paths,
+    # and chown only those files.
     # NEVER chown -R the whole REMOTE_DIR: it holds multi-GB DBs and ~2.8M
     # files under extracted_text/ + thumbnails/, so a recursive walk takes
     # minutes and evicts epstein.db from the page cache on every deploy.
-    sudo chown "${SSH_USER}:${SSH_USER}" \
-        ${REMOTE_DIR}/backend/*.py ${REMOTE_DIR}/frontend/* \
-        ${REMOTE_DIR}/run.py ${REMOTE_DIR}/requirements.txt 2>/dev/null || true
+    cd "$STAGING" 2>/dev/null || { echo "[ERR] staging dir missing"; exit 1; }
+    find . -type f | sed 's|^\./||' | while read -r rel; do
+        sudo mkdir -p "${REMOTE_DIR}/$(dirname "$rel")"
+        sudo cp -f "${STAGING}/${rel}" "${REMOTE_DIR}/${rel}"
+        sudo chown "${SSH_USER}:${SSH_USER}" "${REMOTE_DIR}/${rel}"
+    done
+    cd / 2>/dev/null || true
 
     # Install deps if requirements.txt changed
     if [ "$NEEDS_PIP" = "true" ]; then
