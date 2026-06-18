@@ -3944,9 +3944,9 @@ a.modal-tab.doj-link {
     display: none !important;
 }
 
-/* Ad slots: per Ezoic guidance, the placeholder div must have NO styling and
-   NO reserved space (reserving height can leave empty white boxes when an ad
-   doesn't fill). We only center the wrapper and add vertical breathing room. */
+/* Ad slots: the placeholder div must have NO styling and NO reserved space
+   (reserving height can leave empty white boxes when an ad doesn't fill). We
+   only center the wrapper and add vertical breathing room. */
 .ad-slot {
     width: 100%;
     margin: var(--space-lg) auto;

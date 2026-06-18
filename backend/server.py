@@ -858,11 +858,11 @@ async def sitemap_xml():
 
 @app.api_route("/ads.txt", methods=["GET", "HEAD"])
 async def ads_txt():
-    """Serve ads.txt for ad-network (Ezoic) authorization.
+    """Serve ads.txt for ad-network authorization.
 
-    Ezoic's "Ads.txt Manager" approach is preferred: set ADS_TXT_REDIRECT_URL
+    A managed "Ads.txt Manager" approach is preferred: set ADS_TXT_REDIRECT_URL
     to your managed URL (e.g. https://srv.adstxtmanager.com/XXXXX/epsteinfta.com)
-    and we 301 to it so Ezoic can keep the authorized-seller list current.
+    and we 301 to it so the network can keep the authorized-seller list current.
     Falls back to a static frontend/ads.txt for the manual line-list approach.
     """
     redirect_url = os.getenv("ADS_TXT_REDIRECT_URL", "").strip()

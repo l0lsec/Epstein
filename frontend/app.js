@@ -2977,7 +2977,7 @@ function escapeCSVField(field) {
 // Crypto wallet addresses: paste your receive addresses from your crypto.com app
 // Ko-fi: https://ko-fi.com/<your-handle>
 // GitHub Sponsors: https://github.com/sponsors/<your-handle>
-// Ad network: paste your Ezoic site id or AdSense client id; leave blank to keep ad placeholders dormant.
+// Ad network: paste your AdSense client id; leave blank to keep ad placeholders dormant.
 const DONATE_CONFIG = {
     stripe: {
         // null = button disabled; replace with full Payment Link URLs to enable.
@@ -3013,24 +3013,11 @@ const DONATE_CONFIG = {
     }
 };
 
-// Ad network configuration. The Ezoic header scripts load statically from
-// index.html <head>; this only controls which placeholders get ads rendered.
-// Fill in each numeric placement ID from your Ezoic dashboard
-// (Ad Placements -> create placement -> copy the numeric ID). Slots with a
-// null ID are skipped. Until at least one ID is set, no ads render even when
+// Ad network configuration. Until a client id is set, no ads render even when
 // the admin "ads_enabled" toggle is on.
 const AD_CONFIG = {
-    ezoic: {
-        enabled: true,
-        placeholders: {
-            'search-top': null,   // e.g. 101 -> #ad-slot-search-top
-            'browse-top': null,   // e.g. 102 -> #ad-slot-browse-top
-            'ask-bottom': null,   // e.g. 103 -> #ad-slot-ask-bottom
-            'about':      null    // e.g. 104 -> #ad-slot-about
-        }
-    },
-    // AdSense client id (e.g. "ca-pub-1234567890123456"). Untouched fallback
-    // used only when Ezoic is disabled / has no placeholder IDs.
+    // AdSense client id (e.g. "ca-pub-1234567890123456"). Leave null to keep
+    // ad slots dormant.
     adsenseClientId: null
 };
 
@@ -3299,8 +3286,7 @@ function renderAffiliateStrip(enabled) {
 }
 
 // ---- Ads loader -------------------------------------------------------------
-// The Ezoic header scripts (sa.min.js / analytics.js) load statically from the
-// page <head>. This only renders ads into the slots that have a dashboard ID.
+// Renders ads into the slots only when an ad-network client id is configured.
 let _adsLoaded = false;
 function hideAllAdSlots() {
     document.querySelectorAll('.ad-slot').forEach(s => { s.style.display = 'none'; });
@@ -3308,41 +3294,6 @@ function hideAllAdSlots() {
 function loadAdNetwork(enabled) {
     if (!enabled || _adsLoaded) {
         if (!enabled) hideAllAdSlots();
-        return;
-    }
-
-    const ezoic = AD_CONFIG.ezoic || {};
-    const placeholderMap = ezoic.placeholders || {};
-
-    if (ezoic.enabled) {
-        // Inject a bare Ezoic placeholder div into each known slot that has an ID.
-        // Per Ezoic docs, the placeholder div must have NO styling of its own.
-        const ids = [];
-        document.querySelectorAll('.ad-slot[data-ad-slot]').forEach(slot => {
-            const key = slot.dataset.adSlot;
-            const id = placeholderMap[key];
-            if (!id) {
-                slot.style.display = 'none';
-                return;
-            }
-            const phId = `ezoic-pub-ad-placeholder-${id}`;
-            if (!document.getElementById(phId)) {
-                const ph = document.createElement('div');
-                ph.id = phId;
-                slot.appendChild(ph);
-            }
-            ids.push(id);
-        });
-
-        if (ids.length && window.ezstandalone) {
-            try {
-                window.ezstandalone.cmd = window.ezstandalone.cmd || [];
-                window.ezstandalone.cmd.push(function () {
-                    window.ezstandalone.showAds && window.ezstandalone.showAds(...ids);
-                });
-                _adsLoaded = true;
-            } catch (e) { console.warn('Ezoic showAds failed', e); }
-        }
         return;
     }
 
