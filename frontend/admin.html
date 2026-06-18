@@ -2311,6 +2311,46 @@
                 </div>
             </div>
 
+            <!-- Updated / Re-issued Files -->
+            <div class="card" id="updated-files-card" style="margin-bottom: var(--space-lg);">
+                <div class="card-header">
+                    <span class="card-title">🔄 Updated / Re-issued Files</span>
+                    <button class="btn btn-sm" onclick="loadUpdatedDocuments()">
+                        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M1 4v6h6M23 20v-6h-6"/>
+                            <path d="M20.49 9A9 9 0 005.64 5.64L1 10m22 4l-4.64 4.36A9 9 0 013.51 15"/>
+                        </svg>
+                        Refresh
+                    </button>
+                </div>
+                <div class="card-body">
+                    <p style="margin-bottom: var(--space-md); font-size: 0.9rem; color: var(--text-muted);">
+                        Files DOJ replaced with a newer iteration. The downloader keeps the prior copy (timestamped), so you can compare the first version against later ones — side-by-side or as a text diff. Populated by running the downloader with <code>--check-versions</code>.
+                    </p>
+                    <div style="margin-bottom: var(--space-md);">
+                        <label style="margin-right: var(--space-sm); color: var(--text-secondary);">Filter by Dataset:</label>
+                        <select id="updated-dataset-filter" class="login-input" style="width: auto; display: inline-block; min-width: 150px;" onchange="filterUpdatedData()">
+                            <option value="">All Datasets</option>
+                            <option value="1">Data Set 1</option>
+                            <option value="2">Data Set 2</option>
+                            <option value="3">Data Set 3</option>
+                            <option value="4">Data Set 4</option>
+                            <option value="5">Data Set 5</option>
+                            <option value="6">Data Set 6</option>
+                            <option value="7">Data Set 7</option>
+                            <option value="8">Data Set 8</option>
+                            <option value="9">Data Set 9</option>
+                            <option value="10">Data Set 10</option>
+                            <option value="11">Data Set 11</option>
+                            <option value="12">Data Set 12</option>
+                        </select>
+                    </div>
+                    <div id="updated-docs-list" style="max-height: 400px; overflow-y: auto;">
+                        <div class="loading"><span class="spinner"></span>Loading...</div>
+                    </div>
+                </div>
+            </div>
+
             <!-- Add/Edit Keyword Modal -->
             <div id="keyword-modal" class="modal-overlay" style="display: none;">
                 <div class="modal-content" style="max-width: 500px;">
@@ -2552,7 +2592,23 @@
         </div>
     </div>
 
-    <script src="/static/admin.js?v=23"></script>
+    <!-- Version Compare Modal -->
+    <div id="version-compare-modal" class="modal-overlay" style="display: none;">
+        <div class="modal-content" style="max-width: 1400px; width: 97%; height: 92vh; max-height: 92vh; display: flex; flex-direction: column;">
+            <div class="modal-header">
+                <span class="modal-title" id="version-compare-title" style="font-family: var(--font-mono); font-size: 0.95rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">Compare versions</span>
+                <div style="display: flex; gap: var(--space-xs); align-items: center;">
+                    <button class="btn btn-sm active" id="compare-tab-visual" onclick="switchCompareTab('visual')">Side-by-side</button>
+                    <button class="btn btn-sm" id="compare-tab-text" onclick="switchCompareTab('text')">Text diff</button>
+                    <button class="modal-close" onclick="closeVersionCompareModal()" aria-label="Close" style="margin-left: var(--space-sm);">&times;</button>
+                </div>
+            </div>
+            <div class="modal-body" id="version-compare-body" style="flex: 1; padding: 0; display: flex; min-height: 0; background: var(--bg-tertiary);">
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/admin.js?v=24"></script>
 </body>
 </html>
 

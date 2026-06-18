@@ -5397,17 +5397,124 @@ async def get_doj_completeness(request: Request, x_api_key: str = Header(None)):
     def _work():
         return (db.get_manifest_stats(timeout_seconds=_ADMIN_QUERY_TIMEOUT),
                 db.get_missing_documents_stats(timeout_seconds=_ADMIN_QUERY_TIMEOUT),
-                db.get_dataset_db_counts(timeout_seconds=_ADMIN_QUERY_TIMEOUT))
+                db.get_dataset_db_counts(timeout_seconds=_ADMIN_QUERY_TIMEOUT),
+                db.get_updated_documents_counts(timeout_seconds=_ADMIN_QUERY_TIMEOUT))
 
-    manifest_stats, missing_stats, db_counts = await asyncio.to_thread(_work)
+    manifest_stats, missing_stats, db_counts, updated_counts = await asyncio.to_thread(_work)
 
     result = {
         "manifest": manifest_stats,
         "missing": missing_stats,
         # Authoritative per-dataset counts from the documents table (all 12 DS).
         "by_dataset_db": db_counts,
+        # Per-dataset count of files that have >=1 newer iteration (archived versions).
+        "updated_by_dataset": updated_counts,
     }
     _admin_cache.set("doj_completeness", result)
+    return result
+
+
+@app.get("/api/admin/updated-documents")
+async def get_updated_documents_route(
+    request: Request,
+    x_api_key: str = Header(None),
+    dataset: int = None
+):
+    """List EFTA files that have been re-issued (have >=1 archived version).
+
+    Each entry has the canonical (newest) row plus the older archived versions, so
+    the admin UI can compare the first version against later iterations. Optionally
+    filtered by dataset. Requires admin authentication.
+    """
+    is_authorized, error = verify_admin_access(request, x_api_key)
+    if not is_authorized:
+        raise HTTPException(status_code=401, detail=error)
+    if not db:
+        raise HTTPException(status_code=503, detail="Database not initialized")
+
+    cache_key = f"updated_documents:{dataset}"
+    cached = _admin_cache.get(cache_key)
+    if cached:
+        return cached
+
+    def _work():
+        return db.get_updated_documents(dataset_num=dataset,
+                                        timeout_seconds=_ADMIN_QUERY_TIMEOUT)
+
+    updated = await asyncio.to_thread(_work)
+    result = {"updated_documents": updated, "total": len(updated)}
+    _admin_cache.set(cache_key, result)
+    return result
+
+
+@app.get("/api/admin/version-diff")
+async def get_version_diff(
+    request: Request,
+    x_api_key: str = Header(None),
+    old: str = None,
+    new: str = None
+):
+    """Unified text diff between two document versions (by doc id).
+
+    Computes the diff server-side from the stored full_text of each version so the
+    admin can see exactly what changed between an earlier iteration ('old') and the
+    current/later one ('new'). Returns structured diff lines for rendering.
+    Requires admin authentication.
+    """
+    is_authorized, error = verify_admin_access(request, x_api_key)
+    if not is_authorized:
+        raise HTTPException(status_code=401, detail=error)
+    if not db:
+        raise HTTPException(status_code=503, detail="Database not initialized")
+    if not old or not new:
+        raise HTTPException(status_code=400, detail="old and new doc ids are required")
+
+    cache_key = f"version_diff:{old}:{new}"
+    cached = _admin_cache.get(cache_key)
+    if cached:
+        return cached
+
+    def _work():
+        return (db.get_document_full_text(old, include_hidden=True),
+                db.get_document_full_text(new, include_hidden=True))
+
+    old_text, new_text = await asyncio.to_thread(_work)
+    if old_text is None and new_text is None:
+        raise HTTPException(status_code=404, detail="Documents not found")
+
+    import difflib
+    old_lines = (old_text or "").splitlines()
+    new_lines = (new_text or "").splitlines()
+    lines = []
+    added = removed = 0
+    # n=3 lines of context keeps the payload bounded to the changed regions.
+    for ln in difflib.unified_diff(old_lines, new_lines, lineterm="", n=3):
+        if ln.startswith("+++") or ln.startswith("---"):
+            continue
+        if ln.startswith("@@"):
+            lines.append({"type": "hunk", "text": ln})
+        elif ln.startswith("+"):
+            lines.append({"type": "add", "text": ln[1:]})
+            added += 1
+        elif ln.startswith("-"):
+            lines.append({"type": "del", "text": ln[1:]})
+            removed += 1
+        else:
+            lines.append({"type": "ctx", "text": ln[1:] if ln else ln})
+
+    MAX_LINES = 5000
+    truncated = len(lines) > MAX_LINES
+    result = {
+        "old": old,
+        "new": new,
+        "added": added,
+        "removed": removed,
+        "identical": added == 0 and removed == 0,
+        "has_text": bool(old_lines or new_lines),
+        "truncated": truncated,
+        "lines": lines[:MAX_LINES],
+    }
+    _admin_cache.set(cache_key, result)
     return result
 
 

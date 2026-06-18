@@ -96,7 +96,10 @@ if [ "$ROLLBACK" = true ]; then
             fi
         done
         [ -f "${BACKUP_DIR}/run.py" ] && sudo cp -f "${BACKUP_DIR}/run.py" "${REMOTE_DIR}/"
-        sudo chown -R "${SSH_USER}:${SSH_USER}" "$REMOTE_DIR"
+        # Scope to restored targets only — see note in the main install block.
+        sudo chown "${SSH_USER}:${SSH_USER}" \
+            ${REMOTE_DIR}/backend/*.py ${REMOTE_DIR}/frontend/* \
+            ${REMOTE_DIR}/run.py ${REMOTE_DIR}/requirements.txt 2>/dev/null || true
         sudo systemctl restart "$SERVICE_NAME"
         sleep 3
         systemctl is-active "$SERVICE_NAME"
@@ -314,8 +317,13 @@ ssh "${SSH_TARGET}" bash -s -- \
     [ -f "${STAGING}/run.py" ]                       && sudo cp -f ${STAGING}/run.py     ${REMOTE_DIR}/
     [ -f "${STAGING}/requirements.txt" ]             && sudo cp -f ${STAGING}/requirements.txt ${REMOTE_DIR}/
 
-    # Fix ownership
-    sudo chown -R "${SSH_USER}:${SSH_USER}" "$REMOTE_DIR"
+    # Fix ownership — scope to deployed targets only.
+    # NEVER chown -R the whole REMOTE_DIR: it holds multi-GB DBs and ~2.8M
+    # files under extracted_text/ + thumbnails/, so a recursive walk takes
+    # minutes and evicts epstein.db from the page cache on every deploy.
+    sudo chown "${SSH_USER}:${SSH_USER}" \
+        ${REMOTE_DIR}/backend/*.py ${REMOTE_DIR}/frontend/* \
+        ${REMOTE_DIR}/run.py ${REMOTE_DIR}/requirements.txt 2>/dev/null || true
 
     # Install deps if requirements.txt changed
     if [ "$NEEDS_PIP" = "true" ]; then

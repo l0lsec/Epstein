@@ -3597,6 +3597,7 @@ async function loadDojCompleteness() {
         dojCompletenessData = await response.json();
         renderDojCompletenessStats();
         await loadMissingDocuments();
+        await loadUpdatedDocuments();
     } catch (error) {
         console.error('Error loading DOJ completeness:', error);
         const statsEl = document.getElementById('doj-completeness-stats');
@@ -3616,6 +3617,7 @@ function renderDojCompletenessStats() {
     const dbByDs = dbc.by_dataset || {};
     const eftaTotal = Object.values(dbByDs).reduce((a, b) => a + (b || 0), 0);
     const manByDs = manifest.by_dataset || {};
+    const updByDs = dojCompletenessData.updated_by_dataset || {};
 
     // Summary cards
     let html = '<div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: var(--space-md); margin-bottom: var(--space-lg);">';
@@ -3649,11 +3651,16 @@ function renderDojCompletenessStats() {
             <th style="text-align: right; padding: var(--space-sm); color: var(--success);">Downloaded</th>
             <th style="text-align: right; padding: var(--space-sm); color: var(--danger);">404</th>
             <th style="text-align: right; padding: var(--space-sm); color: var(--warning);">Failed</th>
+            <th style="text-align: right; padding: var(--space-sm); color: var(--accent-2, #a78bfa);" title="Files re-issued by DOJ (have a newer iteration). Click to inspect & compare.">Updated</th>
         </tr>
     </thead><tbody>`;
     for (let ds = 1; ds <= 12; ds++) {
         const inDb = dbByDs[String(ds)] || 0;
         const m = manByDs[String(ds)] || {};
+        const upd = updByDs[String(ds)] || 0;
+        const updCell = upd > 0
+            ? `<a href="#updated-files-card" onclick="showUpdatedForDataset(${ds})" style="color: var(--accent-2, #a78bfa); font-weight: 600; cursor: pointer;" title="View & compare re-issued files in Data Set ${ds}">${formatNumber(upd)}</a>`
+            : '<span style="color: var(--text-muted);">0</span>';
         html += `<tr style="border-bottom: 1px solid var(--border);">
             <td style="padding: var(--space-sm);">Data Set ${ds}</td>
             <td style="text-align: right; padding: var(--space-sm); color: var(--accent); font-weight: 600;">${formatNumber(inDb)}</td>
@@ -3661,6 +3668,7 @@ function renderDojCompletenessStats() {
             <td style="text-align: right; padding: var(--space-sm); color: var(--success);">${formatNumber(m.downloaded || 0)}</td>
             <td style="text-align: right; padding: var(--space-sm); color: var(--danger);">${formatNumber(m['404'] || 0)}</td>
             <td style="text-align: right; padding: var(--space-sm); color: var(--warning);">${formatNumber(m.failed || 0)}</td>
+            <td style="text-align: right; padding: var(--space-sm);">${updCell}</td>
         </tr>`;
     }
     html += '</tbody></table></div>';
@@ -3775,6 +3783,239 @@ function exportMissingDocs() {
     URL.revokeObjectURL(url);
 }
 
+// =============================================================================
+// Updated / re-issued files — files DOJ replaced with a newer iteration. The
+// downloader archives the old copy with a timestamp suffix, so each shows up as
+// a canonical (latest) row plus one or more archived (older) versions we can
+// diff against. See backend get_updated_documents / version-diff.
+// =============================================================================
+
+let updatedDocumentsData = [];
+
+async function loadUpdatedDocuments() {
+    const filterEl = document.getElementById('updated-dataset-filter');
+    const dataset = filterEl ? filterEl.value : '';
+    const listEl = document.getElementById('updated-docs-list');
+    if (listEl) listEl.innerHTML = '<div class="loading"><span class="spinner"></span>Loading…</div>';
+    try {
+        let url = `${window.location.origin}/api/admin/updated-documents`;
+        if (dataset) url += `?dataset=${dataset}`;
+        const response = await authFetch(url);
+        if (!response.ok) throw new Error('Failed to load updated documents');
+        const data = await response.json();
+        updatedDocumentsData = data.updated_documents || [];
+        renderUpdatedDocuments();
+    } catch (error) {
+        console.error('Error loading updated documents:', error);
+        if (listEl) listEl.innerHTML = '<div style="color: var(--text-muted); padding: var(--space-md);">No re-issued files found.</div>';
+    }
+}
+
+function renderUpdatedDocuments() {
+    const listEl = document.getElementById('updated-docs-list');
+    if (!listEl) return;
+    if (!updatedDocumentsData || updatedDocumentsData.length === 0) {
+        listEl.innerHTML = '<div style="text-align: center; padding: var(--space-lg); color: var(--text-muted);">No re-issued files found. When DOJ replaces a file, run the downloader with <code>--check-versions</code> to capture the new iteration.</div>';
+        return;
+    }
+    let html = '<table style="width: 100%; border-collapse: collapse;">';
+    html += `<thead>
+        <tr style="border-bottom: 1px solid var(--border);">
+            <th style="text-align: left; padding: var(--space-sm); color: var(--text-muted);">File</th>
+            <th style="text-align: left; padding: var(--space-sm); color: var(--text-muted);">Dataset</th>
+            <th style="text-align: left; padding: var(--space-sm); color: var(--text-muted);">Type</th>
+            <th style="text-align: right; padding: var(--space-sm); color: var(--text-muted);">Iterations</th>
+            <th style="text-align: left; padding: var(--space-sm); color: var(--text-muted);">Older versions → compare to latest</th>
+        </tr>
+    </thead><tbody>`;
+    for (const grp of updatedDocumentsData) {
+        const canonical = grp.canonical || {};
+        const versions = grp.versions || [];
+        const iterations = versions.length + (grp.canonical ? 1 : 0);
+        const canonId = canonical.id || '';
+        const canonName = canonical.filename || (grp.efta_num + '.' + (grp.file_type || ''));
+        let versionBtns = '';
+        for (const v of versions) {
+            const label = v.archived_at ? fmtArchivedAt(v.archived_at) : (v.filename || 'older');
+            versionBtns += `<button class="btn btn-sm" style="margin: 2px;" onclick="openVersionCompare('${escapeJs(v.id)}','${escapeJs(v.filename)}','${escapeJs(canonId)}','${escapeJs(canonName)}','${escapeJs(grp.file_type || '')}')">⇄ ${escapeHtml(label)}</button>`;
+        }
+        if (!versionBtns) versionBtns = '<span style="color: var(--text-muted);">—</span>';
+        html += `<tr style="border-bottom: 1px solid var(--border);">
+            <td style="padding: var(--space-sm); font-family: var(--font-mono); font-size: 0.85rem;">${escapeHtml(canonName)}</td>
+            <td style="padding: var(--space-sm);">Set ${grp.dataset_num}</td>
+            <td style="padding: var(--space-sm);">${escapeHtml(grp.file_type || '')}</td>
+            <td style="text-align: right; padding: var(--space-sm);">${iterations}</td>
+            <td style="padding: var(--space-sm);">${versionBtns}</td>
+        </tr>`;
+    }
+    html += '</tbody></table>';
+    listEl.innerHTML = html;
+}
+
+function fmtArchivedAt(stamp) {
+    // stamp like "20260130_203030" -> "2026-01-30 20:30"
+    const m = /^(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})(\d{2})$/.exec(stamp || '');
+    if (!m) return stamp;
+    return `${m[1]}-${m[2]}-${m[3]} ${m[4]}:${m[5]}`;
+}
+
+function escapeJs(str) {
+    return String(str == null ? '' : str).replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/"/g, '\\"');
+}
+
+function filterUpdatedData() {
+    loadUpdatedDocuments();
+}
+
+function showUpdatedForDataset(ds) {
+    const filterEl = document.getElementById('updated-dataset-filter');
+    if (filterEl) filterEl.value = String(ds);
+    loadUpdatedDocuments();
+    const card = document.getElementById('updated-files-card');
+    if (card) card.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+// -- version compare modal (visual side-by-side + text diff) -------------------
+let _versionCompareUrls = [];
+
+async function openVersionCompare(oldId, oldName, newId, newName, fileType) {
+    const modal = document.getElementById('version-compare-modal');
+    const titleEl = document.getElementById('version-compare-title');
+    if (!modal) return;
+    if (titleEl) titleEl.textContent = `Compare: ${newName}`;
+    modal.dataset.oldId = oldId;
+    modal.dataset.newId = newId;
+    modal.dataset.oldName = oldName;
+    modal.dataset.newName = newName;
+    modal.dataset.fileType = fileType || '';
+    modal.style.display = 'flex';
+    switchCompareTab('visual');
+}
+
+async function switchCompareTab(tab) {
+    const modal = document.getElementById('version-compare-modal');
+    if (!modal) return;
+    const visualBtn = document.getElementById('compare-tab-visual');
+    const textBtn = document.getElementById('compare-tab-text');
+    const body = document.getElementById('version-compare-body');
+    if (visualBtn) visualBtn.classList.toggle('active', tab === 'visual');
+    if (textBtn) textBtn.classList.toggle('active', tab === 'text');
+    if (tab === 'visual') {
+        await renderCompareVisual(modal, body);
+    } else {
+        await renderCompareText(modal, body);
+    }
+}
+
+function _revokeCompareUrls() {
+    for (const u of _versionCompareUrls) { try { URL.revokeObjectURL(u); } catch (e) {} }
+    _versionCompareUrls = [];
+}
+
+async function _authBlobUrl(docId) {
+    const resp = await authFetch(`${window.location.origin}/api/admin/documents/${encodeURIComponent(docId)}/file`);
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const blob = await resp.blob();
+    const url = URL.createObjectURL(blob);
+    _versionCompareUrls.push(url);
+    return url;
+}
+
+function _versionPaneHtml(url, fileType, filename) {
+    const ft = (fileType || '').toLowerCase();
+    const isTiff = /\.(tif|tiff)$/i.test(filename || '');
+    if (ft === 'pdf') {
+        return `<iframe src="${url}#toolbar=1&navpanes=0&view=FitH" style="width:100%;height:100%;border:0;"></iframe>`;
+    } else if (ft === 'image' && !isTiff) {
+        return `<img src="${url}" alt="${escapeHtml(filename || '')}" style="max-width:100%;max-height:100%;object-fit:contain;" />`;
+    } else if (ft === 'audio') {
+        return `<div style="padding:var(--space-lg);"><audio controls style="width:100%;"><source src="${url}"></audio></div>`;
+    } else if (ft === 'video') {
+        return `<video controls style="max-width:100%;max-height:100%;"><source src="${url}"></video>`;
+    }
+    return `<div style="padding:var(--space-lg);text-align:center;color:var(--text-secondary);"><p>No inline preview${isTiff ? ' (TIFF)' : ''}.</p><a class="btn" href="${url}" download="${escapeHtml(filename || 'document')}">Download</a></div>`;
+}
+
+async function renderCompareVisual(modal, body) {
+    _revokeCompareUrls();
+    body.innerHTML = '<div class="loading" style="padding:var(--space-lg);"><span class="spinner"></span>Loading both versions…</div>';
+    const { oldId, newId, oldName, newName, fileType } = modal.dataset;
+    try {
+        const [oldUrl, newUrl] = await Promise.all([_authBlobUrl(oldId), _authBlobUrl(newId)]);
+        body.innerHTML = `
+            <div style="display:flex; gap:var(--space-sm); width:100%; height:100%;">
+                <div style="flex:1; display:flex; flex-direction:column; min-width:0;">
+                    <div style="padding:6px 10px; background:var(--bg-secondary); border-bottom:1px solid var(--border); font-size:0.8rem; color:var(--text-muted);">Older — <span style="font-family:var(--font-mono);">${escapeHtml(oldName)}</span></div>
+                    <div style="flex:1; display:flex; align-items:center; justify-content:center; background:var(--bg-tertiary); min-height:0;">${_versionPaneHtml(oldUrl, fileType, oldName)}</div>
+                </div>
+                <div style="flex:1; display:flex; flex-direction:column; min-width:0;">
+                    <div style="padding:6px 10px; background:var(--bg-secondary); border-bottom:1px solid var(--border); font-size:0.8rem; color:var(--success);">Latest — <span style="font-family:var(--font-mono);">${escapeHtml(newName)}</span></div>
+                    <div style="flex:1; display:flex; align-items:center; justify-content:center; background:var(--bg-tertiary); min-height:0;">${_versionPaneHtml(newUrl, fileType, newName)}</div>
+                </div>
+            </div>`;
+    } catch (err) {
+        body.innerHTML = `<div style="color:var(--danger); padding:var(--space-lg);">Error loading files: ${escapeHtml(String((err && err.message) || err))}</div>`;
+    }
+}
+
+async function renderCompareText(modal, body) {
+    _revokeCompareUrls();
+    body.innerHTML = '<div class="loading" style="padding:var(--space-lg);"><span class="spinner"></span>Computing diff…</div>';
+    const { oldId, newId } = modal.dataset;
+    try {
+        const resp = await authFetch(`${window.location.origin}/api/admin/version-diff?old=${encodeURIComponent(oldId)}&new=${encodeURIComponent(newId)}`);
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const data = await resp.json();
+        if (!data.has_text) {
+            body.innerHTML = '<div style="padding:var(--space-lg); color:var(--text-muted);">Neither version has extracted text to diff (e.g. audio/video/image). Use the Side-by-side tab.</div>';
+            return;
+        }
+        if (data.identical) {
+            body.innerHTML = '<div style="padding:var(--space-lg); color:var(--success);">Extracted text is identical between the two versions. The change may be visual/redaction-only — check Side-by-side.</div>';
+            return;
+        }
+        let rows = '';
+        for (const ln of (data.lines || [])) {
+            let bg = 'transparent', color = 'var(--text-secondary)', prefix = ' ';
+            if (ln.type === 'add') { bg = 'rgba(34,197,94,0.12)'; color = 'var(--success)'; prefix = '+'; }
+            else if (ln.type === 'del') { bg = 'rgba(239,68,68,0.12)'; color = 'var(--danger)'; prefix = '-'; }
+            else if (ln.type === 'hunk') { bg = 'var(--bg-secondary)'; color = 'var(--text-muted)'; prefix = ''; }
+            rows += `<div style="background:${bg}; color:${color}; white-space:pre-wrap; word-break:break-word; padding:0 8px;">${escapeHtml(prefix + (ln.text || ''))}</div>`;
+        }
+        const note = data.truncated ? '<div style="padding:8px; color:var(--warning); font-size:0.8rem;">Diff truncated to first 5,000 lines.</div>' : '';
+        body.innerHTML = `
+            <div style="width:100%; height:100%; display:flex; flex-direction:column;">
+                <div style="padding:6px 10px; background:var(--bg-secondary); border-bottom:1px solid var(--border); font-size:0.85rem;">
+                    <span style="color:var(--success); font-weight:600;">+${data.added}</span>
+                    <span style="color:var(--danger); font-weight:600; margin-left:10px;">−${data.removed}</span>
+                    <span style="color:var(--text-muted); margin-left:10px;">lines changed (older → latest)</span>
+                </div>
+                ${note}
+                <div style="flex:1; overflow:auto; font-family:var(--font-mono); font-size:0.8rem; line-height:1.5;">${rows}</div>
+            </div>`;
+    } catch (err) {
+        body.innerHTML = `<div style="color:var(--danger); padding:var(--space-lg);">Error computing diff: ${escapeHtml(String((err && err.message) || err))}</div>`;
+    }
+}
+
+function closeVersionCompareModal() {
+    const modal = document.getElementById('version-compare-modal');
+    if (modal) modal.style.display = 'none';
+    const body = document.getElementById('version-compare-body');
+    if (body) body.innerHTML = '';
+    _revokeCompareUrls();
+}
+
+document.addEventListener('click', (e) => {
+    const modal = document.getElementById('version-compare-modal');
+    if (modal && e.target === modal) closeVersionCompareModal();
+});
+document.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape') return;
+    const modal = document.getElementById('version-compare-modal');
+    if (modal && modal.style.display === 'flex') closeVersionCompareModal();
+});
+
 function escapeHtml(str) {
     if (!str) return '';
     return str.replace(/&/g, '&amp;')
@@ -3795,6 +4036,12 @@ window.loadDojCompleteness = loadDojCompleteness;
 window.refreshDojCompleteness = refreshDojCompleteness;
 window.filterDojData = filterDojData;
 window.exportMissingDocs = exportMissingDocs;
+window.loadUpdatedDocuments = loadUpdatedDocuments;
+window.filterUpdatedData = filterUpdatedData;
+window.showUpdatedForDataset = showUpdatedForDataset;
+window.openVersionCompare = openVersionCompare;
+window.switchCompareTab = switchCompareTab;
+window.closeVersionCompareModal = closeVersionCompareModal;
 
 // =============================================================================
 // Document Visibility Management

@@ -23,6 +23,27 @@ except ImportError:
     from extractor import extract_email_date
 
 
+# EFTA number ranges per DOJ data set (inclusive). Kept in sync with the same
+# constant in scripts/download_doj_disclosures.py. An EFTA filename is
+# 'EFTA' + 8 zero-padded digits (e.g. EFTA00549159.pdf); a re-downloaded
+# version is suffixed with a timestamp (EFTA00039190_20260130_203030.pdf) but
+# the 8 digits still live at positions 5-12 so SUBSTR(filename, 5, 8) parses both.
+DATASET_EFTA_RANGES = {
+    1: (1, 3158), 2: (3159, 3857), 3: (3858, 5704), 4: (5705, 8408),
+    5: (8409, 8528), 6: (8529, 9015), 7: (9016, 9675), 8: (9676, 39024),
+    9: (39025, 1262781), 10: (1262782, 2212882), 11: (2212883, 2730264),
+    12: (2730265, 3000000),
+}
+
+
+def dataset_for_efta(efta_num: int) -> int:
+    """Return the dataset number (1-12) an EFTA number falls in, or 0 if none."""
+    for ds, (lo, hi) in DATASET_EFTA_RANGES.items():
+        if lo <= efta_num <= hi:
+            return ds
+    return 0
+
+
 class Database:
     """SQLite database for document metadata and search"""
     
@@ -1925,14 +1946,9 @@ class Database:
         suffixed re-download like EFTA00039190_20260130_203030.pdf still parses
         because we read the 8 digits at positions 5-12.
         """
-        ranges = {
-            1: (1, 3158), 2: (3159, 3857), 3: (3858, 5704), 4: (5705, 8408),
-            5: (8409, 8528), 6: (8529, 9015), 7: (9016, 9675), 8: (9676, 39024),
-            9: (39025, 1262781), 10: (1262782, 2212882), 11: (2212883, 2730264),
-            12: (2730265, 3000000),
-        }
         case_sql = " ".join(
-            f"WHEN n BETWEEN {a} AND {b} THEN {ds}" for ds, (a, b) in ranges.items()
+            f"WHEN n BETWEEN {a} AND {b} THEN {ds}"
+            for ds, (a, b) in DATASET_EFTA_RANGES.items()
         )
         sql = f"""
             SELECT CASE {case_sql} ELSE 0 END AS ds, COUNT(*) AS cnt
@@ -1958,6 +1974,112 @@ class Database:
             "unranged": unranged,
             "total": total,
         }
+
+    # -- updated / re-issued file versions ------------------------------------
+    # When the downloader (download_doj_disclosures.py --check-versions) finds a
+    # file changed on DOJ, archive_old_file() renames the old copy with a
+    # timestamp suffix (EFTA00039190_20260130_203030.pdf) and downloads the new
+    # one under the canonical name (EFTA00039190.pdf). Both are ingested as
+    # separate `documents` rows (id = md5 of path), so an EFTA number with >1
+    # iteration shows up as a canonical row plus one or more archived siblings.
+    # An archived filename has '_' at position 13 (right after the 8 EFTA digits);
+    # a canonical filename has '.' there.
+    _UPDATED_BASE_SQL = """
+        WITH efta AS (
+            SELECT id, filename, path, file_type, page_count, char_count,
+                   created_at, document_date,
+                   CAST(SUBSTR(filename, 5, 8) AS INTEGER) AS efta_num,
+                   CASE WHEN SUBSTR(filename, 13, 1) = '_' THEN 1 ELSE 0 END AS is_archived
+            FROM documents
+            WHERE filename LIKE 'EFTA%'
+        )
+    """
+
+    def get_updated_documents_counts(self, timeout_seconds: float = 0) -> Dict[str, int]:
+        """Per-dataset count of EFTA files that have >=1 newer iteration (an
+        archived/timestamped sibling). Drives the 'Updated' indicator on the
+        coverage table. Returns {"1": n, ..., "12": n}."""
+        case_sql = " ".join(
+            f"WHEN efta_num BETWEEN {a} AND {b} THEN {ds}"
+            for ds, (a, b) in DATASET_EFTA_RANGES.items()
+        )
+        sql = f"""
+            {self._UPDATED_BASE_SQL},
+            grp AS (
+                SELECT efta_num, file_type
+                FROM efta
+                GROUP BY efta_num, file_type
+                HAVING SUM(is_archived) >= 1
+            )
+            SELECT CASE {case_sql} ELSE 0 END AS ds, COUNT(*) AS cnt
+            FROM grp GROUP BY ds
+        """
+        by_dataset = {str(d): 0 for d in range(1, 13)}
+        with self.get_read_connection(timeout_seconds=timeout_seconds) as conn:
+            for ds, cnt in conn.execute(sql):
+                if ds and 1 <= ds <= 12:
+                    by_dataset[str(ds)] = cnt
+        return by_dataset
+
+    def get_updated_documents(self, dataset_num: int = None,
+                              timeout_seconds: float = 0) -> List[Dict[str, Any]]:
+        """List EFTA files that have been re-issued (>=1 archived version).
+
+        Each entry: efta_num, dataset_num, file_type, canonical (newest row) and
+        versions (older archived rows, oldest->newest). Optionally filtered to one
+        dataset via the EFTA-number range.
+        """
+        params: List[Any] = []
+        where = ""
+        if dataset_num is not None and dataset_num in DATASET_EFTA_RANGES:
+            lo, hi = DATASET_EFTA_RANGES[dataset_num]
+            where = "WHERE e.efta_num BETWEEN ? AND ?"
+            params = [lo, hi]
+        sql = f"""
+            {self._UPDATED_BASE_SQL},
+            grp AS (
+                SELECT efta_num, file_type
+                FROM efta
+                GROUP BY efta_num, file_type
+                HAVING SUM(is_archived) >= 1
+            )
+            SELECT e.id, e.filename, e.path, e.file_type, e.page_count,
+                   e.char_count, e.created_at, e.document_date,
+                   e.efta_num, e.is_archived
+            FROM efta e
+            JOIN grp g ON e.efta_num = g.efta_num AND e.file_type = g.file_type
+            {where}
+            ORDER BY e.efta_num, e.file_type, e.is_archived, e.filename
+        """
+        groups: Dict[tuple, Dict[str, Any]] = {}
+        with self.get_read_connection(timeout_seconds=timeout_seconds) as conn:
+            for row in conn.execute(sql, params):
+                r = dict(row)
+                key = (r["efta_num"], r["file_type"])
+                if key not in groups:
+                    groups[key] = {
+                        "efta_num": f"{r['efta_num']:08d}",
+                        "dataset_num": dataset_for_efta(r["efta_num"]),
+                        "file_type": r["file_type"],
+                        "canonical": None,
+                        "versions": [],
+                    }
+                entry = {
+                    "id": r["id"], "filename": r["filename"], "path": r["path"],
+                    "page_count": r["page_count"], "char_count": r["char_count"],
+                    "created_at": r["created_at"], "document_date": r["document_date"],
+                }
+                if r["is_archived"]:
+                    m = re.search(r"_(\d{8}_\d{6})", r["filename"])
+                    entry["archived_at"] = m.group(1) if m else None
+                    groups[key]["versions"].append(entry)
+                else:
+                    # Keep the newest canonical if somehow more than one.
+                    if groups[key]["canonical"] is None or \
+                       (r["created_at"] or "") > (groups[key]["canonical"].get("created_at") or ""):
+                        groups[key]["canonical"] = entry
+        # Stable order: by dataset then EFTA number.
+        return sorted(groups.values(), key=lambda g: (g["dataset_num"], g["efta_num"]))
 
     def get_not_downloaded(self, dataset_num: int = None) -> List[Dict[str, Any]]:
         """Get files that are in manifest but not successfully downloaded
@@ -2005,11 +2127,11 @@ class Database:
                 VALUES (?, ?, ?, ?, ?)
                 ON CONFLICT(filename, dataset_num) DO UPDATE SET
                     last_updated = CURRENT_TIMESTAMP
-            """, [(e['filename'], e['url'], e['dataset_num'], 
+            """, [(e['filename'], e['url'], e['dataset_num'],
                    e.get('page_found_on'), e.get('status', 'found')) for e in entries])
             conn.commit()
             return len(entries)
-    
+
     def clear_manifest(self, dataset_num: int = None) -> int:
         """Clear manifest entries (use with caution)
         
