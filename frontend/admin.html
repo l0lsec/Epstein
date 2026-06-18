@@ -2283,9 +2283,18 @@
                         <label style="margin-right: var(--space-sm); color: var(--text-secondary);">Filter by Dataset:</label>
                         <select id="doj-dataset-filter" class="login-input" style="width: auto; display: inline-block; min-width: 150px;" onchange="filterDojData()">
                             <option value="">All Datasets</option>
+                            <option value="1">Data Set 1</option>
+                            <option value="2">Data Set 2</option>
+                            <option value="3">Data Set 3</option>
+                            <option value="4">Data Set 4</option>
+                            <option value="5">Data Set 5</option>
+                            <option value="6">Data Set 6</option>
+                            <option value="7">Data Set 7</option>
+                            <option value="8">Data Set 8</option>
                             <option value="9">Data Set 9</option>
                             <option value="10">Data Set 10</option>
                             <option value="11">Data Set 11</option>
+                            <option value="12">Data Set 12</option>
                         </select>
                     </div>
                     
@@ -2531,7 +2540,19 @@
         </div>
     </main>
 
-    <script src="/static/admin.js?v=21"></script>
+    <!-- Admin document viewer modal (renders any doc, including hidden) -->
+    <div id="doc-viewer-modal" class="modal-overlay" style="display: none;">
+        <div class="modal-content" style="max-width: 1100px; width: 95%; height: 92vh; max-height: 92vh;">
+            <div class="modal-header">
+                <span class="modal-title" id="doc-viewer-title" style="font-family: var(--font-mono); font-size: 0.95rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">Document</span>
+                <button class="modal-close" onclick="closeDocViewerModal()" aria-label="Close">&times;</button>
+            </div>
+            <div class="modal-body" id="doc-viewer-body" style="flex: 1; padding: 0; display: flex; align-items: center; justify-content: center; background: var(--bg-tertiary);">
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/admin.js?v=23"></script>
 </body>
 </html>
 

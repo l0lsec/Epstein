@@ -3612,67 +3612,64 @@ function renderDojCompletenessStats() {
     
     const manifest = dojCompletenessData.manifest || {};
     const missing = dojCompletenessData.missing || {};
-    
-    // Build dataset cards
-    let html = '<div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: var(--space-md); margin-bottom: var(--space-lg);">';
-    
-    // Overall stats card
+    const dbc = dojCompletenessData.by_dataset_db || { by_dataset: {}, total: 0, non_efta: 0, unranged: 0 };
+    const dbByDs = dbc.by_dataset || {};
+    const eftaTotal = Object.values(dbByDs).reduce((a, b) => a + (b || 0), 0);
+    const manByDs = manifest.by_dataset || {};
+
+    // Summary cards
+    let html = '<div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: var(--space-md); margin-bottom: var(--space-lg);">';
     html += `
         <div style="background: var(--bg-secondary); border: 1px solid var(--border); border-radius: 8px; padding: var(--space-md);">
-            <div style="font-size: 0.85rem; color: var(--text-muted); margin-bottom: var(--space-xs);">Total Files Tracked</div>
-            <div style="font-size: 1.5rem; font-weight: 600; color: var(--accent);">${formatNumber(manifest.total || 0)}</div>
+            <div style="font-size: 0.85rem; color: var(--text-muted); margin-bottom: var(--space-xs);">Documents in Database</div>
+            <div style="font-size: 1.5rem; font-weight: 600; color: var(--accent);">${formatNumber(dbc.total || 0)}</div>
+            <div style="font-size: 0.7rem; color: var(--text-muted);">${formatNumber(eftaTotal)} EFTA across DS 1–12</div>
         </div>
-    `;
-    
-    // Missing count card
-    html += `
+        <div style="background: var(--bg-secondary); border: 1px solid var(--border); border-radius: 8px; padding: var(--space-md);">
+            <div style="font-size: 0.85rem; color: var(--text-muted); margin-bottom: var(--space-xs);">Manifest (scrape tracker)</div>
+            <div style="font-size: 1.5rem; font-weight: 600; color: var(--text-secondary);">${formatNumber(manifest.total || 0)}</div>
+            <div style="font-size: 0.7rem; color: var(--text-muted);">files seen during DOJ scraping</div>
+        </div>
         <div style="background: var(--danger-dim); border: 1px solid var(--danger); border-radius: 8px; padding: var(--space-md);">
             <div style="font-size: 0.85rem; color: var(--text-muted); margin-bottom: var(--space-xs);">Missing (404)</div>
             <div style="font-size: 1.5rem; font-weight: 600; color: var(--danger);">${formatNumber(missing.total || 0)}</div>
         </div>
     `;
-    
     html += '</div>';
-    
-    // Per-dataset breakdown
-    if (manifest.by_dataset && Object.keys(manifest.by_dataset).length > 0) {
-        html += '<h4 style="margin-bottom: var(--space-md); color: var(--text-secondary);">Per-Dataset Status</h4>';
-        html += '<div style="overflow-x: auto;"><table style="width: 100%; border-collapse: collapse;">';
-        html += `<thead>
-            <tr style="border-bottom: 1px solid var(--border);">
-                <th style="text-align: left; padding: var(--space-sm); color: var(--text-muted);">Dataset</th>
-                <th style="text-align: right; padding: var(--space-sm); color: var(--text-muted);">Total Found</th>
-                <th style="text-align: right; padding: var(--space-sm); color: var(--success);">Downloaded</th>
-                <th style="text-align: right; padding: var(--space-sm); color: var(--danger);">404</th>
-                <th style="text-align: right; padding: var(--space-sm); color: var(--warning);">Failed</th>
-                <th style="text-align: right; padding: var(--space-sm); color: var(--text-muted);">Completion</th>
-            </tr>
-        </thead><tbody>`;
-        
-        for (const [dataset, stats] of Object.entries(manifest.by_dataset)) {
-            const total = stats.total || 0;
-            const downloaded = stats.downloaded || 0;
-            const notFound = stats['404'] || 0;
-            const failed = stats.failed || 0;
-            const completionPct = total > 0 ? ((downloaded / total) * 100).toFixed(1) : '0.0';
-            
-            html += `<tr style="border-bottom: 1px solid var(--border);">
-                <td style="padding: var(--space-sm);">Data Set ${dataset}</td>
-                <td style="text-align: right; padding: var(--space-sm);">${formatNumber(total)}</td>
-                <td style="text-align: right; padding: var(--space-sm); color: var(--success);">${formatNumber(downloaded)}</td>
-                <td style="text-align: right; padding: var(--space-sm); color: var(--danger);">${formatNumber(notFound)}</td>
-                <td style="text-align: right; padding: var(--space-sm); color: var(--warning);">${formatNumber(failed)}</td>
-                <td style="text-align: right; padding: var(--space-sm);">
-                    <span style="color: ${parseFloat(completionPct) > 95 ? 'var(--success)' : 'var(--warning)'};">${completionPct}%</span>
-                </td>
-            </tr>`;
-        }
-        
-        html += '</tbody></table></div>';
-    } else {
-        html += '<p style="color: var(--text-muted);">No manifest data available. Run the download script to start tracking files.</p>';
+
+    // Per-dataset table for ALL 12 datasets, driven by the database counts.
+    html += '<h4 style="margin-bottom: var(--space-sm); color: var(--text-secondary);">Per-Dataset Coverage (all 12 — counts from the database)</h4>';
+    html += '<p style="font-size: 0.75rem; color: var(--text-muted); margin-bottom: var(--space-md);">"In Database" is what we actually hold. The manifest columns reflect the DOJ scrape tracker and may be incomplete.</p>';
+    html += '<div style="overflow-x: auto;"><table style="width: 100%; border-collapse: collapse;">';
+    html += `<thead>
+        <tr style="border-bottom: 1px solid var(--border);">
+            <th style="text-align: left; padding: var(--space-sm); color: var(--text-muted);">Dataset</th>
+            <th style="text-align: right; padding: var(--space-sm); color: var(--accent);">In Database</th>
+            <th style="text-align: right; padding: var(--space-sm); color: var(--text-muted);">Manifest Found</th>
+            <th style="text-align: right; padding: var(--space-sm); color: var(--success);">Downloaded</th>
+            <th style="text-align: right; padding: var(--space-sm); color: var(--danger);">404</th>
+            <th style="text-align: right; padding: var(--space-sm); color: var(--warning);">Failed</th>
+        </tr>
+    </thead><tbody>`;
+    for (let ds = 1; ds <= 12; ds++) {
+        const inDb = dbByDs[String(ds)] || 0;
+        const m = manByDs[String(ds)] || {};
+        html += `<tr style="border-bottom: 1px solid var(--border);">
+            <td style="padding: var(--space-sm);">Data Set ${ds}</td>
+            <td style="text-align: right; padding: var(--space-sm); color: var(--accent); font-weight: 600;">${formatNumber(inDb)}</td>
+            <td style="text-align: right; padding: var(--space-sm); color: var(--text-muted);">${formatNumber(m.total || 0)}</td>
+            <td style="text-align: right; padding: var(--space-sm); color: var(--success);">${formatNumber(m.downloaded || 0)}</td>
+            <td style="text-align: right; padding: var(--space-sm); color: var(--danger);">${formatNumber(m['404'] || 0)}</td>
+            <td style="text-align: right; padding: var(--space-sm); color: var(--warning);">${formatNumber(m.failed || 0)}</td>
+        </tr>`;
     }
-    
+    html += '</tbody></table></div>';
+
+    const nonEfta = dbc.non_efta || 0;
+    if (nonEfta > 0 || dbc.unranged) {
+        html += `<p style="font-size: 0.75rem; color: var(--text-muted); margin-top: var(--space-sm);">+ ${formatNumber(nonEfta)} non-EFTA documents (Court Records, FOIA, House Disclosures, etc.)${dbc.unranged ? `, ${formatNumber(dbc.unranged)} EFTA outside known ranges` : ''}.</p>`;
+    }
+
     statsEl.innerHTML = html;
 }
 
@@ -4341,6 +4338,10 @@ function renderHiddenDocuments() {
                             ${escapeHtml(doc.category || 'Unknown')} • ${escapeHtml(doc.subcategory || '')}
                         </div>
                     </div>
+                    <button class="btn btn-sm" onclick="viewDocumentAdmin('${escapeHtml(doc.id)}', '${escapeHtml(doc.filename)}', '${escapeHtml(doc.file_type || '')}')" style="flex-shrink: 0;" title="View document">
+                        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+                        View
+                    </button>
                     <button class="btn btn-sm" onclick="unhideDocument('${escapeHtml(doc.id)}')" style="flex-shrink: 0;">
                         <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
                             <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/>
@@ -4414,6 +4415,10 @@ async function searchDocumentsForVisibility() {
                             ${escapeHtml(doc.category || 'Unknown')} • ${escapeHtml(doc.subcategory || '')}
                         </div>
                     </div>
+                    <button class="btn btn-sm" onclick="viewDocumentAdmin('${escapeHtml(doc.id)}', '${escapeHtml(doc.filename)}', '${escapeHtml(doc.file_type || '')}')" style="flex-shrink: 0;" title="View document">
+                        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+                        View
+                    </button>
                     ${isHidden ? `
                         <button class="btn btn-sm" onclick="unhideDocument('${escapeHtml(doc.id)}'); searchDocumentsForVisibility();">
                             <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
@@ -4604,6 +4609,81 @@ window.executeCsvBulkAction = executeCsvBulkAction;
 window.loadCategoryVisibility = loadCategoryVisibility;
 window.hideCategory = hideCategory;
 window.unhideCategory = unhideCategory;
+
+// =============================================================================
+// Admin document viewer — renders ANY document (including hidden) in-app.
+// Hidden docs 404 on public endpoints, and native element loads (iframe/img/
+// video src) can't send the X-API-Key header, so we authFetch the bytes via
+// the admin endpoint and render them through a blob: object URL.
+// =============================================================================
+
+let _docViewerObjectUrl = null;
+
+async function viewDocumentAdmin(docId, filename, fileType) {
+    const modal = document.getElementById('doc-viewer-modal');
+    const titleEl = document.getElementById('doc-viewer-title');
+    const body = document.getElementById('doc-viewer-body');
+    if (!modal || !body) return;
+
+    if (titleEl) titleEl.textContent = filename || docId;
+    body.innerHTML = '<div class="loading" style="color: var(--text-muted);"><span class="spinner"></span>Loading document…</div>';
+    modal.style.display = 'flex';
+
+    try {
+        const resp = await authFetch(`${window.location.origin}/api/admin/documents/${encodeURIComponent(docId)}/file`);
+        if (!resp.ok) {
+            body.innerHTML = `<div style="color: var(--danger); padding: var(--space-lg);">Could not load document (HTTP ${resp.status}). The file may be missing on disk.</div>`;
+            return;
+        }
+        if (_docViewerObjectUrl) { URL.revokeObjectURL(_docViewerObjectUrl); _docViewerObjectUrl = null; }
+        const blob = await resp.blob();
+        const url = URL.createObjectURL(blob);
+        _docViewerObjectUrl = url;
+
+        const ft = (fileType || '').toLowerCase();
+        const isTiff = /\.(tif|tiff)$/i.test(filename || '');
+        let html;
+        if (ft === 'pdf') {
+            html = `<iframe src="${url}#toolbar=1&navpanes=0&view=FitH" style="width: 100%; height: 100%; border: 0;" title="${escapeHtml(filename || '')}"></iframe>`;
+        } else if (ft === 'audio') {
+            html = `<div style="padding: var(--space-lg);"><audio controls style="width: 480px; max-width: 100%;"><source src="${url}"></audio></div>`;
+        } else if (ft === 'video') {
+            html = `<video controls style="max-width: 100%; max-height: 100%;"><source src="${url}"></video>`;
+        } else if ((ft === 'image' || ft === 'document') && !isTiff) {
+            html = `<img src="${url}" alt="${escapeHtml(filename || '')}" style="max-width: 100%; max-height: 100%; object-fit: contain;" />`;
+        } else {
+            html = `<div style="padding: var(--space-lg); text-align: center; color: var(--text-secondary);">
+                <p>Inline preview not supported for this file type${isTiff ? ' (TIFF)' : ''}.</p>
+                <a class="btn" href="${url}" download="${escapeHtml(filename || 'document')}">Download to view</a>
+            </div>`;
+        }
+        body.innerHTML = html;
+    } catch (err) {
+        body.innerHTML = `<div style="color: var(--danger); padding: var(--space-lg);">Error loading document: ${escapeHtml(String((err && err.message) || err))}</div>`;
+    }
+}
+
+function closeDocViewerModal() {
+    const modal = document.getElementById('doc-viewer-modal');
+    const body = document.getElementById('doc-viewer-body');
+    if (modal) modal.style.display = 'none';
+    if (body) body.innerHTML = '';
+    if (_docViewerObjectUrl) { URL.revokeObjectURL(_docViewerObjectUrl); _docViewerObjectUrl = null; }
+}
+
+// Close on overlay click and Escape key.
+document.addEventListener('click', (e) => {
+    const modal = document.getElementById('doc-viewer-modal');
+    if (modal && e.target === modal) closeDocViewerModal();
+});
+document.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape') return;
+    const modal = document.getElementById('doc-viewer-modal');
+    if (modal && modal.style.display === 'flex') closeDocViewerModal();
+});
+
+window.viewDocumentAdmin = viewDocumentAdmin;
+window.closeDocViewerModal = closeDocViewerModal;
 
 // =============================================================================
 // File Type Reclassification

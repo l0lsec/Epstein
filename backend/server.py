@@ -1813,31 +1813,16 @@ async def get_document_text(doc_id: str, request: Request):
     return {"full_text": full_text}
 
 
-@app.get("/api/documents/{doc_id}/file")
-async def get_document_file(doc_id: str, request: Request):
-    """Get the actual document file for inline viewing
-    
-    Note: Returns 404 for hidden documents or documents in hidden categories.
+def _serve_document_file(doc: dict, doc_id: str, client_ip: str, request_id: str,
+                         admin: bool = False):
+    """Resolve a document's on-disk file and return a FileResponse for inline
+    viewing. Shared by the public file route and the admin (hidden-bypass) route.
+    `doc` must already be fetched with the appropriate visibility check.
     """
-    client_ip, request_id = get_client_info(request)
-    
-    if not db:
-        raise HTTPException(status_code=503, detail="Database not initialized")
-    
-    doc = await asyncio.to_thread(db.get_document, doc_id, include_hidden=False)
-    if not doc:
-        security_logger.log_security_event(
-            event_type="file_not_found",
-            severity="low",
-            client_ip=client_ip,
-            message=f"Attempted file access for non-existent or hidden document: {doc_id}",
-            request_id=request_id,
-            document_id=doc_id
-        )
-        raise HTTPException(status_code=404, detail="Document not found")
-    
+    from starlette.responses import FileResponse
+
     file_path = (BASE_PATH / doc["path"]).resolve()
-    
+
     # Path traversal protection - ensure file is within BASE_PATH
     if not str(file_path).startswith(str(BASE_PATH.resolve())):
         security_logger.log_security_event(
@@ -1849,7 +1834,7 @@ async def get_document_file(doc_id: str, request: Request):
             document_id=doc_id
         )
         raise HTTPException(status_code=403, detail="Access denied")
-    
+
     if not file_path.exists():
         security_logger.log_security_event(
             event_type="file_missing",
@@ -1861,7 +1846,7 @@ async def get_document_file(doc_id: str, request: Request):
             expected_path=str(file_path)
         )
         raise HTTPException(status_code=404, detail="File not found")
-    
+
     # Determine media type based on file extension
     ext = file_path.suffix.lower()
     media_types = {
@@ -1882,24 +1867,21 @@ async def get_document_file(doc_id: str, request: Request):
         '.webp': 'image/webp',
     }
     media_type = media_types.get(ext, 'application/octet-stream')
-    
+
     # Log file access (important for audit trail)
     file_size = file_path.stat().st_size
     security_logger.log_document_access(
         client_ip=client_ip,
         document_id=doc_id,
         document_path=doc["path"],
-        action="download",
+        action="admin_download" if admin else "download",
         request_id=request_id,
         filename=doc.get("filename", ""),
         file_type=ext,
         file_size_bytes=file_size
     )
-    
-    # Return file for inline viewing using FileResponse
-    # FileResponse supports HTTP Range requests which are required for video/audio seeking
-    from starlette.responses import FileResponse
-    
+
+    # FileResponse supports HTTP Range requests required for video/audio seeking
     return FileResponse(
         path=file_path,
         media_type=media_type,
@@ -1908,6 +1890,65 @@ async def get_document_file(doc_id: str, request: Request):
             'Accept-Ranges': 'bytes',  # Explicitly indicate we support range requests
         }
     )
+
+
+@app.get("/api/documents/{doc_id}/file")
+async def get_document_file(doc_id: str, request: Request):
+    """Get the actual document file for inline viewing
+
+    Note: Returns 404 for hidden documents or documents in hidden categories.
+    """
+    client_ip, request_id = get_client_info(request)
+
+    if not db:
+        raise HTTPException(status_code=503, detail="Database not initialized")
+
+    doc = await asyncio.to_thread(db.get_document, doc_id, include_hidden=False)
+    if not doc:
+        security_logger.log_security_event(
+            event_type="file_not_found",
+            severity="low",
+            client_ip=client_ip,
+            message=f"Attempted file access for non-existent or hidden document: {doc_id}",
+            request_id=request_id,
+            document_id=doc_id
+        )
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    return _serve_document_file(doc, doc_id, client_ip, request_id)
+
+
+@app.get("/api/admin/documents/{doc_id}/file")
+async def admin_get_document_file(doc_id: str, request: Request, x_api_key: str = Header(None)):
+    """Serve a document file for admin review — INCLUDING hidden documents.
+
+    Admin-authenticated twin of /api/documents/{doc_id}/file that bypasses the
+    is_hidden / hidden-category filter so admins can preview what they've hidden.
+    """
+    is_authorized, error = verify_admin_access(request, x_api_key)
+    if not is_authorized:
+        raise HTTPException(status_code=401, detail=error)
+    if not db:
+        raise HTTPException(status_code=503, detail="Database not initialized")
+    client_ip, request_id = get_client_info(request)
+    doc = await asyncio.to_thread(db.get_document, doc_id, include_hidden=True)
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found")
+    return _serve_document_file(doc, doc_id, client_ip, request_id, admin=True)
+
+
+@app.get("/api/admin/documents/{doc_id}/text")
+async def admin_get_document_text(doc_id: str, request: Request, x_api_key: str = Header(None)):
+    """Full text of a document for admin review, including hidden documents."""
+    is_authorized, error = verify_admin_access(request, x_api_key)
+    if not is_authorized:
+        raise HTTPException(status_code=401, detail=error)
+    if not db:
+        raise HTTPException(status_code=503, detail="Database not initialized")
+    full_text = await asyncio.to_thread(db.get_document_full_text, doc_id, include_hidden=True)
+    if full_text is None:
+        raise HTTPException(status_code=404, detail="Document not found")
+    return {"full_text": full_text}
 
 
 def generate_pdf_thumbnail(pdf_path: Path, output_path: Path) -> bool:
@@ -5355,13 +5396,16 @@ async def get_doj_completeness(request: Request, x_api_key: str = Header(None)):
 
     def _work():
         return (db.get_manifest_stats(timeout_seconds=_ADMIN_QUERY_TIMEOUT),
-                db.get_missing_documents_stats(timeout_seconds=_ADMIN_QUERY_TIMEOUT))
+                db.get_missing_documents_stats(timeout_seconds=_ADMIN_QUERY_TIMEOUT),
+                db.get_dataset_db_counts(timeout_seconds=_ADMIN_QUERY_TIMEOUT))
 
-    manifest_stats, missing_stats = await asyncio.to_thread(_work)
+    manifest_stats, missing_stats, db_counts = await asyncio.to_thread(_work)
 
     result = {
         "manifest": manifest_stats,
-        "missing": missing_stats
+        "missing": missing_stats,
+        # Authoritative per-dataset counts from the documents table (all 12 DS).
+        "by_dataset_db": db_counts,
     }
     _admin_cache.set("doj_completeness", result)
     return result

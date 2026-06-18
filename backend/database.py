@@ -1914,7 +1914,51 @@ class Database:
                 "overall": overall,
                 "by_dataset": by_dataset
             }
-    
+
+    def get_dataset_db_counts(self, timeout_seconds: float = 0) -> Dict[str, Any]:
+        """Per-dataset counts of documents ACTUALLY present in the DB, bucketed
+        by EFTA number into the 12 DOJ datasets via DATASET_EFTA_RANGES.
+
+        This is the authoritative "what we hold" view (unlike the doj_manifest
+        scrape-tracker, which is stale/partial). EFTA filenames are
+        'EFTA' + 8 zero-padded digits (e.g. EFTA00549159.pdf); a timestamp-
+        suffixed re-download like EFTA00039190_20260130_203030.pdf still parses
+        because we read the 8 digits at positions 5-12.
+        """
+        ranges = {
+            1: (1, 3158), 2: (3159, 3857), 3: (3858, 5704), 4: (5705, 8408),
+            5: (8409, 8528), 6: (8529, 9015), 7: (9016, 9675), 8: (9676, 39024),
+            9: (39025, 1262781), 10: (1262782, 2212882), 11: (2212883, 2730264),
+            12: (2730265, 3000000),
+        }
+        case_sql = " ".join(
+            f"WHEN n BETWEEN {a} AND {b} THEN {ds}" for ds, (a, b) in ranges.items()
+        )
+        sql = f"""
+            SELECT CASE {case_sql} ELSE 0 END AS ds, COUNT(*) AS cnt
+            FROM (SELECT CAST(SUBSTR(filename, 5, 8) AS INTEGER) AS n
+                  FROM documents WHERE filename LIKE 'EFTA%')
+            GROUP BY ds
+        """
+        with self.get_read_connection(timeout_seconds=timeout_seconds) as conn:
+            by_dataset = {str(d): 0 for d in range(1, 13)}
+            unranged = 0
+            for ds, cnt in conn.execute(sql):
+                if ds and 1 <= ds <= 12:
+                    by_dataset[str(ds)] = cnt
+                else:
+                    unranged += cnt
+            non_efta = conn.execute(
+                "SELECT COUNT(*) FROM documents WHERE filename NOT LIKE 'EFTA%'"
+            ).fetchone()[0]
+            total = conn.execute("SELECT COUNT(*) FROM documents").fetchone()[0]
+        return {
+            "by_dataset": by_dataset,
+            "non_efta": non_efta,
+            "unranged": unranged,
+            "total": total,
+        }
+
     def get_not_downloaded(self, dataset_num: int = None) -> List[Dict[str, Any]]:
         """Get files that are in manifest but not successfully downloaded
         
