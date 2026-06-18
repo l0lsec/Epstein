@@ -1,5 +1,5 @@
 /**
- * Epstein Library Files Public Archive - Frontend Application
+ * Epstein Files Public Archive - Frontend Application
  */
 
 const API_BASE = window.location.origin + '/api';
@@ -2513,7 +2513,7 @@ function handleShare(platform) {
     if (doc.subcategory) contextParts.push(doc.subcategory);
     const context = contextParts.length > 0 ? ` (${contextParts.join(' - ')})` : '';
     
-    const shareText = `Check out this document from the Epstein Library Files Public Archive: "${doc.filename}"${context}`;
+    const shareText = `Check out this document from the Epstein Files Public Archive: "${doc.filename}"${context}`;
     
     const isMobile = isMobileDevice();
     let webUrl = '';
@@ -2609,7 +2609,7 @@ function handleSearchShare(platform) {
     const siteUrl = 'https://epsteinfta.com';
     const shareUrl = `${siteUrl}/?q=${encodeURIComponent(query)}`;
     
-    const shareText = `I found ${totalResults} results for "${query}" on the Epstein Library Files Public Archive`;
+    const shareText = `I found ${totalResults} results for "${query}" on the Epstein Files Public Archive`;
     
     const isMobile = isMobileDevice();
     let webUrl = '';
@@ -2628,7 +2628,7 @@ function handleSearchShare(platform) {
             intentUrl = null;
             break;
         case 'linkedin':
-            webUrl = `https://www.linkedin.com/shareArticle?mini=true&url=${encodeURIComponent(shareUrl)}&title=${encodeURIComponent('Epstein Files: Search Results')}&summary=${encodeURIComponent(shareText)}&source=${encodeURIComponent('Epstein Files Archive')}`;
+            webUrl = `https://www.linkedin.com/shareArticle?mini=true&url=${encodeURIComponent(shareUrl)}&title=${encodeURIComponent('Epstein Files: Search Results')}&summary=${encodeURIComponent(shareText)}&source=${encodeURIComponent('Epstein Files Public Archive')}`;
             appUrl = `linkedin://shareArticle?url=${encodeURIComponent(shareUrl)}&title=${encodeURIComponent(shareText)}`;
             intentUrl = `intent://shareArticle?url=${encodeURIComponent(shareUrl)}&title=${encodeURIComponent(shareText)}#Intent;package=com.linkedin.android;scheme=linkedin;end`;
             break;

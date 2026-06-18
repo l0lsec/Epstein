@@ -821,13 +821,13 @@ async def root(doc: str = None):
                 )
                 # Replace og:title with document name
                 html = html.replace(
-                    'content="Epstein Files Library Archive | Public Document Search"',
-                    f'content="{filename_escaped} | Epstein Files Archive"'
+                    'content="Epstein Files Public Archive | Public Document Search"',
+                    f'content="{filename_escaped} | Epstein Files Public Archive"'
                 )
                 # Replace twitter:title as well
                 html = html.replace(
-                    'content="Epstein Files Library Archive | Public Document Search">',
-                    f'content="{filename_escaped} | Epstein Files Archive">'
+                    'content="Epstein Files Public Archive | Public Document Search">',
+                    f'content="{filename_escaped} | Epstein Files Public Archive">'
                 )
                 
                 return HTMLResponse(content=html)

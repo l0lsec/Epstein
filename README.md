@@ -22,7 +22,7 @@ If you operate a public deployment, please honor takedown requests from victims,
 
 ## Features
 
-- **Full-text search** across ~45,000 documents (PDF, image, audio, video) backed by SQLite FTS5 with BM25 ranking
+- **Full-text search** across ~1.18 million documents / ~2.26 million pages (PDF, scanned image, audio, video) backed by SQLite FTS5 with BM25 ranking
 - **Semantic search** via sentence-transformer embeddings and a local vector store
 - **Hybrid search** that combines lexical and semantic scores
 - **Ask AI** — GPT-powered Q&A over retrieved documents (requires OpenAI key)
@@ -44,14 +44,15 @@ If you operate a public deployment, please honor takedown requests from victims,
 
 | Category | Documents | Description | Source |
 |----------|-----------|-------------|--------|
-| DOJ Disclosures | ~1,004,700 | Evidence files, flight logs, contact books, reports | [justice.gov/epstein/doj-disclosures](https://www.justice.gov/epstein/doj-disclosures) |
-| FOIA Files | ~100+ | FBI, CBP, BOP releases | [justice.gov/epstein/foia](https://www.justice.gov/epstein/foia) |
-| Court Records | ~12,100 | Legal filings from various cases | [justice.gov/epstein/court-records](https://www.justice.gov/epstein/court-records) |
+| DOJ Disclosures | ~1,156,000 | Evidence files, flight logs, contact books, reports | [justice.gov/epstein/doj-disclosures](https://www.justice.gov/epstein/doj-disclosures) |
 | House Disclosures | ~18,800 | DOJ-OGR scanned documents (JPG/TIF), video (MP4), audio (WAV) | House Oversight Committee (Google Drive) |
+| Court Records | ~12,100 | Legal filings from ~49 cases (Giuffre, Maxwell, USVI v. JPMorgan, et al.) | [justice.gov/epstein/court-records](https://www.justice.gov/epstein/court-records) |
+| FOIA Files | ~110 | FBI, CBP, BOP, and Florida state FOIA releases | [justice.gov/epstein/foia](https://www.justice.gov/epstein/foia) |
+| FBI Vault | ~15 | FBI "Jeffrey Epstein" Vault release (multi-part PDF set) | [vault.fbi.gov](https://vault.fbi.gov) |
 
-**Total: ~1,187,106+ documents**
+**Total: ~1,187,160 documents across ~2,259,500 pages** (live counts are reported by `/api/stats`)
 
-The repo does not ship the documents themselves and does not bundle downloaders for them. Obtain the files directly from the official sources linked above and place them under the directory names listed in the architecture tree (e.g. `DOJ Disclosures/`, `FOIA/`, `CourtRecords/`, `House Disclosures/`). Once the files are on disk, `python run.py extract` and `python run.py index` will pick them up.
+The repo does not ship the documents themselves and does not bundle downloaders for them. Obtain the files directly from the official sources linked above and place them under the directory names listed in the architecture tree (e.g. `DOJ Disclosures/`, `FOIA/`, `CourtRecords/`, `House Disclosures/`, `FBI Vault/`). Once the files are on disk, `python run.py extract` and `python run.py index` will pick them up.
 
 ---
 
@@ -98,9 +99,10 @@ Download files from the official sources linked in the Document Collection table
 | Source | Local directory |
 |--------|-----------------|
 | DOJ Disclosures | `DOJ Disclosures/` |
-| FOIA releases | `FOIA/` |
-| Court Records | `CourtRecords/` |
 | House Disclosures | `House Disclosures/` |
+| Court Records | `CourtRecords/` |
+| FOIA releases | `FOIA/` |
+| FBI Vault | `FBI Vault/` |
 
 The repo intentionally does not bundle downloaders. Any tool that preserves the original filenames will work (`wget`, `curl`, `gdown`, browser bulk-downloaders, etc.).
 
@@ -374,7 +376,7 @@ cp .deploy.env.example .deploy.env
 
 ## Performance Notes
 
-- Initial extraction of ~45,000 documents takes 1–2 hours (PDFs are fast; image OCR dominates)
+- Initial extraction of the full corpus (~1.18M documents) is a long-running job — PDFs extract quickly, but the scanned image/TIF productions dominate the runtime via OCR
 - Subsequent runs skip already-processed files (tracked by content hash)
 - Image OCR throughput is ~1–2 images/second per worker
 - Full-text search uses SQLite FTS5 with BM25 ranking; response cache TTLs are tuned for high read concurrency

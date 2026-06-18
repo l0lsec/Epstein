@@ -1,5 +1,5 @@
 /**
- * Epstein Files Archive - Admin Console
+ * Epstein Files Public Archive - Admin Console
  * Telemetry and Usage Statistics Dashboard
  */
 
