@@ -2314,22 +2314,39 @@
             <!-- Updated / Re-issued Files -->
             <div class="card" id="updated-files-card" style="margin-bottom: var(--space-lg);">
                 <div class="card-header">
-                    <span class="card-title">🔄 Updated / Re-issued Files</span>
-                    <button class="btn btn-sm" onclick="loadUpdatedDocuments()">
-                        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
-                            <path d="M1 4v6h6M23 20v-6h-6"/>
-                            <path d="M20.49 9A9 9 0 005.64 5.64L1 10m22 4l-4.64 4.36A9 9 0 013.51 15"/>
-                        </svg>
-                        Refresh
-                    </button>
+                    <span class="card-title">🔄 Altered Documents — Review Queue</span>
+                    <div style="display:flex;align-items:center;gap:var(--space-md);">
+                        <span id="alteration-counts" style="font-size:0.78rem;color:var(--text-muted);"></span>
+                        <button class="btn btn-sm" onclick="loadUpdatedDocuments()">
+                            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M1 4v6h6M23 20v-6h-6"/>
+                                <path d="M20.49 9A9 9 0 005.64 5.64L1 10m22 4l-4.64 4.36A9 9 0 013.51 15"/>
+                            </svg>
+                            Refresh
+                        </button>
+                    </div>
                 </div>
                 <div class="card-body">
                     <p style="margin-bottom: var(--space-md); font-size: 0.9rem; color: var(--text-muted);">
-                        Files DOJ replaced with a newer iteration. The downloader keeps the prior copy (timestamped), so you can compare the first version against later ones — side-by-side or as a text diff. Populated by running the downloader with <code>--check-versions</code>.
+                        Documents DOJ re-issued after release. Compare before/after (the actual PDF and the transcribed text), then decide: <strong style="color:var(--success);">Clear</strong> if it's a legitimate redaction protecting a victim (older version stays hidden), or <strong style="color:var(--danger);">Expose</strong> if it appears to hide a perpetrator (publishes the before/after to the public). Built by <code>recheck_versions.py</code> + <code>compute_alterations.py</code>.
                     </p>
-                    <div style="margin-bottom: var(--space-md);">
-                        <label style="margin-right: var(--space-sm); color: var(--text-secondary);">Filter by Dataset:</label>
-                        <select id="updated-dataset-filter" class="login-input" style="width: auto; display: inline-block; min-width: 150px;" onchange="filterUpdatedData()">
+                    <div style="margin-bottom: var(--space-md); display:flex; gap:var(--space-md); flex-wrap:wrap; align-items:center;">
+                        <span style="color:var(--text-secondary);">Status:</span>
+                        <select id="alteration-status-filter" class="login-input" style="width:auto;display:inline-block;min-width:120px;" onchange="filterUpdatedData()">
+                            <option value="pending">Pending</option>
+                            <option value="exposed">Exposed</option>
+                            <option value="cleared">Cleared</option>
+                            <option value="trivial">Trivial</option>
+                            <option value="all">All</option>
+                        </select>
+                        <span style="color:var(--text-secondary);">Sort:</span>
+                        <select id="alteration-sort" class="login-input" style="width:auto;display:inline-block;min-width:140px;" onchange="filterUpdatedData()">
+                            <option value="removed">Most removed</option>
+                            <option value="recent">Most recent</option>
+                            <option value="efta">EFTA number</option>
+                        </select>
+                        <span style="color:var(--text-secondary);">Dataset:</span>
+                        <select id="updated-dataset-filter" class="login-input" style="width: auto; display: inline-block; min-width: 130px;" onchange="filterUpdatedData()">
                             <option value="">All Datasets</option>
                             <option value="1">Data Set 1</option>
                             <option value="2">Data Set 2</option>
@@ -2595,20 +2612,21 @@
     <!-- Version Compare Modal -->
     <div id="version-compare-modal" class="modal-overlay" style="display: none;">
         <div class="modal-content" style="max-width: 1400px; width: 97%; height: 92vh; max-height: 92vh; display: flex; flex-direction: column;">
-            <div class="modal-header">
+            <div class="modal-header" style="flex-wrap: wrap; gap: var(--space-sm);">
                 <span class="modal-title" id="version-compare-title" style="font-family: var(--font-mono); font-size: 0.95rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">Compare versions</span>
                 <div style="display: flex; gap: var(--space-xs); align-items: center;">
                     <button class="btn btn-sm active" id="compare-tab-visual" onclick="switchCompareTab('visual')">Side-by-side</button>
                     <button class="btn btn-sm" id="compare-tab-text" onclick="switchCompareTab('text')">Text diff</button>
                     <button class="modal-close" onclick="closeVersionCompareModal()" aria-label="Close" style="margin-left: var(--space-sm);">&times;</button>
                 </div>
+                <div id="version-compare-actions" style="width:100%; display:flex; gap:var(--space-xs); align-items:center; flex-wrap:wrap;"></div>
             </div>
             <div class="modal-body" id="version-compare-body" style="flex: 1; padding: 0; display: flex; min-height: 0; background: var(--bg-tertiary);">
             </div>
         </div>
     </div>
 
-    <script src="/static/admin.js?v=25"></script>
+    <script src="/static/admin.js?v=27"></script>
 </body>
 </html>
 

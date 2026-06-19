@@ -1017,8 +1017,36 @@
         </div>
     </footer>
 
+    <!-- Public before/after compare for DOJ-altered documents -->
+    <div id="public-compare-modal" class="modal hidden">
+        <div class="modal-backdrop" onclick="closePublicCompare()"></div>
+        <div class="modal-content" style="max-width:1400px;width:97%;height:92vh;display:flex;flex-direction:column;">
+            <div class="modal-header" style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;">
+                <h2 id="public-compare-title" style="font-size:1rem;margin:0;">What changed</h2>
+                <div style="display:flex;gap:6px;align-items:center;">
+                    <button class="btn-compare-tab active" id="public-compare-tab-visual" onclick="switchPublicCompareTab('visual')" style="cursor:pointer;border:1px solid var(--border,#333);background:transparent;color:inherit;border-radius:6px;padding:4px 10px;">Side-by-side</button>
+                    <button class="btn-compare-tab" id="public-compare-tab-text" onclick="switchPublicCompareTab('text')" style="cursor:pointer;border:1px solid var(--border,#333);background:transparent;color:inherit;border-radius:6px;padding:4px 10px;">Text diff</button>
+                    <button class="modal-close" onclick="closePublicCompare()" style="position:static;">&times;</button>
+                </div>
+            </div>
+            <div class="modal-body" id="public-compare-body" style="flex:1;min-height:0;display:flex;padding:0;background:var(--bg-tertiary,#111);"></div>
+        </div>
+    </div>
+
+    <!-- Public gallery of all exposed (DOJ-altered) documents -->
+    <div id="altered-gallery-modal" class="modal hidden">
+        <div class="modal-backdrop" onclick="closeAlteredGallery()"></div>
+        <div class="modal-content" style="max-width:1100px;width:95%;height:88vh;display:flex;flex-direction:column;">
+            <div class="modal-header" style="display:flex;align-items:center;justify-content:space-between;">
+                <h2 style="margin:0;font-size:1.05rem;">🚩 Altered by DOJ — full list</h2>
+                <button class="modal-close" onclick="closeAlteredGallery()" style="position:static;">&times;</button>
+            </div>
+            <div class="modal-body" id="altered-gallery-body" style="flex:1;min-height:0;overflow:auto;padding:0;"></div>
+        </div>
+    </div>
+
     <script src="https://www.google.com/recaptcha/api.js?render=6Lf9EDYsAAAAANDlA_xYFIM7Ylccgmc24LhZgDIr" async defer onerror="window.__recaptchaFailed=true"></script>
-    <script src="/static/app.js?v=48"></script>
+    <script src="/static/app.js?v=51"></script>
 </body>
 </html>
 
