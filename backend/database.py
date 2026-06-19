@@ -44,6 +44,16 @@ def dataset_for_efta(efta_num: int) -> int:
     return 0
 
 
+# Public listings/searches/counts must EXCLUDE archived (older) EFTA versions.
+# An archived filename is EFTA<8 digits>_<timestamp>.<ext> — underscore at
+# position 13 (canonical has '.' there). Older versions can contain the
+# pre-redaction victim PII DOJ removed, so they are hidden from the public by
+# default and only served once an admin reviews+exposes that document. Scoped to
+# EFTA filenames so a non-EFTA name that happens to have '_' at pos 13 is unaffected.
+_PUBLIC_EXCLUDE_ARCHIVED = " AND NOT (d.filename LIKE 'EFTA%' AND SUBSTR(d.filename, 13, 1) = '_')"
+_PUBLIC_EXCLUDE_ARCHIVED_COND = "NOT (d.filename LIKE 'EFTA%' AND SUBSTR(d.filename, 13, 1) = '_')"
+
+
 class Database:
     """SQLite database for document metadata and search"""
     
@@ -309,6 +319,47 @@ class Database:
             """)
             conn.commit()
             
+            # Document alterations: tracks EFTA files DOJ re-issued after release
+            # (a canonical row + >=1 archived/timestamped sibling). One row per
+            # version group (efta_num, file_type). review_status gates public
+            # exposure: 'trivial' (auto, 0 lines removed) and 'cleared' (admin:
+            # legitimate victim-protection redaction) stay hidden; 'pending'
+            # (awaiting review) shows a public metadata badge but no old content;
+            # 'exposed' (admin: improper redaction) publishes the before/after.
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS document_alterations (
+                    efta_num INTEGER NOT NULL,
+                    file_type TEXT NOT NULL,
+                    dataset_num INTEGER,
+                    canonical_id TEXT,
+                    canonical_filename TEXT,
+                    old_id TEXT,
+                    old_filename TEXT,
+                    versions_count INTEGER DEFAULT 1,
+                    lines_added INTEGER DEFAULT 0,
+                    lines_removed INTEGER DEFAULT 0,
+                    chars_removed INTEGER DEFAULT 0,
+                    altered_on TEXT,
+                    review_status TEXT NOT NULL DEFAULT 'pending',
+                    admin_notes TEXT,
+                    reviewed_at TIMESTAMP,
+                    first_detected TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (efta_num, file_type)
+                )
+            """)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_alterations_status ON document_alterations(review_status)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_alterations_queue ON document_alterations(review_status, lines_removed DESC)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_alterations_canonical ON document_alterations(canonical_id)")
+            conn.commit()
+            # Migration: old_id/old_filename columns (stored so review queries never
+            # have to scan documents for the version sibling).
+            for _col in ("old_id", "old_filename"):
+                try:
+                    conn.execute(f"SELECT {_col} FROM document_alterations LIMIT 1")
+                except Exception:
+                    conn.execute(f"ALTER TABLE document_alterations ADD COLUMN {_col} TEXT")
+                    conn.commit()
+
             # Keywords table for dynamic topic/keyword filtering
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS keywords (
@@ -699,6 +750,7 @@ class Database:
             if not include_hidden:
                 sql += " AND (d.is_hidden IS NULL OR d.is_hidden = 0) AND hc.category IS NULL"
                 sql += " AND d.subcategory != 'thumbnails'"
+                sql += _PUBLIC_EXCLUDE_ARCHIVED  # gate archived versions from public results
             
             if category:
                 sql += " AND d.category = ?"
@@ -755,6 +807,7 @@ class Database:
             if not include_hidden:
                 sql += " AND (d.is_hidden IS NULL OR d.is_hidden = 0) AND hc.category IS NULL"
                 sql += " AND d.subcategory != 'thumbnails'"
+                sql += _PUBLIC_EXCLUDE_ARCHIVED  # gate archived versions from public results
             
             if category:
                 sql += " AND d.category = ?"
@@ -799,7 +852,7 @@ class Database:
             # Visibility filter
             visibility_filter = ""
             if not include_hidden:
-                visibility_filter = " AND (d.is_hidden IS NULL OR d.is_hidden = 0) AND hc.category IS NULL AND d.subcategory != 'thumbnails'"
+                visibility_filter = " AND (d.is_hidden IS NULL OR d.is_hidden = 0) AND hc.category IS NULL AND d.subcategory != 'thumbnails'" + _PUBLIC_EXCLUDE_ARCHIVED
             
             # Build date filter conditions
             date_filter = ""
@@ -952,6 +1005,7 @@ class Database:
                         LEFT JOIN hidden_categories hc ON d.category = hc.category
                         WHERE (d.is_hidden IS NULL OR d.is_hidden = 0) AND hc.category IS NULL
                           AND d.subcategory != 'thumbnails'
+                          AND NOT (d.filename LIKE 'EFTA%' AND SUBSTR(d.filename, 13, 1) = '_')
                           AND d.category = ?
                         GROUP BY d.category, d.subcategory
                         ORDER BY d.category, count DESC
@@ -963,6 +1017,7 @@ class Database:
                         LEFT JOIN hidden_categories hc ON d.category = hc.category
                         WHERE (d.is_hidden IS NULL OR d.is_hidden = 0) AND hc.category IS NULL
                           AND d.subcategory != 'thumbnails'
+                          AND NOT (d.filename LIKE 'EFTA%' AND SUBSTR(d.filename, 13, 1) = '_')
                         GROUP BY d.category, d.subcategory
                         ORDER BY d.category, count DESC
                     """)
@@ -1033,6 +1088,7 @@ class Database:
                           AND d.is_hidden = 0
                           AND d.category NOT IN (SELECT category FROM hidden_categories)
                           AND d.subcategory != 'thumbnails'
+                          AND NOT (d.filename LIKE 'EFTA%' AND SUBSTR(d.filename, 13, 1) = '_')
                         GROUP BY d.category
                         ORDER BY count DESC
                     """
@@ -1053,6 +1109,7 @@ class Database:
                         WHERE d.is_hidden = 0
                           AND d.category NOT IN (SELECT category FROM hidden_categories)
                           AND d.subcategory != 'thumbnails'
+                          AND NOT (d.filename LIKE 'EFTA%' AND SUBSTR(d.filename, 13, 1) = '_')
                         GROUP BY d.category 
                         ORDER BY count DESC
                     """
@@ -1092,6 +1149,7 @@ class Database:
                     conditions.append("d.is_hidden = 0")
                     conditions.append("d.category NOT IN (SELECT category FROM hidden_categories)")
                     conditions.append("d.subcategory != 'thumbnails'")
+                    conditions.append(_PUBLIC_EXCLUDE_ARCHIVED_COND)
             else:
                 sql = """
                     SELECT d.id, d.filename, d.path, d.category, d.subcategory, d.file_type, d.page_count, d.char_count, d.duration_seconds, d.is_hidden
@@ -1101,6 +1159,7 @@ class Database:
                     conditions.append("d.is_hidden = 0")
                     conditions.append("d.category NOT IN (SELECT category FROM hidden_categories)")
                     conditions.append("d.subcategory != 'thumbnails'")
+                    conditions.append(_PUBLIC_EXCLUDE_ARCHIVED_COND)
             
             if category:
                 conditions.append("d.category = ?")
@@ -1159,6 +1218,7 @@ class Database:
                 conditions.append("d.is_hidden = 0")
                 conditions.append("d.category NOT IN (SELECT category FROM hidden_categories)")
                 conditions.append("d.subcategory != 'thumbnails'")
+                conditions.append(_PUBLIC_EXCLUDE_ARCHIVED_COND)
             if category:
                 conditions.append("d.category = ?")
                 params.append(category)
@@ -1218,6 +1278,7 @@ class Database:
                     conditions.append("d.is_hidden = 0")
                     conditions.append("d.category NOT IN (SELECT category FROM hidden_categories)")
                     conditions.append("d.subcategory != 'thumbnails'")
+                    conditions.append(_PUBLIC_EXCLUDE_ARCHIVED_COND)
             else:
                 sql = """
                     SELECT COUNT(*) 
@@ -1228,6 +1289,7 @@ class Database:
                     conditions.append("d.is_hidden = 0")
                     conditions.append("d.category NOT IN (SELECT category FROM hidden_categories)")
                     conditions.append("d.subcategory != 'thumbnails'")
+                    conditions.append(_PUBLIC_EXCLUDE_ARCHIVED_COND)
             
             if category:
                 conditions.append("d.category = ?")
@@ -2080,6 +2142,149 @@ class Database:
                         groups[key]["canonical"] = entry
         # Stable order: by dataset then EFTA number.
         return sorted(groups.values(), key=lambda g: (g["dataset_num"], g["efta_num"]))
+
+    # =========================================================================
+    # Document alteration review (DOJ re-issued / redacted files)
+    # =========================================================================
+
+    def is_public_servable(self, doc_id: str) -> bool:
+        """False if doc_id is an archived (older) EFTA version whose group is not
+        'exposed'. Gates public file/text/meta so pre-redaction content (possible
+        victim PII) is never served until an admin exposes that document."""
+        with self.get_read_connection() as conn:
+            row = conn.execute(
+                "SELECT filename, file_type FROM documents WHERE id = ?", (doc_id,)
+            ).fetchone()
+            if not row:
+                return False
+            fn = row["filename"]
+            if not (fn.startswith("EFTA") and len(fn) > 12 and fn[12] == "_"):
+                return True  # not an archived version — normal visibility rules apply
+            try:
+                efta_num = int(fn[4:12])
+            except ValueError:
+                return True
+            st = conn.execute(
+                "SELECT review_status FROM document_alterations WHERE efta_num = ? AND file_type = ?",
+                (efta_num, row["file_type"]),
+            ).fetchone()
+            return bool(st and st["review_status"] == "exposed")
+
+    def get_alteration_for_doc(self, canonical_id: str) -> Optional[Dict[str, Any]]:
+        """Public viewer-badge data for a canonical doc, or None if it has no
+        public-facing alteration (trivial/cleared are suppressed). If exposed,
+        includes the old version id/filename so the public compare can load it."""
+        with self.get_read_connection() as conn:
+            row = conn.execute(
+                "SELECT efta_num, file_type, lines_added, lines_removed, chars_removed, "
+                "altered_on, review_status, versions_count, old_id, old_filename "
+                "FROM document_alterations WHERE canonical_id = ?",
+                (canonical_id,),
+            ).fetchone()
+            if not row or row["review_status"] in ("trivial", "cleared"):
+                return None
+            out = {
+                "status": row["review_status"],
+                "exposed": row["review_status"] == "exposed",
+                "lines_added": row["lines_added"],
+                "lines_removed": row["lines_removed"],
+                "chars_removed": row["chars_removed"],
+                "altered_on": row["altered_on"],
+                "versions_count": row["versions_count"],
+            }
+            if out["exposed"]:
+                out["efta_num"] = f"{row['efta_num']:08d}"
+                out["file_type"] = row["file_type"]
+                out["new_id"] = canonical_id
+                out["old_id"] = row["old_id"]
+                out["old_filename"] = row["old_filename"]
+            return out
+
+    def get_alterations(self, status: str = "pending", sort: str = "removed",
+                        dataset: int = None, limit: int = 50, offset: int = 0,
+                        timeout_seconds: float = 0) -> List[Dict[str, Any]]:
+        """Admin review queue rows (canonical doc info + old version id for compare)."""
+        order = {
+            "removed": "a.lines_removed DESC, a.chars_removed DESC",
+            "recent": "a.altered_on DESC",
+            "efta": "a.efta_num ASC",
+        }.get(sort, "a.lines_removed DESC")
+        conds, params = [], []
+        if status and status != "all":
+            conds.append("a.review_status = ?"); params.append(status)
+        if dataset:
+            conds.append("a.dataset_num = ?"); params.append(dataset)
+        where = ("WHERE " + " AND ".join(conds)) if conds else ""
+        sql = (
+            "SELECT a.efta_num, a.file_type, a.dataset_num, a.canonical_id, "
+            "a.canonical_filename, a.old_id, a.old_filename, a.versions_count, "
+            "a.lines_added, a.lines_removed, a.chars_removed, a.altered_on, "
+            "a.review_status, a.admin_notes, a.reviewed_at "
+            f"FROM document_alterations a {where} ORDER BY {order} LIMIT ? OFFSET ?"
+        )
+        params.extend([limit, offset])
+        with self.get_read_connection(timeout_seconds=timeout_seconds) as conn:
+            rows = []
+            for r in conn.execute(sql, params):
+                d = dict(r)
+                d["efta_num"] = f"{d['efta_num']:08d}"
+                rows.append(d)
+            return rows
+
+    def count_alterations_by_status(self, timeout_seconds: float = 0) -> Dict[str, int]:
+        out = {"pending": 0, "exposed": 0, "cleared": 0, "trivial": 0, "total": 0}
+        with self.get_read_connection(timeout_seconds=timeout_seconds) as conn:
+            for st, cnt in conn.execute(
+                "SELECT review_status, COUNT(*) FROM document_alterations GROUP BY review_status"
+            ):
+                out[st] = cnt
+                out["total"] += cnt
+        return out
+
+    def set_alteration_review(self, efta_num: int, file_type: str, status: str,
+                              notes: str = None) -> Optional[str]:
+        """Set a version group's review_status; returns its canonical_id (so the
+        caller can pin/unpin on the homepage), or None if the group is unknown."""
+        with self.get_connection() as conn:
+            cur = conn.execute(
+                "UPDATE document_alterations SET review_status = ?, admin_notes = ?, "
+                "reviewed_at = CURRENT_TIMESTAMP WHERE efta_num = ? AND file_type = ?",
+                (status, notes, efta_num, file_type),
+            )
+            conn.commit()
+            if cur.rowcount == 0:
+                return None
+            row = conn.execute(
+                "SELECT canonical_id FROM document_alterations WHERE efta_num = ? AND file_type = ?",
+                (efta_num, file_type),
+            ).fetchone()
+            return row["canonical_id"] if row else None
+
+    def get_exposed_alterations(self, limit: int = 60, offset: int = 0,
+                                timeout_seconds: float = 0) -> List[Dict[str, Any]]:
+        """Public list of exposed alterations (canonical display fields + old id)."""
+        sql = (
+            "SELECT a.efta_num, a.file_type, a.dataset_num, a.canonical_id, a.old_id, "
+            "a.old_filename, a.lines_added, a.lines_removed, a.chars_removed, a.altered_on, "
+            "d.filename, d.category, d.subcategory, d.page_count, d.document_date "
+            "FROM document_alterations a JOIN documents d ON a.canonical_id = d.id "
+            "WHERE a.review_status = 'exposed' "
+            "ORDER BY a.lines_removed DESC, a.altered_on DESC LIMIT ? OFFSET ?"
+        )
+        with self.get_read_connection(timeout_seconds=timeout_seconds) as conn:
+            out = []
+            for r in conn.execute(sql, (limit, offset)):
+                d = dict(r)
+                d["new_id"] = d["canonical_id"]
+                d["efta_num"] = f"{d['efta_num']:08d}"
+                out.append(d)
+            return out
+
+    def count_exposed_alterations(self, timeout_seconds: float = 0) -> int:
+        with self.get_read_connection(timeout_seconds=timeout_seconds) as conn:
+            return conn.execute(
+                "SELECT COUNT(*) FROM document_alterations WHERE review_status = 'exposed'"
+            ).fetchone()[0]
 
     def get_not_downloaded(self, dataset_num: int = None) -> List[Dict[str, Any]]:
         """Get files that are in manifest but not successfully downloaded

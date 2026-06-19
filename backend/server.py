@@ -1774,6 +1774,9 @@ async def get_document(
     
     # Check if document is visible (not hidden and category not hidden)
     doc = await asyncio.to_thread(db.get_document, doc_id, include_hidden=False, include_full_text=include_text)
+    # Gate archived (older) EFTA versions: never serve unless admin-exposed.
+    if doc and not await asyncio.to_thread(db.is_public_servable, doc_id):
+        doc = None
     if not doc:
         security_logger.log_security_event(
             event_type="document_not_found",
@@ -1806,10 +1809,12 @@ async def get_document_text(doc_id: str, request: Request):
     if not db:
         raise HTTPException(status_code=503, detail="Database not initialized")
     
+    if not await asyncio.to_thread(db.is_public_servable, doc_id):
+        raise HTTPException(status_code=404, detail="Document not found")
     full_text = await asyncio.to_thread(db.get_document_full_text, doc_id, include_hidden=False)
     if full_text is None:
         raise HTTPException(status_code=404, detail="Document not found")
-    
+
     return {"full_text": full_text}
 
 
@@ -1904,6 +1909,9 @@ async def get_document_file(doc_id: str, request: Request):
         raise HTTPException(status_code=503, detail="Database not initialized")
 
     doc = await asyncio.to_thread(db.get_document, doc_id, include_hidden=False)
+    # Gate archived (older) EFTA versions: never serve unless admin-exposed.
+    if doc and not await asyncio.to_thread(db.is_public_servable, doc_id):
+        doc = None
     if not doc:
         security_logger.log_security_event(
             event_type="file_not_found",
@@ -2142,12 +2150,18 @@ async def get_document_thumbnail(doc_id: str, request: Request):
     """
     if not db:
         raise HTTPException(status_code=503, detail="Database not initialized")
-    
+
+    # Gate archived (older) EFTA versions BEFORE the fast path: their thumbnails
+    # are generated at ingest, so the on-disk fast path would otherwise leak a
+    # pre-redaction preview image. One indexed PK lookup; cheap for normal docs.
+    if not await asyncio.to_thread(db.is_public_servable, doc_id):
+        raise HTTPException(status_code=404, detail="Document not found")
+
     # Ensure thumbnails directory exists
     THUMBNAILS_PATH.mkdir(exist_ok=True)
-    
+
     thumbnail_path = THUMBNAILS_PATH / f"{doc_id}.jpg"
-    
+
     # Fast path: if the thumbnail already exists on disk, serve it immediately
     # without querying the database. The browse list already verified visibility
     # when it returned this doc_id, so a redundant DB check is unnecessary.
@@ -3684,6 +3698,61 @@ async def disable_status_page(request: Request, x_api_key: str = Header(None)):
 # =============================================================================
 # PINNED DOCUMENTS API ENDPOINTS
 # =============================================================================
+
+@app.get("/api/altered-documents")
+async def public_altered_documents(limit: int = 60, offset: int = 0):
+    """Public list of documents confirmed as improperly altered by DOJ (exposed
+    by an admin). Feeds the Altered Documents page and the homepage Censored bar."""
+    if not db:
+        raise HTTPException(status_code=503, detail="Database not initialized")
+
+    def _work():
+        return (db.get_exposed_alterations(limit=min(limit, 200), offset=offset),
+                db.count_exposed_alterations())
+
+    items, total = await asyncio.to_thread(_work)
+    return {"altered_documents": items, "total": total}
+
+
+@app.get("/api/documents/{doc_id}/alteration")
+async def public_document_alteration(doc_id: str):
+    """Public alteration-badge data for a canonical document, or {altered: false}.
+    Pending/exposed return metadata; exposed also returns the old version id so the
+    public compare can load the before/after. trivial/cleared return altered:false."""
+    if not db:
+        raise HTTPException(status_code=503, detail="Database not initialized")
+    alt = await asyncio.to_thread(db.get_alteration_for_doc, doc_id)
+    if not alt:
+        return {"altered": False}
+    return {"altered": True, **alt}
+
+
+@app.get("/api/version-diff")
+async def public_version_diff(old: str = None, new: str = None):
+    """Public before/after text diff — allowed ONLY when the older version's group
+    is admin-exposed (gated via is_public_servable so pre-redaction PII can't leak)."""
+    if not db:
+        raise HTTPException(status_code=503, detail="Database not initialized")
+    if not old or not new:
+        raise HTTPException(status_code=400, detail="old and new doc ids are required")
+
+    def _gate():
+        if not db.is_public_servable(old):          # old must be an exposed archived version
+            return False
+        return db.get_document(new, include_hidden=False, include_full_text=False) is not None
+
+    if not await asyncio.to_thread(_gate):
+        raise HTTPException(status_code=404, detail="Not found")
+
+    def _texts():
+        return (db.get_document_full_text(old, include_hidden=True),
+                db.get_document_full_text(new, include_hidden=True))
+
+    old_text, new_text = await asyncio.to_thread(_texts)
+    if old_text is None and new_text is None:
+        raise HTTPException(status_code=404, detail="Not found")
+    return {"old": old, "new": new, **_compute_text_diff(old_text, new_text)}
+
 
 @app.get("/api/pinned-documents")
 async def get_pinned_documents():
@@ -5447,6 +5516,36 @@ async def get_updated_documents_route(
     return result
 
 
+def _compute_text_diff(old_text, new_text, max_lines: int = 5000):
+    """Unified text diff (structured for rendering) between two document versions.
+    Shared by the admin and public diff endpoints."""
+    import difflib
+    old_lines = (old_text or "").splitlines()
+    new_lines = (new_text or "").splitlines()
+    lines = []
+    added = removed = 0
+    # n=3 lines of context keeps the payload bounded to the changed regions.
+    for ln in difflib.unified_diff(old_lines, new_lines, lineterm="", n=3):
+        if ln.startswith("+++") or ln.startswith("---"):
+            continue
+        if ln.startswith("@@"):
+            lines.append({"type": "hunk", "text": ln})
+        elif ln.startswith("+"):
+            lines.append({"type": "add", "text": ln[1:]}); added += 1
+        elif ln.startswith("-"):
+            lines.append({"type": "del", "text": ln[1:]}); removed += 1
+        else:
+            lines.append({"type": "ctx", "text": ln[1:] if ln else ln})
+    return {
+        "added": added,
+        "removed": removed,
+        "identical": added == 0 and removed == 0,
+        "has_text": bool(old_lines or new_lines),
+        "truncated": len(lines) > max_lines,
+        "lines": lines[:max_lines],
+    }
+
+
 @app.get("/api/admin/version-diff")
 async def get_version_diff(
     request: Request,
@@ -5482,40 +5581,98 @@ async def get_version_diff(
     if old_text is None and new_text is None:
         raise HTTPException(status_code=404, detail="Documents not found")
 
-    import difflib
-    old_lines = (old_text or "").splitlines()
-    new_lines = (new_text or "").splitlines()
-    lines = []
-    added = removed = 0
-    # n=3 lines of context keeps the payload bounded to the changed regions.
-    for ln in difflib.unified_diff(old_lines, new_lines, lineterm="", n=3):
-        if ln.startswith("+++") or ln.startswith("---"):
-            continue
-        if ln.startswith("@@"):
-            lines.append({"type": "hunk", "text": ln})
-        elif ln.startswith("+"):
-            lines.append({"type": "add", "text": ln[1:]})
-            added += 1
-        elif ln.startswith("-"):
-            lines.append({"type": "del", "text": ln[1:]})
-            removed += 1
-        else:
-            lines.append({"type": "ctx", "text": ln[1:] if ln else ln})
-
-    MAX_LINES = 5000
-    truncated = len(lines) > MAX_LINES
-    result = {
-        "old": old,
-        "new": new,
-        "added": added,
-        "removed": removed,
-        "identical": added == 0 and removed == 0,
-        "has_text": bool(old_lines or new_lines),
-        "truncated": truncated,
-        "lines": lines[:MAX_LINES],
-    }
+    result = {"old": old, "new": new, **_compute_text_diff(old_text, new_text)}
     _admin_cache.set(cache_key, result)
     return result
+
+
+@app.get("/api/admin/alterations")
+async def admin_get_alterations(
+    request: Request,
+    x_api_key: str = Header(None),
+    status: str = "pending",
+    sort: str = "removed",
+    dataset: int = None,
+    limit: int = 100,
+    offset: int = 0,
+):
+    """Admin review queue of DOJ-altered documents + status counts.
+
+    status: pending | exposed | cleared | trivial | all (default pending).
+    sort: removed (most text removed first) | recent | efta. Requires admin auth.
+    """
+    is_authorized, error = verify_admin_access(request, x_api_key)
+    if not is_authorized:
+        raise HTTPException(status_code=401, detail=error)
+    if not db:
+        raise HTTPException(status_code=503, detail="Database not initialized")
+
+    cache_key = f"alterations:{status}:{sort}:{dataset}:{limit}:{offset}"
+    cached = _admin_cache.get(cache_key)
+    if cached:
+        return cached
+
+    def _work():
+        return (db.get_alterations(status=status, sort=sort, dataset=dataset,
+                                   limit=limit, offset=offset,
+                                   timeout_seconds=_ADMIN_QUERY_TIMEOUT),
+                db.count_alterations_by_status(timeout_seconds=_ADMIN_QUERY_TIMEOUT))
+
+    rows, counts = await asyncio.to_thread(_work)
+    result = {"alterations": rows, "counts": counts}
+    _admin_cache.set(cache_key, result)
+    return result
+
+
+class AlterationReviewRequest(BaseModel):
+    efta_num: str
+    file_type: str
+    status: str           # exposed | cleared | pending
+    notes: Optional[str] = None
+
+
+@app.post("/api/admin/alterations/review")
+async def admin_review_alteration(
+    payload: AlterationReviewRequest,
+    request: Request,
+    x_api_key: str = Header(None),
+):
+    """Set a document's alteration review decision.
+
+    exposed  = improper redaction (protecting criminals) -> publish before/after.
+    cleared  = legitimate (victim protection) -> keep older version hidden.
+    pending  = undo / send back to the queue.
+    Requires admin auth.
+    """
+    is_authorized, error = verify_admin_access(request, x_api_key)
+    if not is_authorized:
+        raise HTTPException(status_code=401, detail=error)
+    if not db:
+        raise HTTPException(status_code=503, detail="Database not initialized")
+    if payload.status not in ("exposed", "cleared", "pending"):
+        raise HTTPException(status_code=400, detail="status must be exposed | cleared | pending")
+    try:
+        efta_num = int(payload.efta_num)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="efta_num must be numeric")
+
+    client_ip, request_id = get_client_info(request)
+
+    def _work():
+        return db.set_alteration_review(efta_num, payload.file_type, payload.status, payload.notes)
+
+    canonical_id = await asyncio.to_thread(_work)
+    if not canonical_id:
+        raise HTTPException(status_code=404, detail="Alteration not found")
+
+    _admin_cache.invalidate()
+    security_logger.log_system_event(
+        "document_alteration_reviewed",
+        f"EFTA{efta_num:08d} ({payload.file_type}) -> {payload.status}",
+        client_ip=client_ip,
+        request_id=request_id,
+    )
+    return {"success": True, "status": payload.status, "canonical_id": canonical_id}
 
 
 @app.get("/api/admin/missing-documents")

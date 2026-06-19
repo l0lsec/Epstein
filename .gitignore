@@ -4,6 +4,10 @@
 .env.*.local
 .deploy.env
 
+# Local alteration-recheck artifacts (large; never deploy or commit)
+version_recheck_changes.jsonl
+*_delta.json
+
 # Python
 __pycache__/
 *.py[cod]

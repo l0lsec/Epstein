@@ -3790,62 +3790,82 @@ function exportMissingDocs() {
 // diff against. See backend get_updated_documents / version-diff.
 // =============================================================================
 
-let updatedDocumentsData = [];
+let alterationsData = [];
+let alterationsCounts = {};
 
+// The "Updated / Re-issued Files" card is the alteration REVIEW QUEUE: each row is
+// a document DOJ re-issued; the admin compares before/after and decides Expose
+// (improper redaction → publish) or Clear (legitimate victim protection → keep hidden).
 async function loadUpdatedDocuments() {
-    const filterEl = document.getElementById('updated-dataset-filter');
-    const dataset = filterEl ? filterEl.value : '';
+    const dsEl = document.getElementById('updated-dataset-filter');
+    const stEl = document.getElementById('alteration-status-filter');
+    const sortEl = document.getElementById('alteration-sort');
+    const dataset = dsEl ? dsEl.value : '';
+    const status = stEl ? stEl.value : 'pending';
+    const sort = sortEl ? sortEl.value : 'removed';
     const listEl = document.getElementById('updated-docs-list');
     if (listEl) listEl.innerHTML = '<div class="loading"><span class="spinner"></span>Loading…</div>';
     try {
-        let url = `${window.location.origin}/api/admin/updated-documents`;
-        if (dataset) url += `?dataset=${dataset}`;
+        let url = `${window.location.origin}/api/admin/alterations?status=${encodeURIComponent(status)}&sort=${encodeURIComponent(sort)}&limit=200`;
+        if (dataset) url += `&dataset=${dataset}`;
         const response = await authFetch(url);
-        if (!response.ok) throw new Error('Failed to load updated documents');
+        if (!response.ok) throw new Error('Failed to load alterations');
         const data = await response.json();
-        updatedDocumentsData = data.updated_documents || [];
+        alterationsData = data.alterations || [];
+        alterationsCounts = data.counts || {};
         renderUpdatedDocuments();
     } catch (error) {
-        console.error('Error loading updated documents:', error);
-        if (listEl) listEl.innerHTML = '<div style="color: var(--text-muted); padding: var(--space-md);">No re-issued files found.</div>';
+        console.error('Error loading alterations:', error);
+        if (listEl) listEl.innerHTML = '<div style="color: var(--text-muted); padding: var(--space-md);">No alterations recorded yet. Run <code>recheck_versions.py --apply</code>, reingest, then <code>compute_alterations.py --apply</code>.</div>';
     }
+}
+
+function _alterationBadge(st) {
+    const map = { pending: ['#f59e0b', 'Pending'], exposed: ['#ef4444', '🚩 Exposed'],
+                  cleared: ['#22c55e', 'Cleared'], trivial: ['#9ca3af', 'Trivial'] };
+    const [c, label] = map[st] || ['#9ca3af', st || '—'];
+    return `<span style="display:inline-block;padding:2px 8px;border-radius:10px;font-size:0.72rem;font-weight:600;color:${c};border:1px solid ${c};">${label}</span>`;
 }
 
 function renderUpdatedDocuments() {
     const listEl = document.getElementById('updated-docs-list');
     if (!listEl) return;
-    if (!updatedDocumentsData || updatedDocumentsData.length === 0) {
-        listEl.innerHTML = '<div style="text-align: center; padding: var(--space-lg); color: var(--text-muted);">No re-issued files found. When DOJ replaces a file, run the downloader with <code>--check-versions</code> to capture the new iteration.</div>';
+    const c = alterationsCounts || {};
+    const countsEl = document.getElementById('alteration-counts');
+    if (countsEl) {
+        countsEl.innerHTML =
+            `<span style="color:#f59e0b;">Pending ${formatNumber(c.pending||0)}</span> · ` +
+            `<span style="color:#ef4444;">Exposed ${formatNumber(c.exposed||0)}</span> · ` +
+            `<span style="color:#22c55e;">Cleared ${formatNumber(c.cleared||0)}</span> · ` +
+            `<span style="color:#9ca3af;">Trivial ${formatNumber(c.trivial||0)}</span>`;
+    }
+    if (!alterationsData || alterationsData.length === 0) {
+        listEl.innerHTML = '<div style="text-align:center;padding:var(--space-lg);color:var(--text-muted);">No documents in this view.</div>';
         return;
     }
-    let html = '<table style="width: 100%; border-collapse: collapse;">';
-    html += `<thead>
-        <tr style="border-bottom: 1px solid var(--border);">
-            <th style="text-align: left; padding: var(--space-sm); color: var(--text-muted);">File</th>
-            <th style="text-align: left; padding: var(--space-sm); color: var(--text-muted);">Dataset</th>
-            <th style="text-align: left; padding: var(--space-sm); color: var(--text-muted);">Type</th>
-            <th style="text-align: right; padding: var(--space-sm); color: var(--text-muted);">Iterations</th>
-            <th style="text-align: left; padding: var(--space-sm); color: var(--text-muted);">Older versions → compare to latest</th>
-        </tr>
-    </thead><tbody>`;
-    for (const grp of updatedDocumentsData) {
-        const canonical = grp.canonical || {};
-        const versions = grp.versions || [];
-        const iterations = versions.length + (grp.canonical ? 1 : 0);
-        const canonId = canonical.id || '';
-        const canonName = canonical.filename || (grp.efta_num + '.' + (grp.file_type || ''));
-        let versionBtns = '';
-        for (const v of versions) {
-            const label = v.archived_at ? fmtArchivedAt(v.archived_at) : (v.filename || 'older');
-            versionBtns += `<button class="btn btn-sm" style="margin: 2px;" onclick="openVersionCompare('${escapeJs(v.id)}','${escapeJs(v.filename)}','${escapeJs(canonId)}','${escapeJs(canonName)}','${escapeJs(grp.file_type || '')}')">⇄ ${escapeHtml(label)}</button>`;
-        }
-        if (!versionBtns) versionBtns = '<span style="color: var(--text-muted);">—</span>';
-        html += `<tr style="border-bottom: 1px solid var(--border);">
-            <td style="padding: var(--space-sm); font-family: var(--font-mono); font-size: 0.85rem;">${escapeHtml(canonName)}</td>
-            <td style="padding: var(--space-sm);">Set ${grp.dataset_num}</td>
-            <td style="padding: var(--space-sm);">${escapeHtml(grp.file_type || '')}</td>
-            <td style="text-align: right; padding: var(--space-sm);">${iterations}</td>
-            <td style="padding: var(--space-sm);">${versionBtns}</td>
+    let html = '<table style="width:100%;border-collapse:collapse;">';
+    html += `<thead><tr style="border-bottom:1px solid var(--border);">
+        <th style="text-align:left;padding:var(--space-sm);color:var(--text-muted);">File</th>
+        <th style="text-align:left;padding:var(--space-sm);color:var(--text-muted);">Dataset</th>
+        <th style="text-align:right;padding:var(--space-sm);color:var(--danger);">Removed</th>
+        <th style="text-align:right;padding:var(--space-sm);color:var(--success);">Added</th>
+        <th style="text-align:left;padding:var(--space-sm);color:var(--text-muted);">DOJ changed</th>
+        <th style="text-align:left;padding:var(--space-sm);color:var(--text-muted);">Status</th>
+        <th style="text-align:right;padding:var(--space-sm);color:var(--text-muted);">Review</th>
+    </tr></thead><tbody>`;
+    for (const a of alterationsData) {
+        const canonName = a.canonical_filename || (a.efta_num + '.' + (a.file_type || ''));
+        const btn = a.old_id
+            ? `<button class="btn btn-sm" onclick="openVersionCompare('${escapeJs(a.old_id)}','${escapeJs(a.old_filename)}','${escapeJs(a.canonical_id)}','${escapeJs(canonName)}','${escapeJs(a.file_type||'')}','${escapeJs(a.efta_num)}','${escapeJs(a.review_status)}')">⇄ Review</button>`
+            : '<span style="color:var(--text-muted);">—</span>';
+        html += `<tr style="border-bottom:1px solid var(--border);">
+            <td style="padding:var(--space-sm);font-family:var(--font-mono);font-size:0.85rem;">${escapeHtml(canonName)}</td>
+            <td style="padding:var(--space-sm);">Set ${a.dataset_num}</td>
+            <td style="text-align:right;padding:var(--space-sm);color:var(--danger);font-weight:600;">${formatNumber(a.lines_removed||0)}</td>
+            <td style="text-align:right;padding:var(--space-sm);color:var(--success);">${formatNumber(a.lines_added||0)}</td>
+            <td style="padding:var(--space-sm);">${a.altered_on ? fmtArchivedAt(a.altered_on) : '—'}</td>
+            <td style="padding:var(--space-sm);">${_alterationBadge(a.review_status)}</td>
+            <td style="text-align:right;padding:var(--space-sm);">${btn}</td>
         </tr>`;
     }
     html += '</tbody></table>';
@@ -3878,7 +3898,7 @@ function showUpdatedForDataset(ds) {
 // -- version compare modal (visual side-by-side + text diff) -------------------
 let _versionCompareUrls = [];
 
-async function openVersionCompare(oldId, oldName, newId, newName, fileType) {
+async function openVersionCompare(oldId, oldName, newId, newName, fileType, eftaNum, status) {
     const modal = document.getElementById('version-compare-modal');
     const titleEl = document.getElementById('version-compare-title');
     if (!modal) return;
@@ -3888,8 +3908,61 @@ async function openVersionCompare(oldId, oldName, newId, newName, fileType) {
     modal.dataset.oldName = oldName;
     modal.dataset.newName = newName;
     modal.dataset.fileType = fileType || '';
+    modal.dataset.eftaNum = eftaNum || '';
+    modal.dataset.status = status || '';
+    _renderReviewActions();
     modal.style.display = 'flex';
     switchCompareTab('visual');
+}
+
+// Review action bar shown in the compare modal (only when launched from the queue).
+function _renderReviewActions() {
+    const modal = document.getElementById('version-compare-modal');
+    const bar = document.getElementById('version-compare-actions');
+    if (!modal || !bar) return;
+    const efta = modal.dataset.eftaNum, st = modal.dataset.status;
+    if (!efta) { bar.innerHTML = ''; return; }
+    bar.innerHTML =
+        `<span style="color:var(--text-muted);font-size:0.78rem;margin-right:6px;">Decision:</span>` +
+        `<button class="btn btn-sm" onclick="reviewAlteration('cleared')" title="Legitimate redaction protecting a victim — keep the older version hidden">✓ Clear (legit)</button>` +
+        `<button class="btn btn-sm btn-danger" onclick="reviewAlteration('exposed')" title="Improper redaction — publish the before/after to the public">🚩 Expose to public</button>` +
+        `<button class="btn btn-sm" onclick="hideCurrentVersion()" title="Hide the current document from the public entirely">🙈 Hide current</button>` +
+        (st && st !== 'pending' ? `<span style="margin-left:8px;">${_alterationBadge(st)}</span>` : '');
+}
+
+async function reviewAlteration(newStatus) {
+    const modal = document.getElementById('version-compare-modal');
+    const efta = modal.dataset.eftaNum, ft = modal.dataset.fileType;
+    if (!efta || !ft) return;
+    if (newStatus === 'exposed') {
+        if (!confirm('Expose this document to the public?\n\nOnly do this if the removed content does NOT reveal a victim\'s identity or private information. The older (pre-redaction) version will become publicly viewable on the site.')) return;
+    }
+    try {
+        const resp = await authFetch(`${window.location.origin}/api/admin/alterations/review`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ efta_num: efta, file_type: ft, status: newStatus, notes: null }),
+        });
+        if (!resp.ok) throw new Error('HTTP ' + resp.status);
+        closeVersionCompareModal();
+        loadUpdatedDocuments();
+    } catch (e) {
+        alert('Could not save decision: ' + ((e && e.message) || e));
+    }
+}
+
+async function hideCurrentVersion() {
+    const modal = document.getElementById('version-compare-modal');
+    const docId = modal.dataset.newId;
+    if (!docId) return;
+    if (!confirm('Hide the CURRENT document from the public entirely? (You can unhide it later from Hidden Documents.)')) return;
+    try {
+        const resp = await authFetch(`${window.location.origin}/api/admin/documents/${encodeURIComponent(docId)}/hide`, { method: 'POST' });
+        if (!resp.ok) throw new Error('HTTP ' + resp.status);
+        alert('Current document hidden from the public.');
+    } catch (e) {
+        alert('Could not hide: ' + ((e && e.message) || e));
+    }
 }
 
 async function switchCompareTab(tab) {
@@ -4042,6 +4115,8 @@ window.showUpdatedForDataset = showUpdatedForDataset;
 window.openVersionCompare = openVersionCompare;
 window.switchCompareTab = switchCompareTab;
 window.closeVersionCompareModal = closeVersionCompareModal;
+window.reviewAlteration = reviewAlteration;
+window.hideCurrentVersion = hideCurrentVersion;
 
 // =============================================================================
 // Document Visibility Management

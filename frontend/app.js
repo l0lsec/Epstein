@@ -93,7 +93,11 @@ async function init() {
         console.warn('Bootstrap failed, falling back to separate requests:', e);
         await loadFallbackInit();
     }
-    
+
+    // Surface the "Altered by DOJ" censored bar (runs on both the bootstrap and
+    // fallback paths; harmless no-op when there are no exposed alterations).
+    loadCensoredBar();
+
     // Set timestamp for spam protection
     const timestampField = document.getElementById('feedback-timestamp');
     if (timestampField) {
@@ -1101,6 +1105,187 @@ function renderPinnedDocumentsBar(docs) {
     }
 }
 
+// =============================================================================
+// Document alterations — public transparency. Shows where DOJ re-issued/redacted
+// a document after release. Older (pre-redaction) versions are served ONLY when
+// an admin has EXPOSED that document — the API enforces this; the UI just reflects it.
+// =============================================================================
+
+function formatAlteredOn(stamp) {
+    const m = /^(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})(\d{2})$/.exec(stamp || '');
+    return m ? `${m[1]}-${m[2]}-${m[3]}` : (stamp || '');
+}
+
+let _alterationCompare = { oldId: null, newId: null, title: '' };
+
+async function loadDocumentAlterationBadge(docId) {
+    try {
+        const resp = await fetch(`${API_BASE}/documents/${docId}/alteration`);
+        if (!resp.ok) return;
+        const a = await resp.json();
+        if (!a.altered || !elements.modalMeta || (state.currentDocument && state.currentDocument.id !== docId)) return;
+        const removed = a.lines_removed || 0;
+        const when = a.altered_on ? formatAlteredOn(a.altered_on) : '';
+        let badge = `<span style="display:inline-flex;align-items:center;gap:6px;color:#ef4444;border:1px solid #ef4444;border-radius:10px;padding:2px 10px;font-weight:600;">⚠ DOJ altered this document${removed ? ` — ${formatNumber(removed)} lines removed` : ''}${when ? ` · ${when}` : ''}</span>`;
+        if (a.exposed && a.old_id) {
+            _alterationCompare = { oldId: a.old_id, newId: a.new_id, title: (state.currentDocument && state.currentDocument.filename) || '' };
+            badge += ` <button style="cursor:pointer;border:1px solid #ef4444;background:rgba(239,68,68,0.1);color:#ef4444;border-radius:8px;padding:3px 10px;font-weight:600;font-size:0.8rem;" onclick="openExposedCompare()">See what changed →</button>`;
+        }
+        elements.modalMeta.insertAdjacentHTML('beforeend', `<span style="flex-basis:100%;height:4px;"></span>${badge}`);
+    } catch (e) {}
+}
+
+function openExposedCompare() {
+    openPublicCompare(_alterationCompare.oldId, _alterationCompare.newId, _alterationCompare.title);
+}
+
+function openPublicCompare(oldId, newId, title) {
+    const modal = document.getElementById('public-compare-modal');
+    if (!modal || !oldId || !newId) return;
+    modal.dataset.oldId = oldId;
+    modal.dataset.newId = newId;
+    const titleEl = document.getElementById('public-compare-title');
+    if (titleEl) titleEl.textContent = title ? `What changed: ${title}` : 'What changed';
+    modal.classList.remove('hidden');
+    switchPublicCompareTab('visual');
+}
+
+function closePublicCompare() {
+    const modal = document.getElementById('public-compare-modal');
+    if (modal) modal.classList.add('hidden');
+    const body = document.getElementById('public-compare-body');
+    if (body) body.innerHTML = '';
+}
+
+function switchPublicCompareTab(tab) {
+    const vb = document.getElementById('public-compare-tab-visual');
+    const tb = document.getElementById('public-compare-tab-text');
+    if (vb) vb.classList.toggle('active', tab === 'visual');
+    if (tb) tb.classList.toggle('active', tab === 'text');
+    if (tab === 'visual') renderPublicCompareVisual(); else renderPublicCompareText();
+}
+
+function renderPublicCompareVisual() {
+    const modal = document.getElementById('public-compare-modal');
+    const body = document.getElementById('public-compare-body');
+    if (!modal || !body) return;
+    const oldUrl = `${API_BASE}/documents/${modal.dataset.oldId}/file`;
+    const newUrl = `${API_BASE}/documents/${modal.dataset.newId}/file`;
+    body.innerHTML = `
+        <div style="display:flex;gap:8px;width:100%;height:100%;">
+            <div style="flex:1;display:flex;flex-direction:column;min-width:0;">
+                <div style="padding:6px 10px;background:rgba(239,68,68,0.12);color:#ef4444;font-size:0.8rem;font-weight:600;">Original — before DOJ's change</div>
+                <iframe src="${oldUrl}#view=FitH" style="flex:1;width:100%;border:0;background:#fff;"></iframe>
+            </div>
+            <div style="flex:1;display:flex;flex-direction:column;min-width:0;">
+                <div style="padding:6px 10px;background:rgba(34,197,94,0.12);color:#16a34a;font-size:0.8rem;font-weight:600;">Current — after DOJ's change</div>
+                <iframe src="${newUrl}#view=FitH" style="flex:1;width:100%;border:0;background:#fff;"></iframe>
+            </div>
+        </div>`;
+}
+
+async function renderPublicCompareText() {
+    const modal = document.getElementById('public-compare-modal');
+    const body = document.getElementById('public-compare-body');
+    if (!modal || !body) return;
+    body.innerHTML = '<div style="padding:24px;color:#888;">Loading diff…</div>';
+    try {
+        const resp = await fetch(`${API_BASE}/version-diff?old=${encodeURIComponent(modal.dataset.oldId)}&new=${encodeURIComponent(modal.dataset.newId)}`);
+        if (!resp.ok) throw new Error('HTTP ' + resp.status);
+        const data = await resp.json();
+        if (!data.has_text) { body.innerHTML = '<div style="padding:24px;color:#888;">No extracted text to diff — use the Side-by-side view.</div>'; return; }
+        if (data.identical) { body.innerHTML = '<div style="padding:24px;color:#16a34a;">The transcribed text is identical — the change was visual (e.g. a redaction box). Use Side-by-side.</div>'; return; }
+        let rows = '';
+        for (const ln of (data.lines || [])) {
+            let bg = 'transparent', color = 'inherit', prefix = ' ';
+            if (ln.type === 'add') { bg = 'rgba(34,197,94,0.12)'; color = '#16a34a'; prefix = '+'; }
+            else if (ln.type === 'del') { bg = 'rgba(239,68,68,0.14)'; color = '#dc2626'; prefix = '−'; }
+            else if (ln.type === 'hunk') { bg = 'rgba(127,127,127,0.12)'; color = '#888'; prefix = ''; }
+            rows += `<div style="background:${bg};color:${color};white-space:pre-wrap;word-break:break-word;padding:0 8px;">${escapeHtml(prefix + (ln.text || ''))}</div>`;
+        }
+        body.innerHTML = `<div style="width:100%;height:100%;display:flex;flex-direction:column;">
+            <div style="padding:8px 12px;font-size:0.85rem;border-bottom:1px solid var(--border,#333);"><strong style="color:#dc2626;">−${data.removed} removed</strong> · <strong style="color:#16a34a;">+${data.added} added</strong> <span style="color:#888;">(original → current)</span></div>
+            <div style="flex:1;overflow:auto;font-family:monospace;font-size:0.8rem;line-height:1.5;">${rows}</div></div>`;
+    } catch (e) {
+        body.innerHTML = '<div style="padding:24px;color:#dc2626;">Couldn\'t load the diff.</div>';
+    }
+}
+
+async function loadCensoredBar() {
+    try {
+        const resp = await fetch(`${API_BASE}/altered-documents?limit=30`);
+        if (!resp.ok) return;
+        const data = await resp.json();
+        const items = data.altered_documents || [];
+        if (items.length) renderCensoredBar(items, data.total || items.length);
+    } catch (e) {}
+}
+
+function renderCensoredBar(items, total) {
+    const searchView = document.getElementById('search-view');
+    if (!searchView) return;
+    const existing = document.getElementById('censored-documents-bar');
+    if (existing) existing.remove();
+    const card = (d) => `
+        <div class="pinned-card" onclick="openPublicCompare('${d.old_id}','${d.new_id}','${escapeHtml(d.filename || '')}')">
+            <div class="pinned-card-thumbnail">
+                <img src="${API_BASE}/documents/${d.new_id}/thumbnail" alt="${escapeHtml(d.filename || '')}" loading="lazy"
+                     onerror="this.style.display='none';this.nextElementSibling.style.display='flex';">
+                <div class="thumbnail-fallback" style="display:none;"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/></svg></div>
+            </div>
+            <div class="pinned-card-content">
+                <div class="pinned-card-filename">${escapeHtml(d.filename || '')}</div>
+                <div class="pinned-card-reason" style="color:#ef4444;">−${formatNumber(d.lines_removed || 0)} lines removed by DOJ</div>
+                <div class="pinned-card-meta">Set ${d.dataset_num} · click to compare</div>
+            </div>
+        </div>`;
+    const cards = items.map(card).join('');
+    const bar = document.createElement('div');
+    bar.id = 'censored-documents-bar';
+    bar.className = 'pinned-documents-bar pinned-bar-fadein';
+    bar.innerHTML = `
+        <div class="pinned-header">
+            <span class="pinned-icon">🚩</span>
+            <span class="pinned-title">Altered by DOJ</span>
+            <span class="pinned-subtitle">Documents changed after release — see what was removed</span>
+            <span class="pinned-suggestion-note"><a href="#" onclick="openAlteredGallery();return false;" style="color:inherit;text-decoration:underline;">View all ${formatNumber(total)} →</a></span>
+        </div>
+        <div class="pinned-scroll-container"><div class="pinned-scroll">${cards}${cards}</div></div>`;
+    const pinnedBar = document.getElementById('pinned-documents-bar');
+    const statsDisplay = document.getElementById('stats-display');
+    if (pinnedBar) pinnedBar.parentNode.insertBefore(bar, pinnedBar.nextSibling);
+    else if (statsDisplay) statsDisplay.parentNode.insertBefore(bar, statsDisplay);
+    else searchView.appendChild(bar);
+}
+
+async function openAlteredGallery() {
+    const modal = document.getElementById('altered-gallery-modal');
+    const body = document.getElementById('altered-gallery-body');
+    if (!modal || !body) return;
+    modal.classList.remove('hidden');
+    body.innerHTML = '<div style="padding:24px;color:#888;">Loading…</div>';
+    try {
+        const resp = await fetch(`${API_BASE}/altered-documents?limit=200`);
+        const data = await resp.json();
+        const items = data.altered_documents || [];
+        if (!items.length) { body.innerHTML = '<div style="padding:24px;color:#888;">No exposed alterations yet.</div>'; return; }
+        body.innerHTML = '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:12px;padding:12px;">' +
+            items.map(d => `
+                <div onclick="openPublicCompare('${d.old_id}','${d.new_id}','${escapeHtml(d.filename || '')}')" style="cursor:pointer;border:1px solid var(--border,#333);border-radius:8px;padding:10px;">
+                    <div style="font-family:monospace;font-size:0.85rem;margin-bottom:4px;">${escapeHtml(d.filename || '')}</div>
+                    <div style="color:#ef4444;font-weight:600;font-size:0.8rem;">−${formatNumber(d.lines_removed || 0)} lines removed</div>
+                    <div style="color:#888;font-size:0.75rem;">Set ${d.dataset_num}${d.altered_on ? ' · ' + formatAlteredOn(d.altered_on) : ''}</div>
+                </div>`).join('') + '</div>';
+    } catch (e) {
+        body.innerHTML = '<div style="padding:24px;color:#dc2626;">Couldn\'t load.</div>';
+    }
+}
+
+function closeAlteredGallery() {
+    const modal = document.getElementById('altered-gallery-modal');
+    if (modal) modal.classList.add('hidden');
+}
+
 async function loadSubcategories(category, target = 'search') {
     const subcategoryEl = target === 'search' ? elements.searchSubcategory : elements.browseSubcategory;
     const groupEl = target === 'search' ? elements.searchSubcategoryGroup : null;
@@ -1916,7 +2101,10 @@ async function openDocument(docId, index = -1) {
             ${doc.page_count ? `<span>📄 ${doc.page_count} pages</span>` : ''}
             <span>📝 ${formatNumber(doc.char_count || 0)} characters</span>
         `;
-        
+
+        // Flag documents DOJ re-issued/redacted after release (non-blocking).
+        loadDocumentAlterationBadge(docId);
+
         elements.modalText.textContent = ''; // Full text loaded on demand when user opens Text Content tab
         elements.modalSummary.innerHTML = '<p class="loading">Click to load AI summary...</p>';
         
