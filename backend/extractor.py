@@ -2050,66 +2050,58 @@ class AudioVideoExtractor:
         processed_count = 0
         
         if use_mlx:
-            # Pre-load MLX model to catch errors early
-            mlx_model = self._get_mlx_whisper()
-            if mlx_model:
-                print(f"  ⚡ Using Lightning Whisper MLX (Apple Silicon GPU)")
-            else:
-                print(f"  ℹ MLX not available, using faster-whisper (CPU)")
-            
-            # Sequential for MLX (GPU already provides parallelism)
-            for media in tqdm(to_process, desc="Transcribing"):
-                _reset_skip_flag()
-                processed_count += 1
-                
-                # Call progress callback if provided
-                if progress_callback:
-                    try:
-                        progress_callback(processed_count, len(to_process))
-                    except:
-                        pass
-                
-                try:
-                    # Run transcription with timeout using a thread
-                    result_container = [None]
-                    error_container = [None]
-                    
-                    def transcribe_with_timeout():
+            # Crash/hang isolation: run each MLX transcription in a spawned worker
+            # subprocess. A hung or segfaulting native call (e.g. a corrupt media file)
+            # is then killed via pool.terminate() and the next file continues, instead
+            # of corrupting this process and crashing the whole run. The worker loads
+            # the model once and is reused; it is restarted only after a timeout/crash.
+            print(f"  ⚡ Using Lightning Whisper MLX (Apple Silicon GPU) in an isolated worker")
+            ctx = multiprocessing.get_context("spawn")
+
+            def _new_pool():
+                return ctx.Pool(1, initializer=_mlx_worker_init,
+                                initargs=(str(self.base_path), self.api_key))
+
+            pool = _new_pool()
+            try:
+                for media in tqdm(to_process, desc="Transcribing"):
+                    processed_count += 1
+                    if progress_callback:
                         try:
-                            result_container[0] = self.transcribe_file(media)
-                        except Exception as e:
-                            error_container[0] = e
-                    
-                    thread = threading.Thread(target=transcribe_with_timeout)
-                    thread.start()
-                    
-                    # Wait with periodic skip checks
-                    start_time = time.time()
-                    while thread.is_alive():
-                        thread.join(timeout=0.5)  # Check every 0.5s
-                        if _should_skip():
-                            print(f"\n  ⏭ Skipping: {media.name}")
-                            self._save_failed_file(media, "Skipped by user")
-                            results["failed"] += 1
-                            break
-                        if time.time() - start_time > file_timeout:
-                            print(f"\n  ⏱ Timeout ({file_timeout}s): {media.name}")
-                            self._save_failed_file(media, f"Timeout after {file_timeout}s")
-                            results["failed"] += 1
-                            break
-                    else:
-                        # Thread completed normally
-                        if error_container[0]:
-                            raise error_container[0]
-                        self._process_result(result_container[0], results)
-                        
-                except KeyboardInterrupt:
-                    print(f"\n  ⚠ Interrupted - saving progress...")
-                    break
-                except Exception as e:
-                    print(f"  ✗ Error: {media.name}: {e}")
-                    self._save_failed_file(media, str(e))
-                    results["failed"] += 1
+                            progress_callback(processed_count, len(to_process))
+                        except:
+                            pass
+                    try:
+                        async_res = pool.apply_async(_transcribe_in_worker, (str(media),))
+                        # A crashed worker can't return a result, so get() will hit this
+                        # timeout too — either way we kill the worker and move on.
+                        result = async_res.get(timeout=file_timeout)
+                        self._process_result(result, results)
+                    except KeyboardInterrupt:
+                        print(f"\n  ⚠ Interrupted - saving progress...")
+                        break
+                    except multiprocessing.TimeoutError:
+                        print(f"\n  ⏱ Timeout ({file_timeout}s): {media.name} — killing worker")
+                        self._save_failed_file(media, f"Timeout after {file_timeout}s")
+                        results["failed"] += 1
+                        pool.terminate(); pool.join()
+                        pool = _new_pool()
+                    except Exception as e:
+                        # Worker crashed (segfault → BrokenProcessPool/EOFError) or the
+                        # transcription raised. Contain it, restart the worker, continue.
+                        print(f"\n  ✗ Error: {media.name}: {e}")
+                        self._save_failed_file(media, str(e))
+                        results["failed"] += 1
+                        try:
+                            pool.terminate(); pool.join()
+                        except Exception:
+                            pass
+                        pool = _new_pool()
+            finally:
+                try:
+                    pool.terminate(); pool.join()
+                except Exception:
+                    pass
         else:
             # Parallel processing for CPU-based transcription
             print(f"  🚀 Using parallel processing with {max_workers} workers")
@@ -2148,6 +2140,29 @@ class AudioVideoExtractor:
             print(f"\n  ⚠ {self.failed_files['count']} files failed - see: {self.failed_files_log}")
         
         return results
+
+
+# Crash/hang-isolated media transcription worker (used by AudioVideoExtractor on
+# Apple Silicon/MLX). Runs in a spawned subprocess so a hung or segfaulting native
+# transcription can be killed without taking down the main process. The worker
+# builds its own extractor + loads the model once; it's reused across files and only
+# restarted after a timeout/crash. Module-level so it's picklable under 'spawn'.
+_worker_av = None
+
+
+def _mlx_worker_init(base_path, api_key):
+    global _worker_av
+    _worker_av = AudioVideoExtractor(base_path, api_key)
+    try:
+        _worker_av._get_mlx_whisper()  # preload once per worker
+    except Exception:
+        pass
+
+
+def _transcribe_in_worker(path_str):
+    """Transcribe one file in the worker and return the result dict (the parent
+    persists it via _process_result, so no cross-process index races)."""
+    return _worker_av.transcribe_file(Path(path_str))
 
 
 class MediaExtractor:

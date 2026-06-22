@@ -3792,27 +3792,43 @@ function exportMissingDocs() {
 
 let alterationsData = [];
 let alterationsCounts = {};
+let alterationsMatchedTotal = 0;
+let alterationsOffset = 0;
+const ALT_PAGE_SIZE = 200;
+const selectedAlterations = new Map();  // "efta\tfiletype" -> {efta_num, file_type}
 
-// The "Updated / Re-issued Files" card is the alteration REVIEW QUEUE: each row is
-// a document DOJ re-issued; the admin compares before/after and decides Expose
-// (improper redaction → publish) or Clear (legitimate victim protection → keep hidden).
+// The "Altered Documents" card is the review QUEUE: each row is a document DOJ
+// re-issued; the admin compares before/after and decides Expose (improper redaction
+// → publish) or Clear (legitimate victim protection → keep hidden). Supports bulk
+// actions (selected rows or all-matching) + sort/range-filter.
+function _altCurrentFilter() {
+    const g = id => (document.getElementById(id) || {}).value;
+    return {
+        status: g('alteration-status-filter') || 'pending',
+        dataset: g('updated-dataset-filter') || '',
+        min_removed: g('alt-min-removed') || '',
+        max_removed: g('alt-max-removed') || '',
+        min_added: g('alt-min-added') || '',
+    };
+}
+
 async function loadUpdatedDocuments() {
-    const dsEl = document.getElementById('updated-dataset-filter');
-    const stEl = document.getElementById('alteration-status-filter');
-    const sortEl = document.getElementById('alteration-sort');
-    const dataset = dsEl ? dsEl.value : '';
-    const status = stEl ? stEl.value : 'pending';
-    const sort = sortEl ? sortEl.value : 'removed';
+    const f = _altCurrentFilter();
+    const sort = (document.getElementById('alteration-sort') || {}).value || 'removed';
     const listEl = document.getElementById('updated-docs-list');
     if (listEl) listEl.innerHTML = '<div class="loading"><span class="spinner"></span>Loading…</div>';
     try {
-        let url = `${window.location.origin}/api/admin/alterations?status=${encodeURIComponent(status)}&sort=${encodeURIComponent(sort)}&limit=200`;
-        if (dataset) url += `&dataset=${dataset}`;
+        let url = `${window.location.origin}/api/admin/alterations?status=${encodeURIComponent(f.status)}&sort=${encodeURIComponent(sort)}&limit=${ALT_PAGE_SIZE}&offset=${alterationsOffset}`;
+        if (f.dataset) url += `&dataset=${encodeURIComponent(f.dataset)}`;
+        if (f.min_removed !== '') url += `&min_removed=${encodeURIComponent(f.min_removed)}`;
+        if (f.max_removed !== '') url += `&max_removed=${encodeURIComponent(f.max_removed)}`;
+        if (f.min_added !== '') url += `&min_added=${encodeURIComponent(f.min_added)}`;
         const response = await authFetch(url);
         if (!response.ok) throw new Error('Failed to load alterations');
         const data = await response.json();
         alterationsData = data.alterations || [];
         alterationsCounts = data.counts || {};
+        alterationsMatchedTotal = data.matched_total || 0;
         renderUpdatedDocuments();
     } catch (error) {
         console.error('Error loading alterations:', error);
@@ -3825,6 +3841,71 @@ function _alterationBadge(st) {
                   cleared: ['#22c55e', 'Cleared'], trivial: ['#9ca3af', 'Trivial'] };
     const [c, label] = map[st] || ['#9ca3af', st || '—'];
     return `<span style="display:inline-block;padding:2px 8px;border-radius:10px;font-size:0.72rem;font-weight:600;color:${c};border:1px solid ${c};">${label}</span>`;
+}
+
+function _altKey(a) { return a.efta_num + '\t' + (a.file_type || ''); }
+function _altCbId(a) { return 'alt-cb-' + a.efta_num + '_' + (a.file_type || ''); }
+
+function _altToolbarInner() {
+    const n = selectedAlterations.size;
+    const m = alterationsMatchedTotal;
+    const dis = n === 0 ? 'disabled' : '';
+    return `<div style="display:flex;flex-wrap:wrap;gap:var(--space-sm);align-items:center;padding:var(--space-sm) 0;border-bottom:1px solid var(--border);margin-bottom:var(--space-sm);">
+        <strong style="color:var(--text-secondary);">${formatNumber(n)} selected</strong>
+        <button class="btn btn-sm" ${dis} onclick="bulkReviewSelected('cleared')">✓ Clear</button>
+        <button class="btn btn-sm" ${dis} onclick="bulkReviewSelected('trivial')">Trivial</button>
+        <button class="btn btn-sm btn-danger" ${dis} onclick="bulkReviewSelected('exposed')">🚩 Expose</button>
+        <span style="margin-left:auto;color:var(--text-muted);font-size:0.82rem;">Apply to ALL ${formatNumber(m)} matching:</span>
+        <button class="btn btn-sm" onclick="bulkReviewAllMatching('cleared')">Clear all</button>
+        <button class="btn btn-sm" onclick="bulkReviewAllMatching('trivial')">Trivial all</button>
+        <button class="btn btn-sm btn-danger" onclick="bulkReviewAllMatching('exposed')">🚩 Expose all</button>
+    </div>`;
+}
+
+function updateAlterationBulkBar() {
+    const bar = document.getElementById('alt-bulk-bar');
+    if (bar) bar.innerHTML = _altToolbarInner();
+}
+
+function toggleAlterationSel(efta, ft) {
+    const k = efta + '\t' + ft;
+    if (selectedAlterations.has(k)) selectedAlterations.delete(k);
+    else selectedAlterations.set(k, { efta_num: efta, file_type: ft });
+    updateAlterationBulkBar();
+}
+
+function toggleSelectAllAlterations() {
+    const cb = document.getElementById('alt-select-all');
+    const on = !!(cb && cb.checked);
+    alterationsData.forEach(a => {
+        const k = _altKey(a);
+        if (on) selectedAlterations.set(k, { efta_num: a.efta_num, file_type: a.file_type });
+        else selectedAlterations.delete(k);
+        const rcb = document.getElementById(_altCbId(a));
+        if (rcb) rcb.checked = on;
+    });
+    updateAlterationBulkBar();
+}
+
+function altSortToggle(descKey, ascKey) {
+    const sortEl = document.getElementById('alteration-sort');
+    if (!sortEl) return;
+    sortEl.value = sortEl.value === descKey ? ascKey : descKey;
+    alterationsOffset = 0;
+    loadUpdatedDocuments();
+}
+
+function _altSortHeader(label, descKey, ascKey, color, align) {
+    const cur = (document.getElementById('alteration-sort') || {}).value;
+    const arrow = cur === descKey ? ' ↓' : (cur === ascKey ? ' ↑' : '');
+    return `<th style="text-align:${align || 'right'};padding:var(--space-sm);color:${color};cursor:pointer;" onclick="altSortToggle('${descKey}','${ascKey}')">${label}${arrow}</th>`;
+}
+
+function altPage(dir) {
+    const next = alterationsOffset + dir * ALT_PAGE_SIZE;
+    if (next < 0) return;
+    alterationsOffset = next;
+    loadUpdatedDocuments();
 }
 
 function renderUpdatedDocuments() {
@@ -3840,25 +3921,30 @@ function renderUpdatedDocuments() {
             `<span style="color:#9ca3af;">Trivial ${formatNumber(c.trivial||0)}</span>`;
     }
     if (!alterationsData || alterationsData.length === 0) {
-        listEl.innerHTML = '<div style="text-align:center;padding:var(--space-lg);color:var(--text-muted);">No documents in this view.</div>';
+        listEl.innerHTML = `<div id="alt-bulk-bar">${_altToolbarInner()}</div>` +
+            '<div style="text-align:center;padding:var(--space-lg);color:var(--text-muted);">No documents in this view.</div>';
         return;
     }
-    let html = '<table style="width:100%;border-collapse:collapse;">';
+    let html = `<div id="alt-bulk-bar">${_altToolbarInner()}</div>`;
+    html += '<table style="width:100%;border-collapse:collapse;">';
     html += `<thead><tr style="border-bottom:1px solid var(--border);">
+        <th style="padding:var(--space-sm);"><input type="checkbox" id="alt-select-all" onchange="toggleSelectAllAlterations()" title="Select all on this page"></th>
         <th style="text-align:left;padding:var(--space-sm);color:var(--text-muted);">File</th>
         <th style="text-align:left;padding:var(--space-sm);color:var(--text-muted);">Dataset</th>
-        <th style="text-align:right;padding:var(--space-sm);color:var(--danger);">Removed</th>
-        <th style="text-align:right;padding:var(--space-sm);color:var(--success);">Added</th>
-        <th style="text-align:left;padding:var(--space-sm);color:var(--text-muted);">DOJ changed</th>
+        ${_altSortHeader('Removed', 'removed', 'removed_asc', 'var(--danger)')}
+        ${_altSortHeader('Added', 'added', 'added_asc', 'var(--success)')}
+        ${_altSortHeader('DOJ changed', 'recent', 'oldest', 'var(--text-muted)', 'left')}
         <th style="text-align:left;padding:var(--space-sm);color:var(--text-muted);">Status</th>
         <th style="text-align:right;padding:var(--space-sm);color:var(--text-muted);">Review</th>
     </tr></thead><tbody>`;
     for (const a of alterationsData) {
         const canonName = a.canonical_filename || (a.efta_num + '.' + (a.file_type || ''));
+        const checked = selectedAlterations.has(_altKey(a)) ? 'checked' : '';
         const btn = a.old_id
             ? `<button class="btn btn-sm" onclick="openVersionCompare('${escapeJs(a.old_id)}','${escapeJs(a.old_filename)}','${escapeJs(a.canonical_id)}','${escapeJs(canonName)}','${escapeJs(a.file_type||'')}','${escapeJs(a.efta_num)}','${escapeJs(a.review_status)}')">⇄ Review</button>`
             : '<span style="color:var(--text-muted);">—</span>';
         html += `<tr style="border-bottom:1px solid var(--border);">
+            <td style="padding:var(--space-sm);"><input type="checkbox" id="${_altCbId(a)}" ${checked} onchange="toggleAlterationSel('${escapeJs(a.efta_num)}','${escapeJs(a.file_type||'')}')"></td>
             <td style="padding:var(--space-sm);font-family:var(--font-mono);font-size:0.85rem;">${escapeHtml(canonName)}</td>
             <td style="padding:var(--space-sm);">Set ${a.dataset_num}</td>
             <td style="text-align:right;padding:var(--space-sm);color:var(--danger);font-weight:600;">${formatNumber(a.lines_removed||0)}</td>
@@ -3869,7 +3955,65 @@ function renderUpdatedDocuments() {
         </tr>`;
     }
     html += '</tbody></table>';
+    const start = alterationsOffset, end = alterationsOffset + alterationsData.length;
+    html += `<div style="display:flex;gap:var(--space-md);align-items:center;justify-content:center;padding:var(--space-md);">
+        <button class="btn btn-sm" ${alterationsOffset === 0 ? 'disabled' : ''} onclick="altPage(-1)">‹ Prev</button>
+        <span style="color:var(--text-muted);">${formatNumber(start + 1)}–${formatNumber(end)} of ${formatNumber(alterationsMatchedTotal)}</span>
+        <button class="btn btn-sm" ${end >= alterationsMatchedTotal ? 'disabled' : ''} onclick="altPage(1)">Next ›</button>
+    </div>`;
     listEl.innerHTML = html;
+}
+
+async function bulkReviewSelected(newStatus) {
+    const items = Array.from(selectedAlterations.values());
+    if (!items.length) return;
+    if (newStatus === 'exposed') {
+        if (!confirm(`Expose ${items.length} document(s) to the public?\n\nThis publishes their pre-redaction "before" versions publicly. Make sure none reveal a victim's identity or private information. Reversible via Clear.`)) return;
+    } else if (!confirm(`Set ${items.length} document(s) to "${newStatus}"?`)) {
+        return;
+    }
+    try {
+        const resp = await authFetch(`${window.location.origin}/api/admin/alterations/bulk-review`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ new_status: newStatus, mode: 'selected', selected: items }),
+        });
+        if (!resp.ok) throw new Error('HTTP ' + resp.status);
+        const r = await resp.json();
+        selectedAlterations.clear();
+        loadUpdatedDocuments();
+        alert(`Updated ${formatNumber(r.updated)} document(s) → ${newStatus}.`);
+    } catch (e) { alert('Bulk action failed: ' + ((e && e.message) || e)); }
+}
+
+async function bulkReviewAllMatching(newStatus) {
+    const m = alterationsMatchedTotal;
+    if (!m) return;
+    const f = _altCurrentFilter();
+    if (newStatus === 'exposed') {
+        if (!confirm(`EXPOSE ALL ${formatNumber(m)} matching documents to the public?\n\nThis publishes ${formatNumber(m)} pre-redaction "before" versions publicly. Only do this if you are certain none reveal victim identities or private information. Reversible via "Clear all".`)) return;
+        if (!confirm(`Final confirm — publicly expose ${formatNumber(m)} documents now?`)) return;
+    } else if (!confirm(`Set ALL ${formatNumber(m)} matching documents to "${newStatus}"?`)) {
+        return;
+    }
+    const filter = {
+        status: f.status,
+        dataset: f.dataset ? Number(f.dataset) : null,
+        min_removed: f.min_removed === '' ? null : Number(f.min_removed),
+        max_removed: f.max_removed === '' ? null : Number(f.max_removed),
+        min_added: f.min_added === '' ? null : Number(f.min_added),
+    };
+    try {
+        const resp = await authFetch(`${window.location.origin}/api/admin/alterations/bulk-review`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ new_status: newStatus, mode: 'filter', filter }),
+        });
+        if (!resp.ok) throw new Error('HTTP ' + resp.status);
+        const r = await resp.json();
+        selectedAlterations.clear();
+        alterationsOffset = 0;
+        loadUpdatedDocuments();
+        alert(`Updated ${formatNumber(r.updated)} document(s) → ${newStatus}.`);
+    } catch (e) { alert('Bulk action failed: ' + ((e && e.message) || e)); }
 }
 
 function fmtArchivedAt(stamp) {
@@ -3884,6 +4028,8 @@ function escapeJs(str) {
 }
 
 function filterUpdatedData() {
+    alterationsOffset = 0;
+    selectedAlterations.clear();
     loadUpdatedDocuments();
 }
 
@@ -4117,6 +4263,12 @@ window.switchCompareTab = switchCompareTab;
 window.closeVersionCompareModal = closeVersionCompareModal;
 window.reviewAlteration = reviewAlteration;
 window.hideCurrentVersion = hideCurrentVersion;
+window.toggleAlterationSel = toggleAlterationSel;
+window.toggleSelectAllAlterations = toggleSelectAllAlterations;
+window.altSortToggle = altSortToggle;
+window.altPage = altPage;
+window.bulkReviewSelected = bulkReviewSelected;
+window.bulkReviewAllMatching = bulkReviewAllMatching;
 
 // =============================================================================
 // Document Visibility Management

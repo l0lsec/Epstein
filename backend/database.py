@@ -349,6 +349,7 @@ class Database:
             """)
             conn.execute("CREATE INDEX IF NOT EXISTS idx_alterations_status ON document_alterations(review_status)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_alterations_queue ON document_alterations(review_status, lines_removed DESC)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_alterations_added ON document_alterations(review_status, lines_added DESC)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_alterations_canonical ON document_alterations(canonical_id)")
             conn.commit()
             # Migration: old_id/old_filename columns (stored so review queries never
@@ -2200,21 +2201,46 @@ class Database:
                 out["old_filename"] = row["old_filename"]
             return out
 
-    def get_alterations(self, status: str = "pending", sort: str = "removed",
-                        dataset: int = None, limit: int = 50, offset: int = 0,
-                        timeout_seconds: float = 0) -> List[Dict[str, Any]]:
-        """Admin review queue rows (canonical doc info + old version id for compare)."""
-        order = {
-            "removed": "a.lines_removed DESC, a.chars_removed DESC",
-            "recent": "a.altered_on DESC",
-            "efta": "a.efta_num ASC",
-        }.get(sort, "a.lines_removed DESC")
+    # Sort keys for the review queue (bare column names; single-table query).
+    _ALTERATION_SORTS = {
+        "removed": "lines_removed DESC, chars_removed DESC",
+        "removed_asc": "lines_removed ASC, chars_removed ASC",
+        "added": "lines_added DESC",
+        "added_asc": "lines_added ASC",
+        "recent": "altered_on DESC",
+        "oldest": "altered_on ASC",
+        "efta": "efta_num ASC",
+    }
+
+    @staticmethod
+    def _alterations_where(status=None, dataset=None, min_removed=None,
+                           max_removed=None, min_added=None):
+        """Build the WHERE clause shared by the list, the matched-count, and the
+        bulk filter-update so a bulk action only ever touches the rows the admin is
+        currently viewing. Uses bare column names (resolve on the single table whether
+        aliased or in an UPDATE)."""
         conds, params = [], []
         if status and status != "all":
-            conds.append("a.review_status = ?"); params.append(status)
+            conds.append("review_status = ?"); params.append(status)
         if dataset:
-            conds.append("a.dataset_num = ?"); params.append(dataset)
+            conds.append("dataset_num = ?"); params.append(int(dataset))
+        if min_removed is not None:
+            conds.append("lines_removed >= ?"); params.append(int(min_removed))
+        if max_removed is not None:
+            conds.append("lines_removed <= ?"); params.append(int(max_removed))
+        if min_added is not None:
+            conds.append("lines_added >= ?"); params.append(int(min_added))
         where = ("WHERE " + " AND ".join(conds)) if conds else ""
+        return where, params
+
+    def get_alterations(self, status: str = "pending", sort: str = "removed",
+                        dataset: int = None, min_removed: int = None,
+                        max_removed: int = None, min_added: int = None,
+                        limit: int = 50, offset: int = 0,
+                        timeout_seconds: float = 0) -> List[Dict[str, Any]]:
+        """Admin review queue rows (canonical doc info + old version id for compare)."""
+        order = self._ALTERATION_SORTS.get(sort, self._ALTERATION_SORTS["removed"])
+        where, params = self._alterations_where(status, dataset, min_removed, max_removed, min_added)
         sql = (
             "SELECT a.efta_num, a.file_type, a.dataset_num, a.canonical_id, "
             "a.canonical_filename, a.old_id, a.old_filename, a.versions_count, "
@@ -2222,7 +2248,7 @@ class Database:
             "a.review_status, a.admin_notes, a.reviewed_at "
             f"FROM document_alterations a {where} ORDER BY {order} LIMIT ? OFFSET ?"
         )
-        params.extend([limit, offset])
+        params = params + [limit, offset]
         with self.get_read_connection(timeout_seconds=timeout_seconds) as conn:
             rows = []
             for r in conn.execute(sql, params):
@@ -2230,6 +2256,49 @@ class Database:
                 d["efta_num"] = f"{d['efta_num']:08d}"
                 rows.append(d)
             return rows
+
+    def count_alterations_matching(self, status=None, dataset=None, min_removed=None,
+                                   max_removed=None, min_added=None,
+                                   timeout_seconds: float = 0) -> int:
+        """Count rows matching the SAME filter the list uses (for the 'apply to all N' UI)."""
+        where, params = self._alterations_where(status, dataset, min_removed, max_removed, min_added)
+        with self.get_read_connection(timeout_seconds=timeout_seconds) as conn:
+            return conn.execute(
+                f"SELECT COUNT(*) FROM document_alterations {where}", params
+            ).fetchone()[0]
+
+    def bulk_review_alterations(self, new_status: str, keys=None,
+                                filters: dict = None) -> int:
+        """Bulk-set review_status in one UPDATE. Provide EITHER `keys` (list of
+        (efta_num, file_type), capped at 1000) for explicit row selection, OR `filters`
+        (same shape as the list filters) to update every matching row. Returns rowcount."""
+        if new_status not in ("pending", "cleared", "exposed", "trivial"):
+            raise ValueError(f"invalid status: {new_status}")
+        with self.get_connection() as conn:
+            if keys:
+                keys = list(keys)[:1000]
+                values = ",".join("(?,?)" for _ in keys)
+                flat = []
+                for efta, ft in keys:
+                    flat.extend([int(efta), ft])
+                cur = conn.execute(
+                    "UPDATE document_alterations SET review_status = ?, "
+                    "reviewed_at = CURRENT_TIMESTAMP "
+                    f"WHERE (efta_num, file_type) IN (VALUES {values})",
+                    [new_status, *flat],
+                )
+            else:
+                f = filters or {}
+                where, params = self._alterations_where(
+                    f.get("status"), f.get("dataset"), f.get("min_removed"),
+                    f.get("max_removed"), f.get("min_added"))
+                cur = conn.execute(
+                    "UPDATE document_alterations SET review_status = ?, "
+                    f"reviewed_at = CURRENT_TIMESTAMP {where}",
+                    [new_status, *params],
+                )
+            conn.commit()
+            return cur.rowcount
 
     def count_alterations_by_status(self, timeout_seconds: float = 0) -> Dict[str, int]:
         out = {"pending": 0, "exposed": 0, "cleared": 0, "trivial": 0, "total": 0}

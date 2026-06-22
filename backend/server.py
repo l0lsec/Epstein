@@ -14,7 +14,7 @@ import concurrent.futures as _cf
 import sqlite3
 from html import escape as html_escape
 from pathlib import Path
-from typing import Optional, List
+from typing import Optional, List, Dict, Any
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 
@@ -5593,13 +5593,17 @@ async def admin_get_alterations(
     status: str = "pending",
     sort: str = "removed",
     dataset: int = None,
+    min_removed: int = None,
+    max_removed: int = None,
+    min_added: int = None,
     limit: int = 100,
     offset: int = 0,
 ):
-    """Admin review queue of DOJ-altered documents + status counts.
+    """Admin review queue of DOJ-altered documents + status counts + matched_total.
 
     status: pending | exposed | cleared | trivial | all (default pending).
-    sort: removed (most text removed first) | recent | efta. Requires admin auth.
+    sort: removed | removed_asc | added | added_asc | recent | oldest | efta.
+    min_removed/max_removed/min_added: numeric range filters. Requires admin auth.
     """
     is_authorized, error = verify_admin_access(request, x_api_key)
     if not is_authorized:
@@ -5607,19 +5611,24 @@ async def admin_get_alterations(
     if not db:
         raise HTTPException(status_code=503, detail="Database not initialized")
 
-    cache_key = f"alterations:{status}:{sort}:{dataset}:{limit}:{offset}"
+    cache_key = f"alterations:{status}:{sort}:{dataset}:{min_removed}:{max_removed}:{min_added}:{limit}:{offset}"
     cached = _admin_cache.get(cache_key)
     if cached:
         return cached
 
     def _work():
         return (db.get_alterations(status=status, sort=sort, dataset=dataset,
-                                   limit=limit, offset=offset,
+                                   min_removed=min_removed, max_removed=max_removed,
+                                   min_added=min_added, limit=limit, offset=offset,
                                    timeout_seconds=_ADMIN_QUERY_TIMEOUT),
-                db.count_alterations_by_status(timeout_seconds=_ADMIN_QUERY_TIMEOUT))
+                db.count_alterations_by_status(timeout_seconds=_ADMIN_QUERY_TIMEOUT),
+                db.count_alterations_matching(status=status, dataset=dataset,
+                                              min_removed=min_removed, max_removed=max_removed,
+                                              min_added=min_added,
+                                              timeout_seconds=_ADMIN_QUERY_TIMEOUT))
 
-    rows, counts = await asyncio.to_thread(_work)
-    result = {"alterations": rows, "counts": counts}
+    rows, counts, matched_total = await asyncio.to_thread(_work)
+    result = {"alterations": rows, "counts": counts, "matched_total": matched_total}
     _admin_cache.set(cache_key, result)
     return result
 
@@ -5673,6 +5682,56 @@ async def admin_review_alteration(
         request_id=request_id,
     )
     return {"success": True, "status": payload.status, "canonical_id": canonical_id}
+
+
+class AlterationBulkReviewRequest(BaseModel):
+    new_status: str                                   # pending | cleared | exposed | trivial
+    mode: str = "selected"                            # "selected" | "filter"
+    selected: Optional[List[Dict[str, Any]]] = None   # [{efta_num, file_type}, ...]
+    filter: Optional[Dict[str, Any]] = None           # {status,dataset,min_removed,max_removed,min_added}
+
+
+@app.post("/api/admin/alterations/bulk-review")
+async def admin_bulk_review_alterations(
+    payload: AlterationBulkReviewRequest,
+    request: Request,
+    x_api_key: str = Header(None),
+):
+    """Bulk-set review status. mode='selected' applies to the given (efta_num,file_type)
+    list (≤1000); mode='filter' applies to EVERY row matching the given list filters
+    (status/dataset/range) in one UPDATE. Requires admin auth."""
+    is_authorized, error = verify_admin_access(request, x_api_key)
+    if not is_authorized:
+        raise HTTPException(status_code=401, detail=error)
+    if not db:
+        raise HTTPException(status_code=503, detail="Database not initialized")
+    if payload.new_status not in ("pending", "cleared", "exposed", "trivial"):
+        raise HTTPException(status_code=400, detail="new_status must be pending|cleared|exposed|trivial")
+
+    client_ip, request_id = get_client_info(request)
+
+    def _work():
+        if payload.mode == "filter":
+            return db.bulk_review_alterations(payload.new_status, filters=payload.filter or {})
+        keys = []
+        for it in (payload.selected or []):
+            try:
+                keys.append((int(it.get("efta_num")), it.get("file_type")))
+            except (TypeError, ValueError):
+                continue
+        if not keys:
+            return 0
+        return db.bulk_review_alterations(payload.new_status, keys=keys)
+
+    updated = await asyncio.to_thread(_work)
+    _admin_cache.invalidate()
+    security_logger.log_system_event(
+        "alterations_bulk_reviewed",
+        f"mode={payload.mode} -> {payload.new_status}: {updated} rows",
+        client_ip=client_ip,
+        request_id=request_id,
+    )
+    return {"success": True, "updated": updated, "new_status": payload.new_status}
 
 
 @app.get("/api/admin/missing-documents")
