@@ -2340,9 +2340,13 @@
                             <option value="all">All</option>
                         </select>
                         <span style="color:var(--text-secondary);">Sort:</span>
-                        <select id="alteration-sort" class="login-input" style="width:auto;display:inline-block;min-width:140px;" onchange="filterUpdatedData()">
+                        <select id="alteration-sort" class="login-input" style="width:auto;display:inline-block;min-width:150px;" onchange="filterUpdatedData()">
                             <option value="removed">Most removed</option>
-                            <option value="recent">Most recent</option>
+                            <option value="removed_asc">Least removed</option>
+                            <option value="added">Most added</option>
+                            <option value="added_asc">Least added</option>
+                            <option value="recent">Newest changed</option>
+                            <option value="oldest">Oldest changed</option>
                             <option value="efta">EFTA number</option>
                         </select>
                         <span style="color:var(--text-secondary);">Dataset:</span>
@@ -2361,8 +2365,13 @@
                             <option value="11">Data Set 11</option>
                             <option value="12">Data Set 12</option>
                         </select>
+                        <span style="color:var(--text-secondary);">Removed:</span>
+                        <input id="alt-min-removed" type="number" min="0" placeholder="≥ min" class="login-input" style="width:90px;display:inline-block;" onchange="filterUpdatedData()" title="Only show alterations with at least this many lines removed">
+                        <input id="alt-max-removed" type="number" min="0" placeholder="≤ max" class="login-input" style="width:90px;display:inline-block;" onchange="filterUpdatedData()" title="Only show alterations with at most this many lines removed">
+                        <span style="color:var(--text-secondary);">Added ≥:</span>
+                        <input id="alt-min-added" type="number" min="0" placeholder="min" class="login-input" style="width:90px;display:inline-block;" onchange="filterUpdatedData()" title="Only show alterations with at least this many lines added">
                     </div>
-                    <div id="updated-docs-list" style="max-height: 400px; overflow-y: auto;">
+                    <div id="updated-docs-list" style="max-height: 600px; overflow-y: auto;">
                         <div class="loading"><span class="spinner"></span>Loading...</div>
                     </div>
                 </div>
@@ -2626,7 +2635,7 @@
         </div>
     </div>
 
-    <script src="/static/admin.js?v=28"></script>
+    <script src="/static/admin.js?v=29"></script>
 </body>
 </html>
 
