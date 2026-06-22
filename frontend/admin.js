@@ -3937,11 +3937,12 @@ function renderUpdatedDocuments() {
         <th style="text-align:left;padding:var(--space-sm);color:var(--text-muted);">Status</th>
         <th style="text-align:right;padding:var(--space-sm);color:var(--text-muted);">Review</th>
     </tr></thead><tbody>`;
-    for (const a of alterationsData) {
+    for (let idx = 0; idx < alterationsData.length; idx++) {
+        const a = alterationsData[idx];
         const canonName = a.canonical_filename || (a.efta_num + '.' + (a.file_type || ''));
         const checked = selectedAlterations.has(_altKey(a)) ? 'checked' : '';
         const btn = a.old_id
-            ? `<button class="btn btn-sm" onclick="openVersionCompare('${escapeJs(a.old_id)}','${escapeJs(a.old_filename)}','${escapeJs(a.canonical_id)}','${escapeJs(canonName)}','${escapeJs(a.file_type||'')}','${escapeJs(a.efta_num)}','${escapeJs(a.review_status)}')">⇄ Review</button>`
+            ? `<button class="btn btn-sm" onclick="openReviewAt(${idx})">⇄ Review</button>`
             : '<span style="color:var(--text-muted);">—</span>';
         html += `<tr style="border-bottom:1px solid var(--border);">
             <td style="padding:var(--space-sm);"><input type="checkbox" id="${_altCbId(a)}" ${checked} onchange="toggleAlterationSel('${escapeJs(a.efta_num)}','${escapeJs(a.file_type||'')}')"></td>
@@ -4043,6 +4044,21 @@ function showUpdatedForDataset(ds) {
 
 // -- version compare modal (visual side-by-side + text diff) -------------------
 let _versionCompareUrls = [];
+let currentReviewIndex = -1;   // index into alterationsData of the doc open in the review modal
+let _reviewDirty = false;      // a decision was made → refresh the queue when the modal closes
+
+// Open the review modal positioned at row `i` of the current queue page, so Clear/Expose
+// can advance to the next document and Prev/Next can walk the queue (streamlined review).
+function openReviewAt(i) {
+    if (!alterationsData || i < 0 || i >= alterationsData.length) return;
+    currentReviewIndex = i;
+    const a = alterationsData[i];
+    const canonName = a.canonical_filename || (a.efta_num + '.' + (a.file_type || ''));
+    openVersionCompare(a.old_id, a.old_filename, a.canonical_id, canonName,
+                       a.file_type || '', a.efta_num, a.review_status);
+}
+
+function navReview(dir) { openReviewAt(currentReviewIndex + dir); }
 
 async function openVersionCompare(oldId, oldName, newId, newName, fileType, eftaNum, status) {
     const modal = document.getElementById('version-compare-modal');
@@ -4068,10 +4084,19 @@ function _renderReviewActions() {
     if (!modal || !bar) return;
     const efta = modal.dataset.eftaNum, st = modal.dataset.status;
     if (!efta) { bar.innerHTML = ''; return; }
-    bar.innerHTML =
-        `<span style="color:var(--text-muted);font-size:0.78rem;margin-right:6px;">Decision:</span>` +
-        `<button class="btn btn-sm" onclick="reviewAlteration('cleared')" title="Legitimate redaction protecting a victim — keep the older version hidden">✓ Clear (legit)</button>` +
-        `<button class="btn btn-sm btn-danger" onclick="reviewAlteration('exposed')" title="Improper redaction — publish the before/after to the public">🚩 Expose to public</button>` +
+    let nav = '';
+    if (currentReviewIndex >= 0) {
+        const prevDis = currentReviewIndex <= 0 ? 'disabled' : '';
+        const nextDis = currentReviewIndex >= alterationsData.length - 1 ? 'disabled' : '';
+        nav = `<button class="btn btn-sm" ${prevDis} onclick="navReview(-1)" title="Previous document (no decision)">‹ Prev</button>` +
+              `<span style="color:var(--text-muted);font-size:0.78rem;">${currentReviewIndex + 1} / ${alterationsData.length} on page</span>` +
+              `<button class="btn btn-sm" ${nextDis} onclick="navReview(1)" title="Next document (no decision)">Skip / Next ›</button>` +
+              `<span style="display:inline-block;width:14px;"></span>`;
+    }
+    bar.innerHTML = nav +
+        `<span style="color:var(--text-muted);font-size:0.78rem;margin-right:6px;">Decision (auto-advances):</span>` +
+        `<button class="btn btn-sm" onclick="reviewAlteration('cleared')" title="Legitimate redaction protecting a victim — keep the older version hidden. Advances to the next document.">✓ Clear (legit)</button>` +
+        `<button class="btn btn-sm btn-danger" onclick="reviewAlteration('exposed')" title="Improper redaction — publish the before/after to the public. Advances to the next document.">🚩 Expose to public</button>` +
         `<button class="btn btn-sm" onclick="hideCurrentVersion()" title="Hide the current document from the public entirely">🙈 Hide current</button>` +
         (st && st !== 'pending' ? `<span style="margin-left:8px;">${_alterationBadge(st)}</span>` : '');
 }
@@ -4090,10 +4115,37 @@ async function reviewAlteration(newStatus) {
             body: JSON.stringify({ efta_num: efta, file_type: ft, status: newStatus, notes: null }),
         });
         if (!resp.ok) throw new Error('HTTP ' + resp.status);
-        closeVersionCompareModal();
-        loadUpdatedDocuments();
+        // Reflect the decision in-memory and advance to the next document so the
+        // admin can review continuously instead of the modal just closing.
+        _reviewDirty = true;
+        if (currentReviewIndex >= 0 && alterationsData[currentReviewIndex]) {
+            alterationsData[currentReviewIndex].review_status = newStatus;
+            modal.dataset.status = newStatus;
+        }
+        await advanceReview();
     } catch (e) {
         alert('Could not save decision: ' + ((e && e.message) || e));
+    }
+}
+
+// Move to the next document after a decision. Within the current page just open the
+// next row; at the end of the page refresh the queue — and in pending/trivial views
+// (where decided docs leave the filter) reload from the top and keep going until none remain.
+async function advanceReview() {
+    if (currentReviewIndex + 1 < alterationsData.length) {
+        openReviewAt(currentReviewIndex + 1);
+        return;
+    }
+    const status = (document.getElementById('alteration-status-filter') || {}).value || 'pending';
+    const autoContinue = (status === 'pending' || status === 'trivial');
+    _hideCompareModal();
+    _reviewDirty = false;
+    if (autoContinue) alterationsOffset = 0;
+    await loadUpdatedDocuments();
+    if (autoContinue && alterationsData.length > 0) {
+        openReviewAt(0);
+    } else {
+        currentReviewIndex = -1;
     }
 }
 
@@ -4217,12 +4269,19 @@ async function renderCompareText(modal, body) {
     }
 }
 
-function closeVersionCompareModal() {
+function _hideCompareModal() {
     const modal = document.getElementById('version-compare-modal');
     if (modal) modal.style.display = 'none';
     const body = document.getElementById('version-compare-body');
     if (body) body.innerHTML = '';
     _revokeCompareUrls();
+}
+
+function closeVersionCompareModal() {
+    _hideCompareModal();
+    currentReviewIndex = -1;
+    // If decisions were made during this review session, refresh the queue + counts.
+    if (_reviewDirty) { _reviewDirty = false; loadUpdatedDocuments(); }
 }
 
 document.addEventListener('click', (e) => {
@@ -4259,6 +4318,8 @@ window.loadUpdatedDocuments = loadUpdatedDocuments;
 window.filterUpdatedData = filterUpdatedData;
 window.showUpdatedForDataset = showUpdatedForDataset;
 window.openVersionCompare = openVersionCompare;
+window.openReviewAt = openReviewAt;
+window.navReview = navReview;
 window.switchCompareTab = switchCompareTab;
 window.closeVersionCompareModal = closeVersionCompareModal;
 window.reviewAlteration = reviewAlteration;
