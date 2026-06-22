@@ -2214,11 +2214,13 @@ class Database:
 
     @staticmethod
     def _alterations_where(status=None, dataset=None, min_removed=None,
-                           max_removed=None, min_added=None):
+                           max_removed=None, min_added=None, query=None):
         """Build the WHERE clause shared by the list, the matched-count, and the
         bulk filter-update so a bulk action only ever touches the rows the admin is
         currently viewing. Uses bare column names (resolve on the single table whether
-        aliased or in an UPDATE)."""
+        aliased or in an UPDATE). `query` keyword-searches the ORIGINAL (pre-redaction)
+        text via FTS, so the admin can surface altered docs that mentioned a term and
+        check whether it was redacted."""
         conds, params = [], []
         if status and status != "all":
             conds.append("review_status = ?"); params.append(status)
@@ -2230,17 +2232,21 @@ class Database:
             conds.append("lines_removed <= ?"); params.append(int(max_removed))
         if min_added is not None:
             conds.append("lines_added >= ?"); params.append(int(min_added))
+        if query and str(query).strip():
+            fts = '"' + str(query).strip().replace('"', '""') + '"*'
+            conds.append("old_id IN (SELECT id FROM documents_fts WHERE documents_fts MATCH ?)")
+            params.append(fts)
         where = ("WHERE " + " AND ".join(conds)) if conds else ""
         return where, params
 
     def get_alterations(self, status: str = "pending", sort: str = "removed",
                         dataset: int = None, min_removed: int = None,
                         max_removed: int = None, min_added: int = None,
-                        limit: int = 50, offset: int = 0,
+                        query: str = None, limit: int = 50, offset: int = 0,
                         timeout_seconds: float = 0) -> List[Dict[str, Any]]:
         """Admin review queue rows (canonical doc info + old version id for compare)."""
         order = self._ALTERATION_SORTS.get(sort, self._ALTERATION_SORTS["removed"])
-        where, params = self._alterations_where(status, dataset, min_removed, max_removed, min_added)
+        where, params = self._alterations_where(status, dataset, min_removed, max_removed, min_added, query)
         sql = (
             "SELECT a.efta_num, a.file_type, a.dataset_num, a.canonical_id, "
             "a.canonical_filename, a.old_id, a.old_filename, a.versions_count, "
