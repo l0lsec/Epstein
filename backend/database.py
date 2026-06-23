@@ -2264,10 +2264,10 @@ class Database:
             return rows
 
     def count_alterations_matching(self, status=None, dataset=None, min_removed=None,
-                                   max_removed=None, min_added=None,
+                                   max_removed=None, min_added=None, query=None,
                                    timeout_seconds: float = 0) -> int:
         """Count rows matching the SAME filter the list uses (for the 'apply to all N' UI)."""
-        where, params = self._alterations_where(status, dataset, min_removed, max_removed, min_added)
+        where, params = self._alterations_where(status, dataset, min_removed, max_removed, min_added, query)
         with self.get_read_connection(timeout_seconds=timeout_seconds) as conn:
             return conn.execute(
                 f"SELECT COUNT(*) FROM document_alterations {where}", params
@@ -2297,7 +2297,7 @@ class Database:
                 f = filters or {}
                 where, params = self._alterations_where(
                     f.get("status"), f.get("dataset"), f.get("min_removed"),
-                    f.get("max_removed"), f.get("min_added"))
+                    f.get("max_removed"), f.get("min_added"), f.get("query"))
                 cur = conn.execute(
                     "UPDATE document_alterations SET review_status = ?, "
                     f"reviewed_at = CURRENT_TIMESTAMP {where}",

@@ -5596,6 +5596,7 @@ async def admin_get_alterations(
     min_removed: int = None,
     max_removed: int = None,
     min_added: int = None,
+    query: str = None,
     limit: int = 100,
     offset: int = 0,
 ):
@@ -5603,7 +5604,9 @@ async def admin_get_alterations(
 
     status: pending | exposed | cleared | trivial | all (default pending).
     sort: removed | removed_asc | added | added_asc | recent | oldest | efta.
-    min_removed/max_removed/min_added: numeric range filters. Requires admin auth.
+    min_removed/max_removed/min_added: numeric range filters.
+    query: keyword search over the ORIGINAL (pre-redaction) text via FTS — surfaces
+    altered docs that mentioned a term so you can see if it was redacted. Admin auth.
     """
     is_authorized, error = verify_admin_access(request, x_api_key)
     if not is_authorized:
@@ -5611,7 +5614,7 @@ async def admin_get_alterations(
     if not db:
         raise HTTPException(status_code=503, detail="Database not initialized")
 
-    cache_key = f"alterations:{status}:{sort}:{dataset}:{min_removed}:{max_removed}:{min_added}:{limit}:{offset}"
+    cache_key = f"alterations:{status}:{sort}:{dataset}:{min_removed}:{max_removed}:{min_added}:{query}:{limit}:{offset}"
     cached = _admin_cache.get(cache_key)
     if cached:
         return cached
@@ -5619,12 +5622,12 @@ async def admin_get_alterations(
     def _work():
         return (db.get_alterations(status=status, sort=sort, dataset=dataset,
                                    min_removed=min_removed, max_removed=max_removed,
-                                   min_added=min_added, limit=limit, offset=offset,
+                                   min_added=min_added, query=query, limit=limit, offset=offset,
                                    timeout_seconds=_ADMIN_QUERY_TIMEOUT),
                 db.count_alterations_by_status(timeout_seconds=_ADMIN_QUERY_TIMEOUT),
                 db.count_alterations_matching(status=status, dataset=dataset,
                                               min_removed=min_removed, max_removed=max_removed,
-                                              min_added=min_added,
+                                              min_added=min_added, query=query,
                                               timeout_seconds=_ADMIN_QUERY_TIMEOUT))
 
     rows, counts, matched_total = await asyncio.to_thread(_work)

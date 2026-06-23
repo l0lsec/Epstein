@@ -3809,6 +3809,7 @@ function _altCurrentFilter() {
         min_removed: g('alt-min-removed') || '',
         max_removed: g('alt-max-removed') || '',
         min_added: g('alt-min-added') || '',
+        query: (g('alt-search') || '').trim(),
     };
 }
 
@@ -3823,6 +3824,7 @@ async function loadUpdatedDocuments() {
         if (f.min_removed !== '') url += `&min_removed=${encodeURIComponent(f.min_removed)}`;
         if (f.max_removed !== '') url += `&max_removed=${encodeURIComponent(f.max_removed)}`;
         if (f.min_added !== '') url += `&min_added=${encodeURIComponent(f.min_added)}`;
+        if (f.query) url += `&query=${encodeURIComponent(f.query)}`;
         const response = await authFetch(url);
         if (!response.ok) throw new Error('Failed to load alterations');
         const data = await response.json();
@@ -4002,6 +4004,7 @@ async function bulkReviewAllMatching(newStatus) {
         min_removed: f.min_removed === '' ? null : Number(f.min_removed),
         max_removed: f.max_removed === '' ? null : Number(f.max_removed),
         min_added: f.min_added === '' ? null : Number(f.min_added),
+        query: f.query || null,
     };
     try {
         const resp = await authFetch(`${window.location.origin}/api/admin/alterations/bulk-review`, {
