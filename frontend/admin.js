@@ -235,6 +235,9 @@ function loadTabData(tabId) {
         case 'ai':
             loadAIData();
             break;
+        case 'llm-cost':
+            loadLLMCostData();
+            break;
         case 'security':
             loadSecurityData();
             break;
@@ -1179,6 +1182,163 @@ function renderAISummaryDocs(documents) {
                 ${doc.cached_count > 0 ? `<span class="badge badge-success" title="Cached">${doc.cached_count} cached</span>` : ''}
             </div>
         </li>
+    `).join('');
+}
+
+// ============================================================================
+// LLM COST TRACKING
+// ============================================================================
+
+function formatUSD(amount) {
+    const n = Number(amount) || 0;
+    // Show more precision for tiny amounts so sub-cent costs are still visible.
+    if (n > 0 && n < 0.01) return '$' + n.toFixed(4);
+    return '$' + n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+function formatSqlTime(ts) {
+    if (!ts) return '';
+    try {
+        // SQLite CURRENT_TIMESTAMP is UTC "YYYY-MM-DD HH:MM:SS"; mark it as UTC
+        // so the browser renders it in the admin's local time.
+        const iso = ts.includes('T') ? ts : ts.replace(' ', 'T');
+        const d = new Date(iso.endsWith('Z') ? iso : iso + 'Z');
+        return d.toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+    } catch {
+        return ts;
+    }
+}
+
+async function loadLLMCostData() {
+    try {
+        const response = await authFetch(`${API_BASE}/llm-cost`);
+        if (!response.ok) throw new Error('Failed to load LLM cost data');
+        const data = await response.json();
+
+        renderLLMCostStats(data);
+        renderLLMCostChart(data.daily);
+        renderLLMCostByModel(data.by_model);
+        renderLLMCostByOperation(data.by_operation);
+        renderLLMCostRecent(data.recent);
+
+        const note = document.getElementById('llm-cost-model-note');
+        if (note) {
+            note.textContent = data.model
+                ? `Model: ${data.model}${data.llm_available ? '' : ' (not configured)'}`
+                : 'LLM not configured';
+        }
+    } catch (error) {
+        console.error('Error loading LLM cost data:', error);
+        const el = document.getElementById('llm-cost-stats');
+        if (el) el.innerHTML = '<div class="empty-state">Could not load LLM cost data.</div>';
+    }
+}
+
+function renderLLMCostStats(data) {
+    const el = document.getElementById('llm-cost-stats');
+    if (!el) return;
+    const all = data.all_time || {};
+    const today = data.today || {};
+    const d7 = data.last_7d || {};
+    const d30 = data.last_30d || {};
+
+    el.innerHTML = `
+        <div class="stat-card">
+            <div class="stat-value">${formatUSD(all.cost_usd)}</div>
+            <div class="stat-label">Total Cost (all time)</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-value">${formatUSD(d30.cost_usd)}</div>
+            <div class="stat-label">Last 30 Days</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-value">${formatUSD(d7.cost_usd)}</div>
+            <div class="stat-label">Last 7 Days</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-value">${formatUSD(today.cost_usd)}</div>
+            <div class="stat-label">Today</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-value">${formatNumber(all.calls)}</div>
+            <div class="stat-label">Total API Calls</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-value">${formatNumber(all.total_tokens)}</div>
+            <div class="stat-label">Total Tokens</div>
+        </div>
+    `;
+}
+
+function renderLLMCostChart(daily) {
+    const container = document.getElementById('llm-cost-chart');
+    if (!container) return;
+    if (!daily || daily.length === 0) {
+        container.innerHTML = '<div class="loading">No usage recorded yet</div>';
+        return;
+    }
+
+    const maxCost = Math.max(...daily.map(d => d.cost_usd), 0);
+    container.innerHTML = `
+        <div class="simple-chart">
+            ${daily.map(d => {
+                const height = maxCost > 0 ? (d.cost_usd / maxCost * 100) : 0;
+                return `<div class="chart-bar" style="height: ${Math.max(2, height)}%;" data-tooltip="${d.date}: ${formatUSD(d.cost_usd)} (${formatNumber(d.calls)} calls)"></div>`;
+            }).join('')}
+        </div>
+    `;
+}
+
+function renderLLMCostByModel(rows) {
+    const tbody = document.querySelector('#llm-cost-by-model tbody');
+    if (!tbody) return;
+    if (!rows || rows.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="4" style="color: var(--text-muted);">No usage recorded yet</td></tr>';
+        return;
+    }
+    tbody.innerHTML = rows.map(r => `
+        <tr>
+            <td>${escapeHtml(r.model)}</td>
+            <td style="text-align:right;">${formatNumber(r.calls)}</td>
+            <td style="text-align:right;">${formatNumber(r.total_tokens)}</td>
+            <td style="text-align:right;">${formatUSD(r.cost_usd)}</td>
+        </tr>
+    `).join('');
+}
+
+function renderLLMCostByOperation(rows) {
+    const tbody = document.querySelector('#llm-cost-by-operation tbody');
+    if (!tbody) return;
+    if (!rows || rows.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="4" style="color: var(--text-muted);">No usage recorded yet</td></tr>';
+        return;
+    }
+    tbody.innerHTML = rows.map(r => `
+        <tr>
+            <td>${escapeHtml(r.operation)}</td>
+            <td style="text-align:right;">${formatNumber(r.calls)}</td>
+            <td style="text-align:right;">${formatNumber(r.total_tokens)}</td>
+            <td style="text-align:right;">${formatUSD(r.cost_usd)}</td>
+        </tr>
+    `).join('');
+}
+
+function renderLLMCostRecent(rows) {
+    const tbody = document.querySelector('#llm-cost-recent tbody');
+    if (!tbody) return;
+    if (!rows || rows.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="6" style="color: var(--text-muted);">No LLM calls recorded yet</td></tr>';
+        return;
+    }
+    tbody.innerHTML = rows.map(r => `
+        <tr>
+            <td>${formatSqlTime(r.created_at)}</td>
+            <td><span class="badge badge-info">${escapeHtml(r.operation)}</span></td>
+            <td>${escapeHtml(r.model)}</td>
+            <td style="text-align:right;">${formatNumber(r.prompt_tokens)}</td>
+            <td style="text-align:right;">${formatNumber(r.completion_tokens)}</td>
+            <td style="text-align:right;">${formatUSD(r.cost_usd)}</td>
+        </tr>
     `).join('');
 }
 

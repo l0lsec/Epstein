@@ -300,8 +300,9 @@ async def lifespan(app: FastAPI):
             severity="warning"
         )
     
-    # Initialize LLM
-    llm = LLMAssistant()
+    # Initialize LLM. Pass the DB's usage recorder so every API call's token
+    # count + cost is persisted for the admin cost dashboard.
+    llm = LLMAssistant(usage_recorder=db.record_llm_usage if db else None)
     if llm.is_available():
         security_logger.log_system_event("llm_ready", "LLM assistant initialized")
     else:
@@ -2871,6 +2872,35 @@ async def get_ai_telemetry(request: Request, x_api_key: str = Header(None)):
         }
 
     return await _run_tel(_build)
+
+
+@app.get("/api/admin/telemetry/llm-cost")
+async def get_llm_cost_telemetry(request: Request, x_api_key: str = Header(None)):
+    """Get LLM token usage and cost breakdown (requires admin authentication).
+
+    Sourced from the main DB's llm_usage ledger, which records the actual token
+    counts returned by the OpenAI API for every Q&A, summary, and extraction call.
+    """
+    is_authorized, error = verify_admin_access(request, x_api_key)
+    if not is_authorized:
+        raise HTTPException(status_code=401, detail=error)
+
+    if not db:
+        raise HTTPException(status_code=503, detail="Database not initialized")
+
+    cached = _admin_cache.get("llm_cost")
+    if cached:
+        return cached
+
+    stats = await asyncio.to_thread(db.get_llm_usage_stats)
+    result = {
+        "generated_at": datetime.utcnow().isoformat(),
+        "model": llm.model if llm else None,
+        "llm_available": llm.is_available() if llm else False,
+        **stats,
+    }
+    _admin_cache.set("llm_cost", result)
+    return result
 
 
 @app.get("/api/admin/telemetry/security")

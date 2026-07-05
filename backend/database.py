@@ -306,6 +306,29 @@ class Database:
                 )
             """)
             conn.commit()
+
+            # LLM usage/cost ledger: one append-only row per OpenAI API call made by
+            # the running application (Q&A, streamed Q&A, document summaries, entity
+            # extraction). Token counts come straight from the API's `usage` field;
+            # cost_usd is computed at write time from the model's price so historical
+            # rows stay accurate even if prices change later. Low write volume (only
+            # on user-triggered AI actions) so it lives in the main DB, not telemetry.
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS llm_usage (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    operation TEXT NOT NULL,
+                    model TEXT NOT NULL,
+                    prompt_tokens INTEGER DEFAULT 0,
+                    completion_tokens INTEGER DEFAULT 0,
+                    total_tokens INTEGER DEFAULT 0,
+                    cost_usd REAL DEFAULT 0
+                )
+            """)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_llm_usage_created ON llm_usage(created_at)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_llm_usage_model ON llm_usage(model)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_llm_usage_operation ON llm_usage(operation)")
+            conn.commit()
             
             # Pinned documents table for controversial/featured documents
             conn.execute("""
@@ -1367,6 +1390,133 @@ class Database:
         with self.get_connection() as conn:
             cursor = conn.execute("SELECT COUNT(*) FROM summaries")
             return cursor.fetchone()[0]
+
+    def record_llm_usage(self, operation: str, model: str, prompt_tokens: int,
+                         completion_tokens: int, cost_usd: float) -> None:
+        """Append one LLM API call to the usage/cost ledger.
+
+        Best-effort: never raises to the caller, so a logging hiccup can't break
+        the AI feature that triggered the call.
+        """
+        try:
+            prompt_tokens = int(prompt_tokens or 0)
+            completion_tokens = int(completion_tokens or 0)
+            total_tokens = prompt_tokens + completion_tokens
+            with self.get_connection() as conn:
+                conn.execute("""
+                    INSERT INTO llm_usage
+                        (operation, model, prompt_tokens, completion_tokens, total_tokens, cost_usd)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                """, (operation, model, prompt_tokens, completion_tokens,
+                      total_tokens, float(cost_usd or 0)))
+                conn.commit()
+        except Exception as e:
+            print(f"⚠ Failed to record LLM usage: {e}")
+
+    def get_llm_usage_stats(self) -> Dict[str, Any]:
+        """Aggregate the LLM usage ledger for the admin cost dashboard.
+
+        Returns totals over several time windows plus breakdowns by model and
+        operation, a 30-day daily time series, and the most recent calls.
+        """
+        with self.get_read_connection() as conn:
+            def _agg(where: str = "", params: tuple = ()) -> Dict[str, Any]:
+                row = conn.execute(f"""
+                    SELECT COUNT(*) AS calls,
+                           COALESCE(SUM(prompt_tokens), 0) AS prompt_tokens,
+                           COALESCE(SUM(completion_tokens), 0) AS completion_tokens,
+                           COALESCE(SUM(total_tokens), 0) AS total_tokens,
+                           COALESCE(SUM(cost_usd), 0) AS cost_usd
+                    FROM llm_usage {where}
+                """, params).fetchone()
+                return {
+                    "calls": row["calls"] or 0,
+                    "prompt_tokens": row["prompt_tokens"] or 0,
+                    "completion_tokens": row["completion_tokens"] or 0,
+                    "total_tokens": row["total_tokens"] or 0,
+                    "cost_usd": round(row["cost_usd"] or 0, 6),
+                }
+
+            # Windows use SQLite datetime math against CURRENT_TIMESTAMP (UTC).
+            all_time = _agg()
+            today = _agg("WHERE created_at >= date('now')")
+            last_7d = _agg("WHERE created_at >= datetime('now', '-7 days')")
+            last_30d = _agg("WHERE created_at >= datetime('now', '-30 days')")
+
+            by_model = [
+                {
+                    "model": r["model"],
+                    "calls": r["calls"],
+                    "total_tokens": r["total_tokens"],
+                    "cost_usd": round(r["cost_usd"], 6),
+                }
+                for r in conn.execute("""
+                    SELECT model, COUNT(*) AS calls,
+                           COALESCE(SUM(total_tokens), 0) AS total_tokens,
+                           COALESCE(SUM(cost_usd), 0) AS cost_usd
+                    FROM llm_usage GROUP BY model ORDER BY cost_usd DESC
+                """).fetchall()
+            ]
+
+            by_operation = [
+                {
+                    "operation": r["operation"],
+                    "calls": r["calls"],
+                    "total_tokens": r["total_tokens"],
+                    "cost_usd": round(r["cost_usd"], 6),
+                }
+                for r in conn.execute("""
+                    SELECT operation, COUNT(*) AS calls,
+                           COALESCE(SUM(total_tokens), 0) AS total_tokens,
+                           COALESCE(SUM(cost_usd), 0) AS cost_usd
+                    FROM llm_usage GROUP BY operation ORDER BY cost_usd DESC
+                """).fetchall()
+            ]
+
+            daily = [
+                {
+                    "date": r["day"],
+                    "calls": r["calls"],
+                    "total_tokens": r["total_tokens"],
+                    "cost_usd": round(r["cost_usd"], 6),
+                }
+                for r in conn.execute("""
+                    SELECT date(created_at) AS day, COUNT(*) AS calls,
+                           COALESCE(SUM(total_tokens), 0) AS total_tokens,
+                           COALESCE(SUM(cost_usd), 0) AS cost_usd
+                    FROM llm_usage
+                    WHERE created_at >= datetime('now', '-30 days')
+                    GROUP BY day ORDER BY day
+                """).fetchall()
+            ]
+
+            recent = [
+                {
+                    "created_at": r["created_at"],
+                    "operation": r["operation"],
+                    "model": r["model"],
+                    "prompt_tokens": r["prompt_tokens"],
+                    "completion_tokens": r["completion_tokens"],
+                    "total_tokens": r["total_tokens"],
+                    "cost_usd": round(r["cost_usd"], 6),
+                }
+                for r in conn.execute("""
+                    SELECT created_at, operation, model, prompt_tokens,
+                           completion_tokens, total_tokens, cost_usd
+                    FROM llm_usage ORDER BY id DESC LIMIT 25
+                """).fetchall()
+            ]
+
+            return {
+                "all_time": all_time,
+                "today": today,
+                "last_7d": last_7d,
+                "last_30d": last_30d,
+                "by_model": by_model,
+                "by_operation": by_operation,
+                "daily": daily,
+                "recent": recent,
+            }
     
     def insert_documents_batch(self, documents: List[Dict[str, Any]]):
         """Insert multiple documents efficiently in a single transaction"""
