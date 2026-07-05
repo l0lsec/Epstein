@@ -475,6 +475,27 @@
             background: linear-gradient(90deg, var(--warning) 0%, #b45309 100%);
         }
 
+        /* LLM cost — credit management controls */
+        .llm-input {
+            padding: var(--space-xs) var(--space-sm);
+            background: var(--bg-tertiary);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            color: var(--text-primary);
+            font-size: 0.85rem;
+        }
+        .llm-input:focus { outline: none; border-color: var(--accent); }
+        .llm-form-row {
+            display: flex;
+            gap: var(--space-sm);
+            flex-wrap: wrap;
+            align-items: center;
+            margin-bottom: var(--space-sm);
+        }
+        .llm-hint { font-size: 0.75rem; color: var(--text-muted); }
+        .balance-value { font-size: 1.7rem; font-weight: 700; line-height: 1.1; }
+        .balance-sub { font-size: 0.75rem; color: var(--text-muted); margin-top: 2px; }
+
         /* Table */
         .data-table {
             width: 100%;
@@ -1237,6 +1258,7 @@
             <button class="tab-btn" data-tab="search">🔍 Search</button>
             <button class="tab-btn" data-tab="documents">📄 Documents</button>
             <button class="tab-btn" data-tab="ai">🤖 AI Usage</button>
+            <button class="tab-btn" data-tab="llm-cost">💰 LLM Cost</button>
             <button class="tab-btn" data-tab="security">🛡️ Security</button>
             <button class="tab-btn" data-tab="visitors">👥 Visitors</button>
             <button class="tab-btn" data-tab="feedback">💬 Feedback</button>
@@ -1502,6 +1524,173 @@
                         <ul id="ai-summary-docs" class="data-list">
                             <li class="loading"><span class="spinner"></span>Loading...</li>
                         </ul>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- LLM Cost Tab -->
+        <div id="llm-cost-tab" class="tab-panel">
+            <div id="llm-cost-stats" class="stats-grid">
+                <div class="loading"><span class="spinner"></span>Loading...</div>
+            </div>
+
+            <!-- Credit balance & forecast -->
+            <div class="cards-grid">
+                <div class="card">
+                    <div class="card-header">
+                        <span class="card-title">💳 Credit Balance</span>
+                    </div>
+                    <div class="card-body">
+                        <div style="margin-bottom: var(--space-md);">
+                            <div class="balance-sub">Provider-reported (OpenAI)</div>
+                            <div id="llm-provider-balance" class="balance-value">
+                                <span class="loading"><span class="spinner"></span></span>
+                            </div>
+                            <div id="llm-provider-balance-note" class="balance-sub"></div>
+                        </div>
+                        <div style="border-top: 1px solid var(--border); padding-top: var(--space-md);">
+                            <div class="balance-sub">Estimated remaining (from balance snapshot − tracked usage)</div>
+                            <div id="llm-remaining-balance" class="balance-value">—</div>
+                            <div id="llm-remaining-note" class="balance-sub"></div>
+                        </div>
+                    </div>
+                </div>
+                <div class="card">
+                    <div class="card-header">
+                        <span class="card-title">📉 Forecast</span>
+                    </div>
+                    <div class="card-body">
+                        <div id="llm-forecast">
+                            <div class="loading"><span class="spinner"></span>Loading...</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Manage credits & budget -->
+            <div class="section">
+                <div class="section-title">
+                    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2">
+                        <rect x="1" y="4" width="22" height="16" rx="2"/><line x1="1" y1="10" x2="23" y2="10"/>
+                    </svg>
+                    Manage Credits &amp; Budget
+                </div>
+                <p class="llm-hint" style="margin-bottom: var(--space-md);">
+                    OpenAI doesn't expose remaining prepaid balance to standard API keys. Record a
+                    <strong>balance snapshot</strong> (the balance shown on your OpenAI billing page right now) and the
+                    estimated remaining balance will track it minus usage logged here. Add a <strong>top-up</strong> when you buy more credits.
+                </p>
+                <div class="llm-form-row">
+                    <select id="llm-credit-type" class="llm-input">
+                        <option value="snapshot">Balance snapshot ($ shown now)</option>
+                        <option value="topup">Top-up (credits added)</option>
+                    </select>
+                    <input id="llm-credit-amount" class="llm-input" type="number" min="0" step="0.01" placeholder="Amount (USD)" style="width: 150px;">
+                    <input id="llm-credit-note" class="llm-input" type="text" placeholder="Note (optional)" style="width: 220px;">
+                    <button id="llm-credit-add-btn" class="btn btn-primary" onclick="submitCreditEvent()">Record</button>
+                    <span id="llm-credit-msg" class="llm-hint"></span>
+                </div>
+                <div class="llm-form-row" style="margin-top: var(--space-sm);">
+                    <label class="llm-hint" for="llm-budget-amount">Monthly budget (USD):</label>
+                    <input id="llm-budget-amount" class="llm-input" type="number" min="0" step="1" placeholder="e.g. 100" style="width: 130px;">
+                    <button id="llm-budget-save-btn" class="btn" onclick="submitBudget()">Save budget</button>
+                    <span id="llm-budget-msg" class="llm-hint"></span>
+                </div>
+                <div class="card-body" style="max-height: 260px; overflow-y: auto; padding: 0; margin-top: var(--space-md);">
+                    <table class="data-table" id="llm-credit-events">
+                        <thead>
+                            <tr><th>Date</th><th>Type</th><th style="text-align:right;">Amount</th><th>Note</th><th></th></tr>
+                        </thead>
+                        <tbody>
+                            <tr><td colspan="5" class="loading"><span class="spinner"></span>Loading...</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <div class="section">
+                <div class="section-title">
+                    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2">
+                        <line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/>
+                    </svg>
+                    Daily Cost (last 30 days)
+                </div>
+                <div id="llm-cost-chart" class="chart-container">
+                    <div class="loading"><span class="spinner"></span>Loading chart...</div>
+                </div>
+            </div>
+
+            <div class="cards-grid">
+                <div class="card">
+                    <div class="card-header">
+                        <span class="card-title">Cost by Model</span>
+                    </div>
+                    <div class="card-body" style="max-height: 360px; overflow-y: auto;">
+                        <table class="data-table" id="llm-cost-by-model">
+                            <thead>
+                                <tr><th>Model</th><th style="text-align:right;">Calls</th><th style="text-align:right;">Tokens</th><th style="text-align:right;">Cost</th></tr>
+                            </thead>
+                            <tbody>
+                                <tr><td colspan="4" class="loading"><span class="spinner"></span>Loading...</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+                <div class="card">
+                    <div class="card-header">
+                        <span class="card-title">Cost by Operation</span>
+                    </div>
+                    <div class="card-body" style="max-height: 360px; overflow-y: auto;">
+                        <table class="data-table" id="llm-cost-by-operation">
+                            <thead>
+                                <tr><th>Operation</th><th style="text-align:right;">Calls</th><th style="text-align:right;">Tokens</th><th style="text-align:right;">Cost</th></tr>
+                            </thead>
+                            <tbody>
+                                <tr><td colspan="4" class="loading"><span class="spinner"></span>Loading...</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+
+            <div class="cards-grid">
+                <div class="card" style="grid-column: 1 / -1;">
+                    <div class="card-header">
+                        <span class="card-title">📅 Monthly History</span>
+                    </div>
+                    <div class="card-body" style="max-height: 360px; overflow-y: auto;">
+                        <table class="data-table" id="llm-cost-monthly">
+                            <thead>
+                                <tr><th>Month</th><th style="text-align:right;">Calls</th><th style="text-align:right;">Tokens</th><th style="text-align:right;">Cost</th></tr>
+                            </thead>
+                            <tbody>
+                                <tr><td colspan="4" class="loading"><span class="spinner"></span>Loading...</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+
+            <div class="cards-grid">
+                <div class="card" style="grid-column: 1 / -1;">
+                    <div class="card-header">
+                        <span class="card-title">Recent LLM Calls</span>
+                        <span id="llm-cost-model-note" class="badge badge-info"></span>
+                    </div>
+                    <div class="card-body" style="max-height: 460px; overflow-y: auto;">
+                        <table class="data-table" id="llm-cost-recent">
+                            <thead>
+                                <tr>
+                                    <th>Time</th><th>Operation</th><th>Model</th>
+                                    <th style="text-align:right;">In</th><th style="text-align:right;">Out</th>
+                                    <th style="text-align:right;">Cost</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <tr><td colspan="6" class="loading"><span class="spinner"></span>Loading...</td></tr>
+                            </tbody>
+                        </table>
                     </div>
                 </div>
             </div>
@@ -2640,7 +2829,7 @@
         </div>
     </div>
 
-    <script src="/static/admin.js?v=33"></script>
+    <script src="/static/admin.js?v=34"></script>
 </body>
 </html>
 
