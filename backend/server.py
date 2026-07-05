@@ -27,7 +27,7 @@ from io import BytesIO
 from sse_starlette.sse import EventSourceResponse
 
 from database import Database, VectorStore, build_index
-from llm import LLMAssistant
+from llm import LLMAssistant, fetch_provider_balance
 from extractor import extract_email_date
 from security_logger import (
     SecurityLogger, 
@@ -2892,14 +2892,127 @@ async def get_llm_cost_telemetry(request: Request, x_api_key: str = Header(None)
     if cached:
         return cached
 
-    stats = await asyncio.to_thread(db.get_llm_usage_stats)
+    def _build():
+        stats = db.get_llm_usage_stats()
+        budget_raw = db.get_setting("llm_monthly_budget_usd")
+        try:
+            monthly_budget = float(budget_raw) if budget_raw else None
+        except (TypeError, ValueError):
+            monthly_budget = None
+        return {
+            **stats,
+            "monthly": db.get_llm_usage_monthly(),
+            "budget_forecast": db.get_llm_budget(monthly_budget),
+            "credit_events": db.get_credit_events(limit=50),
+        }
+
+    data = await asyncio.to_thread(_build)
     result = {
         "generated_at": datetime.utcnow().isoformat(),
         "model": llm.model if llm else None,
         "llm_available": llm.is_available() if llm else False,
-        **stats,
+        "billing_key_configured": bool(os.getenv("OPENAI_BILLING_KEY")),
+        **data,
     }
     _admin_cache.set("llm_cost", result)
+    return result
+
+
+class LLMCreditEvent(BaseModel):
+    event_type: str  # 'snapshot' (known balance) or 'topup' (credit added)
+    amount_usd: float
+    note: Optional[str] = None
+
+
+class LLMBudgetUpdate(BaseModel):
+    monthly_budget_usd: Optional[float] = None  # None/0 clears the budget
+
+
+@app.post("/api/admin/llm-credit")
+async def add_llm_credit_event(event: LLMCreditEvent, request: Request, x_api_key: str = Header(None)):
+    """Record an LLM credit balance snapshot or top-up (requires admin auth)."""
+    is_authorized, error = verify_admin_access(request, x_api_key)
+    if not is_authorized:
+        raise HTTPException(status_code=401, detail=error)
+    if not db:
+        raise HTTPException(status_code=503, detail="Database not initialized")
+
+    if event.event_type not in ("snapshot", "topup"):
+        raise HTTPException(status_code=400, detail="event_type must be 'snapshot' or 'topup'")
+    if event.amount_usd is None or event.amount_usd < 0:
+        raise HTTPException(status_code=400, detail="amount_usd must be a non-negative number")
+
+    client_ip, request_id = get_client_info(request)
+    security_logger.log_security_event(
+        event_type="llm_credit_event",
+        severity="info",
+        client_ip=client_ip,
+        message=f"LLM credit {event.event_type}: ${event.amount_usd:.2f}",
+        request_id=request_id,
+    )
+
+    event_id = await asyncio.to_thread(
+        db.record_credit_event, event.event_type, event.amount_usd, event.note
+    )
+    _admin_cache.invalidate("llm_cost")
+    return {"success": True, "id": event_id}
+
+
+@app.delete("/api/admin/llm-credit/{event_id}")
+async def delete_llm_credit_event(event_id: int, request: Request, x_api_key: str = Header(None)):
+    """Delete a mistaken LLM credit event (requires admin auth)."""
+    is_authorized, error = verify_admin_access(request, x_api_key)
+    if not is_authorized:
+        raise HTTPException(status_code=401, detail=error)
+    if not db:
+        raise HTTPException(status_code=503, detail="Database not initialized")
+
+    deleted = await asyncio.to_thread(db.delete_credit_event, event_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Credit event not found")
+    _admin_cache.invalidate("llm_cost")
+    return {"success": True}
+
+
+@app.post("/api/admin/llm-budget")
+async def set_llm_budget(update: LLMBudgetUpdate, request: Request, x_api_key: str = Header(None)):
+    """Set (or clear) the monthly LLM budget in USD (requires admin auth)."""
+    is_authorized, error = verify_admin_access(request, x_api_key)
+    if not is_authorized:
+        raise HTTPException(status_code=401, detail=error)
+    if not db:
+        raise HTTPException(status_code=503, detail="Database not initialized")
+
+    budget = update.monthly_budget_usd
+    if budget is not None and budget < 0:
+        raise HTTPException(status_code=400, detail="monthly_budget_usd must be non-negative")
+
+    def _work():
+        # Store empty string to represent "no budget" so the setting round-trips cleanly.
+        db.set_setting("llm_monthly_budget_usd", "" if not budget else str(budget))
+
+    await asyncio.to_thread(_work)
+    _admin_cache.invalidate("llm_cost")
+    return {"success": True, "monthly_budget_usd": budget or None}
+
+
+@app.get("/api/admin/llm-cost/provider-balance")
+async def get_provider_balance(request: Request, x_api_key: str = Header(None)):
+    """Best-effort live fetch of the provider's credit balance (requires admin auth).
+
+    Kept separate from the main dashboard payload so a slow or failing external
+    call to OpenAI never blocks the rest of the LLM cost tab from loading.
+    """
+    is_authorized, error = verify_admin_access(request, x_api_key)
+    if not is_authorized:
+        raise HTTPException(status_code=401, detail=error)
+
+    cached = _admin_cache.get("llm_provider_balance")
+    if cached:
+        return cached
+
+    result = await asyncio.to_thread(fetch_provider_balance)
+    _admin_cache.set("llm_provider_balance", result)
     return result
 
 

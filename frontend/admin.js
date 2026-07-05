@@ -1209,6 +1209,8 @@ function formatSqlTime(ts) {
     }
 }
 
+const ADMIN_BASE = window.location.origin + '/api/admin';
+
 async function loadLLMCostData() {
     try {
         const response = await authFetch(`${API_BASE}/llm-cost`);
@@ -1220,6 +1222,17 @@ async function loadLLMCostData() {
         renderLLMCostByModel(data.by_model);
         renderLLMCostByOperation(data.by_operation);
         renderLLMCostRecent(data.recent);
+        renderLLMBalance(data.budget_forecast, data.billing_key_configured);
+        renderLLMForecast(data.budget_forecast);
+        renderLLMCreditEvents(data.credit_events);
+        renderLLMMonthly(data.monthly);
+        // Reflect the saved budget in the input (only when the user isn't editing).
+        const budgetInput = document.getElementById('llm-budget-amount');
+        const budgetVal = data.budget_forecast && data.budget_forecast.budget
+            ? data.budget_forecast.budget.monthly_budget_usd : null;
+        if (budgetInput && document.activeElement !== budgetInput) {
+            budgetInput.value = budgetVal != null ? budgetVal : '';
+        }
 
         const note = document.getElementById('llm-cost-model-note');
         if (note) {
@@ -1231,6 +1244,35 @@ async function loadLLMCostData() {
         console.error('Error loading LLM cost data:', error);
         const el = document.getElementById('llm-cost-stats');
         if (el) el.innerHTML = '<div class="empty-state">Could not load LLM cost data.</div>';
+    }
+
+    // Live provider balance is fetched separately so a slow/failed external call
+    // to OpenAI never blocks the rest of the tab.
+    loadProviderBalance();
+}
+
+async function loadProviderBalance() {
+    const el = document.getElementById('llm-provider-balance');
+    const noteEl = document.getElementById('llm-provider-balance-note');
+    if (!el) return;
+    try {
+        const resp = await authFetch(`${API_BASE}/llm-cost/provider-balance`);
+        if (!resp.ok) throw new Error('bad status');
+        const d = await resp.json();
+        if (d.status === 'ok' && d.total_available != null) {
+            el.textContent = formatUSD(d.total_available);
+            el.style.color = 'var(--success)';
+            if (noteEl) noteEl.textContent =
+                `Granted ${formatUSD(d.total_granted)} · Used ${formatUSD(d.total_used)} (live from provider)`;
+        } else {
+            el.textContent = 'N/A';
+            el.style.color = 'var(--text-muted)';
+            if (noteEl) noteEl.textContent = d.reason || 'Provider balance unavailable.';
+        }
+    } catch (e) {
+        el.textContent = 'N/A';
+        el.style.color = 'var(--text-muted)';
+        if (noteEl) noteEl.textContent = 'Could not reach provider balance endpoint.';
     }
 }
 
@@ -1340,6 +1382,213 @@ function renderLLMCostRecent(rows) {
             <td style="text-align:right;">${formatUSD(r.cost_usd)}</td>
         </tr>
     `).join('');
+}
+
+function renderLLMBalance(bf, billingKeyConfigured) {
+    const el = document.getElementById('llm-remaining-balance');
+    const note = document.getElementById('llm-remaining-note');
+    if (!el) return;
+    const bal = bf && bf.balance;
+    if (bal && bal.known) {
+        el.textContent = formatUSD(bal.remaining_usd);
+        el.style.color = bal.remaining_usd <= 0 ? 'var(--danger)'
+            : (bal.remaining_usd < 10 ? 'var(--warning)' : 'var(--text-primary)');
+        if (note) {
+            const anchor = bal.anchor;
+            note.innerHTML = anchor
+                ? `Snapshot ${formatUSD(anchor.amount_usd)} on ${formatSqlTime(anchor.as_of)} `
+                  + `− ${formatUSD(bal.usage_since_anchor_usd)} used`
+                  + (bal.topups_since_anchor_usd > 0 ? ` + ${formatUSD(bal.topups_since_anchor_usd)} top-ups` : '')
+                : '';
+        }
+    } else {
+        el.textContent = 'Not set';
+        el.style.color = 'var(--text-muted)';
+        if (note) note.textContent = 'Record a balance snapshot below to track remaining credit.';
+    }
+}
+
+function renderLLMForecast(bf) {
+    const el = document.getElementById('llm-forecast');
+    if (!el) return;
+    if (!bf) { el.innerHTML = '<div class="empty-state">No forecast data.</div>'; return; }
+    const f = bf.forecast || {};
+    const b = bf.budget || {};
+    const burn = bf.burn || {};
+
+    let depletionRow = '';
+    if (f.days_to_depletion != null) {
+        const soon = f.days_to_depletion < 14;
+        depletionRow = `
+            <div class="progress-label">
+                <span>Runway at current burn</span>
+                <span style="color: ${soon ? 'var(--danger)' : 'var(--text-primary)'}; font-weight:600;">
+                    ~${formatNumber(Math.round(f.days_to_depletion))} days${f.projected_depletion_date ? ' (≈ ' + f.projected_depletion_date + ')' : ''}
+                </span>
+            </div>`;
+    } else if (bf.balance && bf.balance.known) {
+        depletionRow = `<div class="progress-label"><span>Runway at current burn</span><span class="llm-hint">No recent usage to project</span></div>`;
+    } else {
+        depletionRow = `<div class="progress-label"><span>Runway at current burn</span><span class="llm-hint">Set a balance snapshot to estimate</span></div>`;
+    }
+
+    let budgetBlock = '';
+    if (b.monthly_budget_usd != null) {
+        const pct = Math.min(100, b.projected_pct != null ? b.projected_pct : 0);
+        const usedPct = Math.min(100, b.used_pct != null ? b.used_pct : 0);
+        const fillClass = b.over_budget ? 'danger' : (pct > 80 ? 'warning' : '');
+        budgetBlock = `
+            <div class="progress-container" style="margin-top: var(--space-md);">
+                <div class="progress-label">
+                    <span>Monthly budget (${formatUSD(b.monthly_budget_usd)})</span>
+                    <span style="font-weight:600; color:${b.over_budget ? 'var(--danger)' : 'var(--text-primary)'};">
+                        ${formatUSD(f.month_to_date_usd)} used · proj. ${formatUSD(f.projected_month_end_usd)}
+                    </span>
+                </div>
+                <div class="progress-bar">
+                    <div class="progress-fill ${fillClass}" style="width:${usedPct}%;"></div>
+                </div>
+                <div class="llm-hint" style="margin-top:4px;">
+                    ${b.used_pct != null ? b.used_pct.toFixed(1) + '% of budget used' : ''}${b.projected_pct != null ? ' · projected ' + b.projected_pct.toFixed(0) + '% by month end' : ''}
+                    ${b.over_budget ? ' — ⚠️ on track to exceed budget' : ''}
+                </div>
+            </div>`;
+    } else {
+        budgetBlock = `<div class="llm-hint" style="margin-top: var(--space-md);">Set a monthly budget below to track spend against a target.</div>`;
+    }
+
+    el.innerHTML = `
+        <div style="display:flex; gap:var(--space-lg); flex-wrap:wrap; margin-bottom: var(--space-md);">
+            <div>
+                <div class="balance-sub">Daily burn (7-day avg)</div>
+                <div style="font-size:1.2rem; font-weight:700;">${formatUSD(f.daily_burn_usd)}<span class="llm-hint">/day</span></div>
+            </div>
+            <div>
+                <div class="balance-sub">Month to date</div>
+                <div style="font-size:1.2rem; font-weight:700;">${formatUSD(f.month_to_date_usd)}</div>
+            </div>
+            <div>
+                <div class="balance-sub">Projected month-end</div>
+                <div style="font-size:1.2rem; font-weight:700;">${formatUSD(f.projected_month_end_usd)}</div>
+            </div>
+        </div>
+        <div class="progress-container">${depletionRow}</div>
+        <div class="llm-hint">30-day spend ${formatUSD(burn.cost_30d)} · 7-day spend ${formatUSD(burn.cost_7d)}</div>
+        ${budgetBlock}
+    `;
+}
+
+function renderLLMCreditEvents(events) {
+    const tbody = document.querySelector('#llm-credit-events tbody');
+    if (!tbody) return;
+    if (!events || events.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="5" style="color: var(--text-muted);">No credit events recorded yet</td></tr>';
+        return;
+    }
+    tbody.innerHTML = events.map(e => `
+        <tr>
+            <td>${formatSqlTime(e.created_at)}</td>
+            <td><span class="badge ${e.event_type === 'snapshot' ? 'badge-info' : 'badge-success'}">${e.event_type}</span></td>
+            <td style="text-align:right;">${formatUSD(e.amount_usd)}</td>
+            <td>${escapeHtml(e.note || '')}</td>
+            <td style="text-align:right;">
+                <button class="btn btn-danger" style="padding:2px 8px; font-size:0.75rem;"
+                    onclick="deleteCreditEvent(${e.id})">Delete</button>
+            </td>
+        </tr>
+    `).join('');
+}
+
+function renderLLMMonthly(months) {
+    const tbody = document.querySelector('#llm-cost-monthly tbody');
+    if (!tbody) return;
+    if (!months || months.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="4" style="color: var(--text-muted);">No usage recorded yet</td></tr>';
+        return;
+    }
+    // Newest month first for readability.
+    tbody.innerHTML = months.slice().reverse().map(m => `
+        <tr>
+            <td>${escapeHtml(m.month)}</td>
+            <td style="text-align:right;">${formatNumber(m.calls)}</td>
+            <td style="text-align:right;">${formatNumber(m.total_tokens)}</td>
+            <td style="text-align:right;">${formatUSD(m.cost_usd)}</td>
+        </tr>
+    `).join('');
+}
+
+async function submitCreditEvent() {
+    const typeEl = document.getElementById('llm-credit-type');
+    const amountEl = document.getElementById('llm-credit-amount');
+    const noteEl = document.getElementById('llm-credit-note');
+    const msgEl = document.getElementById('llm-credit-msg');
+    const btn = document.getElementById('llm-credit-add-btn');
+    const amount = parseFloat(amountEl.value);
+    if (isNaN(amount) || amount < 0) {
+        if (msgEl) { msgEl.textContent = 'Enter a valid amount.'; msgEl.style.color = 'var(--danger)'; }
+        return;
+    }
+    if (btn) btn.disabled = true;
+    if (msgEl) { msgEl.textContent = 'Saving…'; msgEl.style.color = 'var(--text-muted)'; }
+    try {
+        const resp = await authFetch(`${ADMIN_BASE}/llm-credit`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                event_type: typeEl.value,
+                amount_usd: amount,
+                note: noteEl.value || null
+            })
+        });
+        if (!resp.ok) throw new Error(await safeErrorMessage(resp, 'Failed to save'));
+        amountEl.value = '';
+        noteEl.value = '';
+        if (msgEl) { msgEl.textContent = 'Saved ✓'; msgEl.style.color = 'var(--success)'; }
+        await loadLLMCostData();
+    } catch (e) {
+        if (msgEl) { msgEl.textContent = e.message || 'Failed to save'; msgEl.style.color = 'var(--danger)'; }
+    } finally {
+        if (btn) btn.disabled = false;
+    }
+}
+
+async function submitBudget() {
+    const amountEl = document.getElementById('llm-budget-amount');
+    const msgEl = document.getElementById('llm-budget-msg');
+    const btn = document.getElementById('llm-budget-save-btn');
+    const raw = amountEl.value.trim();
+    const amount = raw === '' ? null : parseFloat(raw);
+    if (amount != null && (isNaN(amount) || amount < 0)) {
+        if (msgEl) { msgEl.textContent = 'Enter a valid amount (or clear to remove).'; msgEl.style.color = 'var(--danger)'; }
+        return;
+    }
+    if (btn) btn.disabled = true;
+    if (msgEl) { msgEl.textContent = 'Saving…'; msgEl.style.color = 'var(--text-muted)'; }
+    try {
+        const resp = await authFetch(`${ADMIN_BASE}/llm-budget`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ monthly_budget_usd: amount })
+        });
+        if (!resp.ok) throw new Error(await safeErrorMessage(resp, 'Failed to save'));
+        if (msgEl) { msgEl.textContent = 'Saved ✓'; msgEl.style.color = 'var(--success)'; }
+        await loadLLMCostData();
+    } catch (e) {
+        if (msgEl) { msgEl.textContent = e.message || 'Failed to save'; msgEl.style.color = 'var(--danger)'; }
+    } finally {
+        if (btn) btn.disabled = false;
+    }
+}
+
+async function deleteCreditEvent(eventId) {
+    if (!confirm('Delete this credit event?')) return;
+    try {
+        const resp = await authFetch(`${ADMIN_BASE}/llm-credit/${eventId}`, { method: 'DELETE' });
+        if (!resp.ok) throw new Error(await safeErrorMessage(resp, 'Failed to delete'));
+        await loadLLMCostData();
+    } catch (e) {
+        alert(e.message || 'Failed to delete credit event');
+    }
 }
 
 function renderSecurityStats(data) {

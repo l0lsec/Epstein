@@ -316,3 +316,50 @@ Return valid JSON only, no other text."""}
         except Exception:
             return {"error": "Failed to extract entities"}
 
+
+def fetch_provider_balance() -> Dict[str, Any]:
+    """Best-effort fetch of the OpenAI account's remaining credit balance.
+
+    OpenAI does NOT expose remaining prepaid balance to standard `sk-` API keys;
+    the legacy dashboard endpoint used here needs a browser *session* key
+    (`sess-...`) which the operator can supply via OPENAI_BILLING_KEY. When that
+    isn't available (the common case) this returns a non-'ok' status and the UI
+    falls back to the snapshot-anchored balance. Never raises.
+
+    Returns a dict with a "status" of:
+      - "ok"          + total_granted / total_used / total_available
+      - "unconfigured"  (no key set)
+      - "unavailable"   (key rejected — expected for standard API keys)
+      - "error"         (network / unexpected response)
+    """
+    key = os.getenv("OPENAI_BILLING_KEY") or os.getenv("OPENAI_API_KEY")
+    if not key:
+        return {"status": "unconfigured",
+                "reason": "Set OPENAI_BILLING_KEY (a dashboard session key) to fetch live balance."}
+
+    url = "https://api.openai.com/dashboard/billing/credit_grants"
+    try:
+        import httpx
+        resp = httpx.get(url, headers={"Authorization": f"Bearer {key}"}, timeout=10.0)
+    except Exception as e:
+        return {"status": "error", "reason": f"Request to provider failed ({e.__class__.__name__})."}
+
+    if resp.status_code == 200:
+        try:
+            d = resp.json()
+        except Exception:
+            return {"status": "error", "reason": "Provider returned an unreadable response."}
+        return {
+            "status": "ok",
+            "total_granted": d.get("total_granted"),
+            "total_used": d.get("total_used"),
+            "total_available": d.get("total_available"),
+            "currency": "usd",
+        }
+    if resp.status_code in (401, 403):
+        return {"status": "unavailable",
+                "reason": ("OpenAI does not expose credit balance to standard API keys. "
+                           "This needs a dashboard session key (OPENAI_BILLING_KEY); "
+                           "otherwise rely on the balance snapshot below.")}
+    return {"status": "error", "reason": f"Provider returned HTTP {resp.status_code}."}
+

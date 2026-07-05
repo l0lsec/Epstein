@@ -329,6 +329,23 @@ class Database:
             conn.execute("CREATE INDEX IF NOT EXISTS idx_llm_usage_model ON llm_usage(model)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_llm_usage_operation ON llm_usage(operation)")
             conn.commit()
+
+            # LLM credit events: the admin's record of how much credit the account
+            # holds. OpenAI has no API to read a standard key's remaining prepaid
+            # balance, so the reliable balance is anchored on a 'snapshot' (a known
+            # balance read from the provider dashboard at a point in time) plus any
+            # later 'topup' events, minus tracked usage since that anchor.
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS llm_credit_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    event_type TEXT NOT NULL,
+                    amount_usd REAL NOT NULL,
+                    note TEXT
+                )
+            """)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_llm_credit_created ON llm_credit_events(created_at)")
+            conn.commit()
             
             # Pinned documents table for controversial/featured documents
             conn.execute("""
@@ -1517,7 +1534,171 @@ class Database:
                 "daily": daily,
                 "recent": recent,
             }
-    
+
+    def get_llm_usage_monthly(self, months: int = 12) -> List[Dict[str, Any]]:
+        """Monthly LLM usage totals for the last N months (cost history view)."""
+        with self.get_read_connection() as conn:
+            rows = conn.execute(f"""
+                SELECT strftime('%Y-%m', created_at) AS month,
+                       COUNT(*) AS calls,
+                       COALESCE(SUM(total_tokens), 0) AS total_tokens,
+                       COALESCE(SUM(cost_usd), 0) AS cost_usd
+                FROM llm_usage
+                WHERE created_at >= datetime('now', '-{int(months)} months')
+                GROUP BY month ORDER BY month
+            """).fetchall()
+            return [
+                {
+                    "month": r["month"],
+                    "calls": r["calls"],
+                    "total_tokens": r["total_tokens"],
+                    "cost_usd": round(r["cost_usd"], 6),
+                }
+                for r in rows
+            ]
+
+    def record_credit_event(self, event_type: str, amount_usd: float,
+                            note: Optional[str] = None) -> int:
+        """Record a credit snapshot or top-up. Returns the new row id."""
+        if event_type not in ("snapshot", "topup"):
+            raise ValueError("event_type must be 'snapshot' or 'topup'")
+        with self.get_connection() as conn:
+            cur = conn.execute("""
+                INSERT INTO llm_credit_events (event_type, amount_usd, note)
+                VALUES (?, ?, ?)
+            """, (event_type, float(amount_usd), (note or "").strip() or None))
+            conn.commit()
+            return cur.lastrowid
+
+    def delete_credit_event(self, event_id: int) -> bool:
+        """Delete a credit event (to correct a mistaken entry)."""
+        with self.get_connection() as conn:
+            cur = conn.execute("DELETE FROM llm_credit_events WHERE id = ?", (event_id,))
+            conn.commit()
+            return cur.rowcount > 0
+
+    def get_credit_events(self, limit: int = 50) -> List[Dict[str, Any]]:
+        """Return recent credit events, newest first."""
+        with self.get_read_connection() as conn:
+            rows = conn.execute("""
+                SELECT id, created_at, event_type, amount_usd, note
+                FROM llm_credit_events ORDER BY created_at DESC, id DESC LIMIT ?
+            """, (int(limit),)).fetchall()
+            return [
+                {
+                    "id": r["id"],
+                    "created_at": r["created_at"],
+                    "event_type": r["event_type"],
+                    "amount_usd": round(r["amount_usd"], 6),
+                    "note": r["note"],
+                }
+                for r in rows
+            ]
+
+    def get_llm_budget(self, monthly_budget_usd: Optional[float] = None) -> Dict[str, Any]:
+        """Compute remaining credit balance, burn rate, and spend forecast.
+
+        Balance is anchored on the most recent 'snapshot' credit event: it is the
+        known balance at that time, plus any 'topup' events since, minus all
+        tracked usage since. Without a snapshot the balance is unknown (we can't
+        infer the account's starting credit), so remaining is returned as None.
+        """
+        from datetime import datetime, timedelta
+        with self.get_read_connection() as conn:
+            def _sum_cost(where: str, params: tuple = ()) -> float:
+                row = conn.execute(
+                    f"SELECT COALESCE(SUM(cost_usd), 0) AS c FROM llm_usage {where}", params
+                ).fetchone()
+                return float(row["c"] or 0)
+
+            # --- Balance from the snapshot anchor ---
+            snap = conn.execute("""
+                SELECT amount_usd, created_at FROM llm_credit_events
+                WHERE event_type='snapshot' ORDER BY created_at DESC, id DESC LIMIT 1
+            """).fetchone()
+
+            remaining = None
+            usage_since = 0.0
+            topups_since = 0.0
+            anchor = None
+            if snap is not None:
+                anchor_time = snap["created_at"]
+                usage_since = _sum_cost("WHERE created_at > ?", (anchor_time,))
+                trow = conn.execute("""
+                    SELECT COALESCE(SUM(amount_usd), 0) AS t FROM llm_credit_events
+                    WHERE event_type='topup' AND created_at > ?
+                """, (anchor_time,)).fetchone()
+                topups_since = float(trow["t"] or 0)
+                remaining = float(snap["amount_usd"]) + topups_since - usage_since
+                anchor = {"amount_usd": round(float(snap["amount_usd"]), 6), "as_of": anchor_time}
+
+            # --- Burn rate ---
+            cost_7d = _sum_cost("WHERE created_at >= datetime('now', '-7 days')")
+            cost_30d = _sum_cost("WHERE created_at >= datetime('now', '-30 days')")
+            daily_7d = cost_7d / 7.0
+            daily_30d = cost_30d / 30.0
+            # Prefer the recent 7-day rate; fall back to the 30-day rate if the last
+            # week had no activity but the month did.
+            daily_burn = daily_7d if daily_7d > 0 else daily_30d
+
+            # --- Forecast ---
+            days_to_depletion = None
+            depletion_date = None
+            if remaining is not None and remaining > 0 and daily_burn > 0:
+                days_to_depletion = remaining / daily_burn
+                try:
+                    depletion_date = (datetime.utcnow() + timedelta(days=days_to_depletion)).date().isoformat()
+                except (OverflowError, OSError):
+                    depletion_date = None  # burn so low the date overflows
+
+            # --- Month-to-date + month-end projection ---
+            mtd = _sum_cost("WHERE created_at >= date('now', 'start of month')")
+            now = datetime.utcnow()
+            # First day of next month, then step back one day for the month length.
+            if now.month == 12:
+                next_month = now.replace(year=now.year + 1, month=1, day=1)
+            else:
+                next_month = now.replace(month=now.month + 1, day=1)
+            days_in_month = (next_month - now.replace(day=1)).days
+            days_remaining = days_in_month - now.day
+            projected_month_end = mtd + daily_burn * days_remaining
+
+            budget = {
+                "monthly_budget_usd": round(monthly_budget_usd, 2) if monthly_budget_usd else None,
+                "used_pct": None,
+                "projected_pct": None,
+                "over_budget": None,
+            }
+            if monthly_budget_usd and monthly_budget_usd > 0:
+                budget["used_pct"] = round(mtd / monthly_budget_usd * 100, 1)
+                budget["projected_pct"] = round(projected_month_end / monthly_budget_usd * 100, 1)
+                budget["over_budget"] = projected_month_end > monthly_budget_usd
+
+            return {
+                "balance": {
+                    "known": remaining is not None,
+                    "remaining_usd": round(remaining, 6) if remaining is not None else None,
+                    "anchor": anchor,
+                    "usage_since_anchor_usd": round(usage_since, 6),
+                    "topups_since_anchor_usd": round(topups_since, 6),
+                },
+                "burn": {
+                    "cost_7d": round(cost_7d, 6),
+                    "daily_avg_7d": round(daily_7d, 6),
+                    "cost_30d": round(cost_30d, 6),
+                    "daily_avg_30d": round(daily_30d, 6),
+                },
+                "forecast": {
+                    "daily_burn_usd": round(daily_burn, 6),
+                    "days_to_depletion": round(days_to_depletion, 1) if days_to_depletion is not None else None,
+                    "projected_depletion_date": depletion_date,
+                    "month_to_date_usd": round(mtd, 6),
+                    "projected_month_end_usd": round(projected_month_end, 6),
+                    "days_remaining_in_month": days_remaining,
+                },
+                "budget": budget,
+            }
+
     def insert_documents_batch(self, documents: List[Dict[str, Any]]):
         """Insert multiple documents efficiently in a single transaction"""
         if not documents:
