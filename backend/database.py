@@ -2541,11 +2541,14 @@ class Database:
         "recent": "altered_on DESC",
         "oldest": "altered_on ASC",
         "efta": "efta_num ASC",
+        "filename": "canonical_filename ASC, efta_num ASC",
+        "filename_desc": "canonical_filename DESC, efta_num DESC",
     }
 
     @staticmethod
     def _alterations_where(status=None, dataset=None, min_removed=None,
-                           max_removed=None, min_added=None, query=None):
+                           max_removed=None, min_added=None, query=None,
+                           filename=None):
         """Build the WHERE clause shared by the list, the matched-count, and the
         bulk filter-update so a bulk action only ever touches the rows the admin is
         currently viewing. Uses bare column names (resolve on the single table whether
@@ -2567,17 +2570,22 @@ class Database:
             fts = '"' + str(query).strip().replace('"', '""') + '"*'
             conds.append("old_id IN (SELECT id FROM documents_fts WHERE documents_fts MATCH ?)")
             params.append(fts)
+        if filename and str(filename).strip():
+            like = f"%{str(filename).strip()}%"
+            conds.append("(canonical_filename LIKE ? OR printf('EFTA%08d', efta_num) LIKE ?)")
+            params.extend([like, like])
         where = ("WHERE " + " AND ".join(conds)) if conds else ""
         return where, params
 
     def get_alterations(self, status: str = "pending", sort: str = "removed",
                         dataset: int = None, min_removed: int = None,
                         max_removed: int = None, min_added: int = None,
-                        query: str = None, limit: int = 50, offset: int = 0,
+                        query: str = None, filename: str = None,
+                        limit: int = 50, offset: int = 0,
                         timeout_seconds: float = 0) -> List[Dict[str, Any]]:
         """Admin review queue rows (canonical doc info + old version id for compare)."""
         order = self._ALTERATION_SORTS.get(sort, self._ALTERATION_SORTS["removed"])
-        where, params = self._alterations_where(status, dataset, min_removed, max_removed, min_added, query)
+        where, params = self._alterations_where(status, dataset, min_removed, max_removed, min_added, query, filename)
         sql = (
             "SELECT a.efta_num, a.file_type, a.dataset_num, a.canonical_id, "
             "a.canonical_filename, a.old_id, a.old_filename, a.versions_count, "
@@ -2596,9 +2604,9 @@ class Database:
 
     def count_alterations_matching(self, status=None, dataset=None, min_removed=None,
                                    max_removed=None, min_added=None, query=None,
-                                   timeout_seconds: float = 0) -> int:
+                                   filename=None, timeout_seconds: float = 0) -> int:
         """Count rows matching the SAME filter the list uses (for the 'apply to all N' UI)."""
-        where, params = self._alterations_where(status, dataset, min_removed, max_removed, min_added, query)
+        where, params = self._alterations_where(status, dataset, min_removed, max_removed, min_added, query, filename)
         with self.get_read_connection(timeout_seconds=timeout_seconds) as conn:
             return conn.execute(
                 f"SELECT COUNT(*) FROM document_alterations {where}", params
@@ -2628,7 +2636,8 @@ class Database:
                 f = filters or {}
                 where, params = self._alterations_where(
                     f.get("status"), f.get("dataset"), f.get("min_removed"),
-                    f.get("max_removed"), f.get("min_added"), f.get("query"))
+                    f.get("max_removed"), f.get("min_added"), f.get("query"),
+                    f.get("filename"))
                 cur = conn.execute(
                     "UPDATE document_alterations SET review_status = ?, "
                     f"reviewed_at = CURRENT_TIMESTAMP {where}",

@@ -2542,6 +2542,8 @@
                             <option value="recent">Newest changed</option>
                             <option value="oldest">Oldest changed</option>
                             <option value="efta">EFTA number</option>
+                            <option value="filename">Filename A→Z</option>
+                            <option value="filename_desc">Filename Z→A</option>
                         </select>
                         <span style="color:var(--text-secondary);">Dataset:</span>
                         <select id="updated-dataset-filter" class="login-input" style="width: auto; display: inline-block; min-width: 130px;" onchange="filterUpdatedData()">
@@ -2559,6 +2561,8 @@
                             <option value="11">Data Set 11</option>
                             <option value="12">Data Set 12</option>
                         </select>
+                        <span style="color:var(--text-secondary);">File:</span>
+                        <input id="alt-filename" type="search" placeholder="EFTA# or filename…" class="login-input" style="width:170px;display:inline-block;" onkeydown="if(event.key==='Enter')filterUpdatedData()" onchange="filterUpdatedData()" title="Filter by filename or EFTA number (respects the Status filter — set Status = All to search everything)">
                         <span style="color:var(--text-secondary);">Removed:</span>
                         <input id="alt-min-removed" type="number" min="0" placeholder="≥ min" class="login-input" style="width:90px;display:inline-block;" onchange="filterUpdatedData()" title="Only show alterations with at least this many lines removed">
                         <input id="alt-max-removed" type="number" min="0" placeholder="≤ max" class="login-input" style="width:90px;display:inline-block;" onchange="filterUpdatedData()" title="Only show alterations with at most this many lines removed">
@@ -2829,7 +2833,7 @@
         </div>
     </div>
 
-    <script src="/static/admin.js?v=35"></script>
+    <script src="/static/admin.js?v=36"></script>
 </body>
 </html>
 

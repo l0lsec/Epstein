@@ -5740,6 +5740,7 @@ async def admin_get_alterations(
     max_removed: int = None,
     min_added: int = None,
     query: str = None,
+    filename: str = None,
     limit: int = 100,
     offset: int = 0,
 ):
@@ -5757,7 +5758,7 @@ async def admin_get_alterations(
     if not db:
         raise HTTPException(status_code=503, detail="Database not initialized")
 
-    cache_key = f"alterations:{status}:{sort}:{dataset}:{min_removed}:{max_removed}:{min_added}:{query}:{limit}:{offset}"
+    cache_key = f"alterations:{status}:{sort}:{dataset}:{min_removed}:{max_removed}:{min_added}:{query}:{filename}:{limit}:{offset}"
     cached = _admin_cache.get(cache_key)
     if cached:
         return cached
@@ -5765,12 +5766,13 @@ async def admin_get_alterations(
     def _work():
         return (db.get_alterations(status=status, sort=sort, dataset=dataset,
                                    min_removed=min_removed, max_removed=max_removed,
-                                   min_added=min_added, query=query, limit=limit, offset=offset,
+                                   min_added=min_added, query=query, filename=filename,
+                                   limit=limit, offset=offset,
                                    timeout_seconds=_ADMIN_QUERY_TIMEOUT),
                 db.count_alterations_by_status(timeout_seconds=_ADMIN_QUERY_TIMEOUT),
                 db.count_alterations_matching(status=status, dataset=dataset,
                                               min_removed=min_removed, max_removed=max_removed,
-                                              min_added=min_added, query=query,
+                                              min_added=min_added, query=query, filename=filename,
                                               timeout_seconds=_ADMIN_QUERY_TIMEOUT))
 
     rows, counts, matched_total = await asyncio.to_thread(_work)

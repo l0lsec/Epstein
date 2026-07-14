@@ -4219,6 +4219,7 @@ function _altCurrentFilter() {
         max_removed: g('alt-max-removed') || '',
         min_added: g('alt-min-added') || '',
         query: (g('alt-search') || '').trim(),
+        filename: (g('alt-filename') || '').trim(),
     };
 }
 
@@ -4234,6 +4235,7 @@ async function loadUpdatedDocuments() {
         if (f.max_removed !== '') url += `&max_removed=${encodeURIComponent(f.max_removed)}`;
         if (f.min_added !== '') url += `&min_added=${encodeURIComponent(f.min_added)}`;
         if (f.query) url += `&query=${encodeURIComponent(f.query)}`;
+        if (f.filename) url += `&filename=${encodeURIComponent(f.filename)}`;
         const response = await authFetch(url);
         if (!response.ok) throw new Error('Failed to load alterations');
         const data = await response.json();
@@ -4340,7 +4342,7 @@ function renderUpdatedDocuments() {
     html += '<table style="width:100%;border-collapse:collapse;">';
     html += `<thead><tr style="border-bottom:1px solid var(--border);">
         <th style="padding:var(--space-sm);"><input type="checkbox" id="alt-select-all" onchange="toggleSelectAllAlterations()" title="Select all on this page"></th>
-        <th style="text-align:left;padding:var(--space-sm);color:var(--text-muted);">File</th>
+        ${_altSortHeader('File', 'filename', 'filename_desc', 'var(--text-muted)', 'left')}
         <th style="text-align:left;padding:var(--space-sm);color:var(--text-muted);">Dataset</th>
         ${_altSortHeader('Removed', 'removed', 'removed_asc', 'var(--danger)')}
         ${_altSortHeader('Added', 'added', 'added_asc', 'var(--success)')}
@@ -4414,6 +4416,7 @@ async function bulkReviewAllMatching(newStatus) {
         max_removed: f.max_removed === '' ? null : Number(f.max_removed),
         min_added: f.min_added === '' ? null : Number(f.min_added),
         query: f.query || null,
+        filename: f.filename || null,
     };
     try {
         const resp = await authFetch(`${window.location.origin}/api/admin/alterations/bulk-review`, {
