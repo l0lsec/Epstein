@@ -265,6 +265,14 @@ function cacheElements() {
     elements.pdfFallback = document.getElementById('pdf-fallback');
     elements.modalTabs = document.querySelectorAll('.modal-tab');
     
+    // Find in document
+    elements.docFind = document.getElementById('doc-find');
+    elements.docFindInput = document.getElementById('doc-find-input');
+    elements.docFindCount = document.getElementById('doc-find-count');
+    elements.docFindPrev = document.getElementById('doc-find-prev');
+    elements.docFindNext = document.getElementById('doc-find-next');
+    elements.docFindClear = document.getElementById('doc-find-clear');
+
     // Document Navigation
     elements.docNavigation = document.getElementById('document-navigation');
     elements.docPrevBtn = document.getElementById('doc-prev-btn');
@@ -515,6 +523,8 @@ function setupEventListeners() {
         tab.addEventListener('click', () => switchModalTab(tab.dataset.tab));
     });
     
+    initDocFind();
+
     // Document Navigation
     if (elements.docPrevBtn) {
         elements.docPrevBtn.addEventListener('click', () => navigateDocument(-1));
@@ -605,8 +615,9 @@ function setupEventListeners() {
             closeModal();
             closeExportModal();
         }
-        // Arrow key navigation for documents when modal is open
-        if (!elements.modal.classList.contains('hidden') && state.documentList.length > 1) {
+        // Arrow key navigation for documents when modal is open (not while typing, e.g. in the find box)
+        const isTyping = e.target && e.target.matches && e.target.matches('input, textarea, select, [contenteditable]');
+        if (!isTyping && !elements.modal.classList.contains('hidden') && state.documentList.length > 1) {
             if (e.key === 'ArrowLeft') {
                 e.preventDefault();
                 navigateDocument(-1);
@@ -1734,7 +1745,7 @@ function renderSearchResults(data) {
     }
     
     // Store document list for navigation (using filtered results)
-    state.documentList = filteredResults.map(r => ({ id: r.id, filename: r.filename }));
+    state.documentList = filteredResults.map(r => ({ id: r.id, filename: r.filename, file_type: r.file_type }));
     
     elements.resultsList.innerHTML = filteredResults.map((result, index) => `
         <div class="result-item" data-id="${result.id}" data-index="${index}">
@@ -1775,7 +1786,7 @@ function renderSearchResults(data) {
     elements.resultsList.querySelectorAll('.result-item').forEach(item => {
         item.addEventListener('click', () => {
             const index = parseInt(item.dataset.index);
-            openDocument(item.dataset.id, index);
+            openDocument(item.dataset.id, index, { fromSearch: true });
         });
     });
     
@@ -2030,7 +2041,7 @@ function renderDocuments(data) {
     }
     
     // Store document list for navigation (using filtered results)
-    state.documentList = filteredDocuments.map(d => ({ id: d.id, filename: d.filename }));
+    state.documentList = filteredDocuments.map(d => ({ id: d.id, filename: d.filename, file_type: d.file_type }));
     
     elements.documentsGrid.innerHTML = filteredDocuments.map((doc, index) => `
         <div class="document-card" data-id="${doc.id}" data-index="${index}">
@@ -2067,8 +2078,29 @@ function renderDocuments(data) {
     });
 }
 
-async function openDocument(docId, index = -1) {
+function isIOSDevice() {
+    return /iPad|iPhone|iPod/.test(navigator.userAgent);
+}
+
+function pdfViewerUrl(docId) {
+    return `${API_BASE}/documents/${docId}/file#toolbar=0&navpanes=0&view=FitH`;
+}
+
+/** Point the PDF iframe at a document; a no-op if that download was already started. */
+function loadPdfInViewer(url) {
+    if (elements.pdfIframe.getAttribute('src') === url) return;
+    elements.pdfIframe.src = url;
+}
+
+async function openDocument(docId, index = -1, opts = {}) {
     try {
+        // The list we were opened from already knows the file type, so start the PDF download
+        // right away instead of waiting for the metadata round trip (iOS gets a link instead).
+        const hint = state.documentList.find(d => d.id === docId);
+        if (hint && hint.file_type === 'pdf' && !isIOSDevice()) {
+            loadPdfInViewer(pdfViewerUrl(docId));
+        }
+
         // Request metadata only for faster modal open (full_text loaded on demand when user opens Text tab)
         const response = await fetch(`${API_BASE}/documents/${docId}?include_text=false`);
         if (!response.ok) throw new Error('Document not found');
@@ -2076,7 +2108,8 @@ async function openDocument(docId, index = -1) {
         const doc = await response.json();
         doc._fullTextLoaded = !!(doc.full_text); // If server sent full_text (e.g. include_text=true), mark loaded
         state.currentDocument = doc;
-        
+        state.openedFromSearch = !!opts.fromSearch;
+
         // Track document index for navigation
         if (index >= 0) {
             state.documentIndex = index;
@@ -2105,8 +2138,9 @@ async function openDocument(docId, index = -1) {
         // Flag documents DOJ re-issued/redacted after release (non-blocking).
         loadDocumentAlterationBadge(docId);
 
-        elements.modalText.textContent = ''; // Full text loaded on demand when user opens Text Content tab
+        elements.modalText.textContent = ''; // Full text loaded on demand (Text Content tab or find-in-document)
         elements.modalSummary.innerHTML = '<p class="loading">Click to load AI summary...</p>';
+        resetDocFind(doc);
         
         // Show/hide DOJ original document link
         const dojLink = document.getElementById('doj-original-link');
@@ -2129,9 +2163,7 @@ async function openDocument(docId, index = -1) {
         const mediaViewer = document.getElementById('media-viewer');
         
         if (fileType === 'pdf') {
-            const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent);
-            
-            if (isIOS) {
+            if (isIOSDevice()) {
                 // iOS Safari has issues with PDF scrolling in iframes
                 // Show a preview with button to open PDF directly
                 elements.pdfIframe.src = '';
@@ -2159,7 +2191,7 @@ async function openDocument(docId, index = -1) {
                 }
             } else {
                 // Non-iOS: Load PDF in iframe normally
-                elements.pdfIframe.src = `${fileUrl}#toolbar=0&navpanes=0&view=FitH`;
+                loadPdfInViewer(pdfViewerUrl(docId));
                 elements.pdfIframe.style.display = 'block';
                 elements.pdfFallback.classList.add('hidden');
                 if (mediaViewer) mediaViewer.classList.add('hidden');
@@ -2271,8 +2303,12 @@ async function openDocument(docId, index = -1) {
 
         try { onDocumentModalOpened(); } catch (e) { /* monetization is best-effort */ }
 
+        // Carry the search terms into the document (modal is already visible; text loads in the background)
+        if (elements.docFindInput && elements.docFindInput.value && doc.char_count > 0) runDocFind({ background: true });
+
     } catch (error) {
         console.error('Error loading document:', error);
+        if (elements.pdfIframe) elements.pdfIframe.src = '';
         alert('Failed to load document.');
     }
 }
@@ -2282,6 +2318,7 @@ function closeModal() {
     document.body.style.overflow = '';
     document.body.classList.remove('modal-open');
     state.currentDocument = null;
+    resetDocFind(null);
     // Clear PDF iframe to stop loading
     if (elements.pdfIframe) {
         elements.pdfIframe.src = '';
@@ -2325,7 +2362,7 @@ async function navigateDocument(direction) {
     
     const nextDoc = state.documentList[newIndex];
     if (nextDoc && nextDoc.id) {
-        await openDocument(nextDoc.id, newIndex);
+        await openDocument(nextDoc.id, newIndex, { fromSearch: state.openedFromSearch });
     }
 }
 
@@ -2352,9 +2389,13 @@ async function switchModalTab(tabName) {
         content.classList.toggle('active', content.id === `modal-${tabName}-tab`);
     });
     
+    updateDocFindVisibility();
+    updateDocFindUI();
+    
     // Load full text on demand when user opens Text Content tab
-    if (tabName === 'document' && state.currentDocument && !state.currentDocument._fullTextLoaded) {
+    if (tabName === 'content' && state.currentDocument) {
         await loadDocumentFullText(state.currentDocument.id);
+        markActiveMatch(true); // land on the current find match, if any
     }
     
     // Load summary if switching to summary tab
@@ -2366,22 +2407,321 @@ async function switchModalTab(tabName) {
     }
 }
 
+/**
+ * Fetch (once) and cache the extracted text of the open document.
+ * Shared by the Text Content tab and find-in-document so they never double-fetch.
+ */
+function ensureDocumentText(doc, { background = false } = {}) {
+    if (doc._fullTextLoaded) return Promise.resolve(doc.full_text || '');
+    if (!doc._textPromise) {
+        // Background fetches yield to the PDF download that is happening at the same time
+        doc._textPromise = fetch(`${API_BASE}/documents/${doc.id}/text`, background ? { priority: 'low' } : undefined)
+            .then(response => {
+                if (!response.ok) throw new Error('Failed to load text');
+                return response.json();
+            })
+            .then(data => {
+                doc.full_text = data.full_text || '';
+                doc._fullTextLoaded = true;
+                return doc.full_text;
+            })
+            .finally(() => { doc._textPromise = null; });
+    }
+    return doc._textPromise;
+}
+
 async function loadDocumentFullText(docId) {
     if (!elements.modalText) return;
-    elements.modalText.textContent = 'Loading text...';
+    const doc = state.currentDocument;
+    if (!doc || doc.id !== docId) return;
+    if (!doc._fullTextLoaded) elements.modalText.textContent = 'Loading text...';
     try {
-        const response = await fetch(`${API_BASE}/documents/${docId}/text`);
-        if (!response.ok) throw new Error('Failed to load text');
-        const data = await response.json();
-        if (state.currentDocument && state.currentDocument.id === docId) {
-            state.currentDocument.full_text = data.full_text;
-            state.currentDocument._fullTextLoaded = true;
-            elements.modalText.textContent = data.full_text || 'No text content available.';
-        }
+        await ensureDocumentText(doc);
     } catch (e) {
         console.error('Error loading document text:', e);
-        elements.modalText.textContent = 'Failed to load text content.';
+        if (state.currentDocument === doc) elements.modalText.textContent = 'Failed to load text content.';
+        return;
     }
+    if (state.currentDocument === doc) renderModalText();
+}
+
+// =============================================================================
+// Find in document
+//
+// Searches the extracted/OCR text of the open document (the same text the site
+// indexes), so it works for scanned PDFs, images and transcripts - not only PDFs
+// with an embedded text layer. Matches are highlighted in the Text Content tab.
+// Syntax mirrors the main search box: "exact phrase", term*, -excluded.
+// =============================================================================
+
+const FIND_MIN_TERM_LENGTH = 2;
+const FIND_MAX_MATCHES = 5000;
+const FIND_DEBOUNCE_MS = 200;
+
+const findState = {
+    query: '',        // query the matches below were computed for
+    matches: [],      // [start, end] offsets into the document's full text
+    capped: false,    // true when FIND_MAX_MATCHES was hit
+    active: -1,       // index of the current match
+    marks: [],        // <mark> elements in the Text tab, parallel to matches
+    renderedKey: '',  // doc id + query the Text tab was last rendered for
+    status: 'idle',   // idle | loading | ready | error
+    timer: null
+};
+
+function escapeRegExp(str) {
+    return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/**
+ * Turn a find query into a case-insensitive RegExp, or null when there is
+ * nothing searchable yet. Substring matching (like Ctrl+F), so "maxw" finds "Maxwell".
+ */
+function buildFindRegex(query) {
+    const terms = [];
+    const rest = (query || '').replace(/(-?)"([^"]+)"/g, (m, negated, phrase) => {
+        if (!negated && phrase.trim()) terms.push({ text: phrase.trim(), prefix: false });
+        return ' ';
+    });
+
+    // Stray quotes (e.g. an unclosed "phrase) are not part of any term
+    const words = rest.replace(/"/g, ' ').split(/\s+/).filter(w => w && !(w.length > 1 && w.startsWith('-')));
+    // Treat AND/OR/NOT as operators unless the query is nothing but operators
+    const real = words.filter(w => !/^(AND|OR|NOT)$/i.test(w));
+    for (const w of (real.length || terms.length ? real : words)) {
+        terms.push({ text: w.replace(/^\*+|\*+$/g, ''), prefix: w.endsWith('*') });
+    }
+
+    const seen = new Set();
+    const parts = [];
+    for (const t of terms) {
+        if (t.text.length < FIND_MIN_TERM_LENGTH) continue;
+        const key = t.text.toLowerCase() + (t.prefix ? '*' : '');
+        if (seen.has(key)) continue;
+        seen.add(key);
+        parts.push({
+            len: t.text.length,
+            src: escapeRegExp(t.text).replace(/\s+/g, '\\s+') + (t.prefix ? '[\\p{L}\\p{N}_]*' : '')
+        });
+    }
+    if (!parts.length) return null;
+
+    // Longest first so "flight logs" wins over "flight" at the same position
+    parts.sort((a, b) => b.len - a.len);
+    try {
+        return new RegExp(parts.map(p => p.src).join('|'), 'giu');
+    } catch (e) {
+        return null;
+    }
+}
+
+function computeFindMatches(text, query) {
+    const re = buildFindRegex(query);
+    if (!re || !text) return { matches: [], capped: false };
+    const matches = [];
+    let m;
+    while ((m = re.exec(text)) !== null) {
+        if (m[0].length === 0) { re.lastIndex++; continue; }
+        matches.push([m.index, m.index + m[0].length]);
+        if (matches.length >= FIND_MAX_MATCHES) return { matches, capped: true };
+    }
+    return { matches, capped: false };
+}
+
+function renderTextWithMatches(container, text, matches) {
+    const frag = document.createDocumentFragment();
+    const marks = [];
+    let pos = 0;
+    for (const [start, end] of matches) {
+        if (start > pos) frag.appendChild(document.createTextNode(text.slice(pos, start)));
+        const mark = document.createElement('mark');
+        mark.className = 'find-hit';
+        mark.textContent = text.slice(start, end);
+        frag.appendChild(mark);
+        marks.push(mark);
+        pos = end;
+    }
+    if (pos < text.length) frag.appendChild(document.createTextNode(text.slice(pos)));
+    container.replaceChildren(frag);
+    return marks;
+}
+
+function isTextTabActive() {
+    const tab = document.getElementById('modal-content-tab');
+    return !!tab && tab.classList.contains('active');
+}
+
+/** Draw the Text Content tab: plain text, or text with the current matches highlighted. */
+function renderModalText() {
+    const doc = state.currentDocument;
+    if (!doc || !doc._fullTextLoaded || !elements.modalText) return;
+    const key = `${doc.id}\u0000${findState.query}`;
+    if (findState.renderedKey === key) return;
+    findState.renderedKey = key;
+
+    const text = doc.full_text || '';
+    if (!text) {
+        elements.modalText.textContent = 'No text content available.';
+        findState.marks = [];
+    } else if (findState.matches.length) {
+        findState.marks = renderTextWithMatches(elements.modalText, text, findState.matches);
+        markActiveMatch(false);
+    } else {
+        elements.modalText.textContent = text;
+        findState.marks = [];
+    }
+}
+
+function markActiveMatch(scroll) {
+    findState.marks.forEach((m, i) => m.classList.toggle('active', i === findState.active));
+    const mark = findState.marks[findState.active];
+    if (scroll && mark) mark.scrollIntoView({ block: 'center' });
+}
+
+function updateDocFindVisibility() {
+    if (!elements.docFind) return;
+    const doc = state.currentDocument;
+    const activeTab = document.querySelector('.modal-tab.active');
+    const onSummary = activeTab && activeTab.dataset.tab === 'summary';
+    elements.docFind.classList.toggle('hidden', !doc || !(doc.char_count > 0) || onSummary);
+}
+
+function updateDocFindUI() {
+    if (!elements.docFindCount) return;
+    const input = elements.docFindInput.value.trim();
+    const settled = findState.status === 'ready' && findState.query === input;
+    const n = settled ? findState.matches.length : 0;
+    const plus = findState.capped ? '+' : '';
+    let html = '';
+
+    if (!input) {
+        html = '';
+    } else if (findState.status === 'loading') {
+        html = 'Searching…';
+    } else if (findState.status === 'error') {
+        html = 'Search unavailable';
+    } else if (!buildFindRegex(input)) {
+        html = `Type ${FIND_MIN_TERM_LENGTH}+ characters`;
+    } else if (!settled) {
+        html = ''; // still typing; results follow after the debounce
+    } else if (!n) {
+        html = 'No matches';
+    } else if (isTextTabActive()) {
+        html = `${findState.active + 1} / ${n}${plus}`;
+    } else {
+        html = `${n}${plus} match${n === 1 && !plus ? '' : 'es'}<span class="doc-find-hint"> · press Enter to view</span>`;
+    }
+    elements.docFindCount.innerHTML = html;
+
+    elements.docFindPrev.disabled = elements.docFindNext.disabled = !n;
+    elements.docFindClear.classList.toggle('hidden', !elements.docFindInput.value);
+}
+
+/** Reset find state for a newly opened (or closed) document; seed it from the active search. */
+function resetDocFind(doc) {
+    clearTimeout(findState.timer);
+    findState.timer = null;
+    Object.assign(findState, { query: '', matches: [], capped: false, active: -1, marks: [], renderedKey: '', status: 'idle' });
+    if (!elements.docFindInput) return;
+
+    // Opened from search results: start with the search terms highlighted.
+    // Semantic searches aren't literal matches, so don't carry those over.
+    const params = state.lastSearchParams;
+    const seed = doc && state.openedFromSearch && params && params.search_type !== 'semantic'
+        ? (params.query || '').slice(0, 200)
+        : '';
+    elements.docFindInput.value = seed;
+    updateDocFindVisibility();
+    updateDocFindUI();
+}
+
+async function runDocFind({ background = false } = {}) {
+    const doc = state.currentDocument;
+    if (!doc || !elements.docFindInput) return;
+    clearTimeout(findState.timer);
+    findState.timer = null;
+
+    const query = elements.docFindInput.value.trim();
+    if (!buildFindRegex(query)) {
+        Object.assign(findState, { query: '', matches: [], capped: false, active: -1, status: 'idle' });
+        updateDocFindUI();
+        if (isTextTabActive()) renderModalText();
+        return;
+    }
+
+    if (!doc._fullTextLoaded) {
+        findState.status = 'loading';
+        updateDocFindUI();
+        try {
+            await ensureDocumentText(doc, { background });
+        } catch (e) {
+            console.error('Find in document: could not load text', e);
+            if (state.currentDocument === doc) { findState.status = 'error'; updateDocFindUI(); }
+            return;
+        }
+    }
+    // Ignore the result if the user moved on while the text was loading
+    if (state.currentDocument !== doc || elements.docFindInput.value.trim() !== query) return;
+
+    const { matches, capped } = computeFindMatches(doc.full_text || '', query);
+    Object.assign(findState, { query, matches, capped, active: matches.length ? 0 : -1, status: 'ready' });
+    updateDocFindUI();
+    if (isTextTabActive()) {
+        renderModalText();
+        markActiveMatch(true);
+    }
+}
+
+/** Jump to a match (step relative to the current one), switching to the Text Content tab if needed. */
+async function stepDocFind(delta) {
+    const n = findState.matches.length;
+    if (!n) return;
+    if (isTextTabActive()) {
+        findState.active = (findState.active + delta + n) % n;
+    } else {
+        // First jump from the Document tab: show the current match rather than skipping past it
+        await switchModalTab('content');
+    }
+    renderModalText();
+    markActiveMatch(true);
+    updateDocFindUI();
+}
+
+function initDocFind() {
+    const input = elements.docFindInput;
+    if (!input) return;
+
+    input.addEventListener('input', () => {
+        updateDocFindUI();
+        clearTimeout(findState.timer);
+        findState.timer = setTimeout(runDocFind, FIND_DEBOUNCE_MS);
+    });
+
+    input.addEventListener('keydown', async e => {
+        if (e.isComposing) return;
+        if (e.key === 'Enter') {
+            e.preventDefault();
+            if (findState.timer) {
+                // Typed and hit Enter before the debounce fired: search now and land on the first match
+                await runDocFind();
+                await stepDocFind(0);
+            } else {
+                await stepDocFind(e.shiftKey ? -1 : 1);
+            }
+        } else if (e.key === 'Escape' && input.value) {
+            e.stopPropagation(); // clear the box first; a second Esc closes the modal
+            input.value = '';
+            runDocFind();
+        }
+    });
+
+    elements.docFindNext.addEventListener('click', () => stepDocFind(1));
+    elements.docFindPrev.addEventListener('click', () => stepDocFind(-1));
+    elements.docFindClear.addEventListener('click', () => {
+        input.value = '';
+        runDocFind();
+        input.focus();
+    });
 }
 
 async function loadDocumentSummary(docId) {
