@@ -29,6 +29,7 @@ If you operate a public deployment, please honor takedown requests from victims,
 - **AI summaries** — per-document on-demand summaries
 - **Document browser** with category, subcategory, and file-type filters
 - **PDF viewer + extracted text** side-by-side, with original file download
+- **Find in document** — search inside the open file's extracted/OCR text with match count, next/previous, and highlighting; opens pre-filled with your search terms (supports `"exact phrase"` and `term*`)
 - **Image OCR** for scanned JPG/TIF productions (Tesseract)
 - **Audio/video transcription** via Lightning Whisper MLX (Apple Silicon), faster-whisper (CPU), or OpenAI Whisper API
 - **CSV export** of search results with optional full text
