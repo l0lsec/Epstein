@@ -390,6 +390,10 @@ RATE_LIMITS: Dict[str, RateLimitConfig] = {
     # Document file downloads - tightened to prevent scraping
     "/api/documents/*/file": RateLimitConfig(requests=50, window_seconds=60, burst=60),
     
+    # In-PDF search (CPU-bound PyMuPDF work) - same budget as file downloads
+    "/api/documents/*/pdf-find": RateLimitConfig(requests=50, window_seconds=60, burst=60),
+    "/api/documents/*/highlighted": RateLimitConfig(requests=30, window_seconds=60, burst=40),
+    
     # Index trigger - very restricted (admin action)
     "/api/index/trigger": RateLimitConfig(requests=2, window_seconds=300, burst=3),
     

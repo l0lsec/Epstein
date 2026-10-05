@@ -1980,6 +1980,95 @@ async def get_document_file(doc_id: str, request: Request):
     return _serve_document_file(doc, doc_id, client_ip, request_id)
 
 
+# In-PDF search: which pages contain the terms, and a copy of the PDF with them highlighted.
+# CPU-bound (PyMuPDF), so concurrency is capped and oversized files fall back to the plain file.
+_pdf_find_semaphore = asyncio.Semaphore(2)
+PDF_FIND_MAX_BYTES = 40 * 1024 * 1024
+
+
+async def _resolve_findable_pdf(doc_id: str, request: Request) -> tuple:
+    """Visibility-checked path of a public PDF for in-PDF search. Returns (doc, path, ip, request_id)."""
+    client_ip, request_id = get_client_info(request)
+    if not db:
+        raise HTTPException(status_code=503, detail="Database not initialized")
+    doc = await asyncio.to_thread(db.get_document, doc_id, include_hidden=False, include_full_text=False)
+    if doc and not await asyncio.to_thread(db.is_public_servable, doc_id):
+        doc = None
+    if not doc or doc.get("file_type") != "pdf":
+        raise HTTPException(status_code=404, detail="Document not found")
+    file_path = (BASE_PATH / doc["path"]).resolve()
+    if not str(file_path).startswith(str(BASE_PATH.resolve())):
+        raise HTTPException(status_code=403, detail="Access denied")
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail="File not found")
+    return doc, file_path, client_ip, request_id
+
+
+@app.get("/api/documents/{doc_id}/pdf-find")
+async def pdf_find_pages(doc_id: str, request: Request, t: List[str] = Query(default=[])):
+    """Pages of a PDF that contain the given terms (`t`, repeatable; trailing * = prefix).
+
+    `searchable` is false when the PDF has no text layer (scanned images); the client
+    then falls back to the extracted-text view.
+    """
+    import pdf_find
+    terms = pdf_find.parse_terms(t)
+    if not terms:
+        raise HTTPException(status_code=400, detail="No valid search terms")
+    doc, file_path, client_ip, request_id = await _resolve_findable_pdf(doc_id, request)
+    if file_path.stat().st_size > PDF_FIND_MAX_BYTES:
+        return {"searchable": False, "page_count": doc.get("page_count", 0), "pages": []}
+
+    async with _pdf_find_semaphore:
+        try:
+            result = await asyncio.to_thread(pdf_find.find_pages, str(file_path), terms)
+        except Exception as e:
+            security_logger.log_security_event(
+                event_type="pdf_find_error", severity="low", client_ip=client_ip,
+                message=f"PDF find failed for {doc_id}: {e}", request_id=request_id, document_id=doc_id
+            )
+            return {"searchable": False, "page_count": doc.get("page_count", 0), "pages": []}
+    return {
+        "searchable": result["has_text_layer"],
+        "page_count": result["page_count"],
+        "pages": result["pages"],
+    }
+
+
+@app.get("/api/documents/{doc_id}/highlighted")
+async def get_highlighted_pdf(doc_id: str, request: Request, t: List[str] = Query(default=[])):
+    """The PDF with the given terms highlighted. Falls back to the unmodified file when
+    there is nothing to highlight (no text layer, no matches, file too large, error)."""
+    import pdf_find
+    terms = pdf_find.parse_terms(t)
+    doc, file_path, client_ip, request_id = await _resolve_findable_pdf(doc_id, request)
+
+    data = None
+    if terms and file_path.stat().st_size <= PDF_FIND_MAX_BYTES:
+        async with _pdf_find_semaphore:
+            try:
+                data = await asyncio.to_thread(pdf_find.highlight_pdf, str(file_path), terms)
+            except Exception as e:
+                security_logger.log_security_event(
+                    event_type="pdf_highlight_error", severity="low", client_ip=client_ip,
+                    message=f"PDF highlight failed for {doc_id}: {e}", request_id=request_id, document_id=doc_id
+                )
+
+    if data is None:
+        return _serve_document_file(doc, doc_id, client_ip, request_id)
+
+    security_logger.log_document_access(
+        client_ip=client_ip, document_id=doc_id, document_path=doc["path"],
+        action="view_highlighted", request_id=request_id, filename=doc.get("filename", ""),
+        file_type=".pdf", file_size_bytes=len(data)
+    )
+    return Response(
+        content=data,
+        media_type="application/pdf",
+        headers={"Content-Disposition": "inline", "Cache-Control": "private, max-age=300"},
+    )
+
+
 @app.get("/api/admin/documents/{doc_id}/file")
 async def admin_get_document_file(doc_id: str, request: Request, x_api_key: str = Header(None)):
     """Serve a document file for admin review — INCLUDING hidden documents.

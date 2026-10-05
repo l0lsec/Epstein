@@ -2088,8 +2088,19 @@ function pdfViewerUrl(docId) {
 
 /** Point the PDF iframe at a document; a no-op if that download was already started. */
 function loadPdfInViewer(url) {
-    if (elements.pdfIframe.getAttribute('src') === url) return;
-    elements.pdfIframe.src = url;
+    const frame = elements.pdfIframe;
+    const current = frame.getAttribute('src') || '';
+    if (current === url) return;
+    if (current && current.split('#')[0] === url.split('#')[0]) {
+        // Same file, different #page: the embedded PDF viewer ignores fragment-only changes,
+        // so swap in a fresh frame (the file itself comes from the browser cache).
+        const next = frame.cloneNode(false);
+        next.src = url;
+        frame.replaceWith(next);
+        elements.pdfIframe = next;
+        return;
+    }
+    frame.src = url;
 }
 
 async function openDocument(docId, index = -1, opts = {}) {
@@ -2466,21 +2477,27 @@ const findState = {
     marks: [],        // <mark> elements in the Text tab, parallel to matches
     renderedKey: '',  // doc id + query the Text tab was last rendered for
     status: 'idle',   // idle | loading | ready | error
-    timer: null
+    timer: null,
+    // In-PDF search (Document tab): pages of the real PDF that contain the terms
+    pdf: { query: '', status: 'idle', pages: [], idx: -1 }  // status: idle | loading | ready | none
 };
+
+function resetPdfFind() {
+    findState.pdf = { query: '', status: 'idle', pages: [], idx: -1 };
+}
 
 function escapeRegExp(str) {
     return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 /**
- * Turn a find query into a case-insensitive RegExp, or null when there is
- * nothing searchable yet. Substring matching (like Ctrl+F), so "maxw" finds "Maxwell".
+ * Split a find query into searchable terms: [{ text, prefix }].
+ * "quoted phrases" stay whole, term* is a prefix, -excluded terms and AND/OR/NOT are dropped.
  */
-function buildFindRegex(query) {
+function parseFindTerms(query) {
     const terms = [];
     const rest = (query || '').replace(/(-?)"([^"]+)"/g, (m, negated, phrase) => {
-        if (!negated && phrase.trim()) terms.push({ text: phrase.trim(), prefix: false });
+        if (!negated && phrase.trim()) terms.push({ text: phrase.trim().replace(/\s+/g, ' '), prefix: false });
         return ' ';
     });
 
@@ -2493,17 +2510,24 @@ function buildFindRegex(query) {
     }
 
     const seen = new Set();
-    const parts = [];
-    for (const t of terms) {
-        if (t.text.length < FIND_MIN_TERM_LENGTH) continue;
+    return terms.filter(t => {
+        if (t.text.length < FIND_MIN_TERM_LENGTH) return false;
         const key = t.text.toLowerCase() + (t.prefix ? '*' : '');
-        if (seen.has(key)) continue;
+        if (seen.has(key)) return false;
         seen.add(key);
-        parts.push({
-            len: t.text.length,
-            src: escapeRegExp(t.text).replace(/\s+/g, '\\s+') + (t.prefix ? '[\\p{L}\\p{N}_]*' : '')
-        });
-    }
+        return true;
+    });
+}
+
+/**
+ * Turn a find query into a case-insensitive RegExp, or null when there is
+ * nothing searchable yet. Substring matching (like Ctrl+F), so "maxw" finds "Maxwell".
+ */
+function buildFindRegex(query) {
+    const parts = parseFindTerms(query).map(t => ({
+        len: t.text.length,
+        src: escapeRegExp(t.text).replace(/\s+/g, '\\s+') + (t.prefix ? '[\\p{L}\\p{N}_]*' : '')
+    }));
     if (!parts.length) return null;
 
     // Longest first so "flight logs" wins over "flight" at the same position
@@ -2608,8 +2632,14 @@ function updateDocFindUI() {
         html = 'No matches';
     } else if (isTextTabActive()) {
         html = `${findState.active + 1} / ${n}${plus}`;
+    } else if (canFindInPdf() && findState.pdf.status === 'loading') {
+        html = 'Finding in PDF…';
+    } else if (canFindInPdf() && findState.pdf.status === 'ready' && findState.pdf.query === input && findState.pdf.idx >= 0) {
+        const { pages, idx } = findState.pdf;
+        html = `Page ${pages[idx].page} · ${idx + 1} of ${pages.length} page${pages.length === 1 ? '' : 's'}`;
     } else {
-        html = `${n}${plus} match${n === 1 && !plus ? '' : 'es'}<span class="doc-find-hint"> · press Enter to view</span>`;
+        const hint = canFindInPdf() && findState.pdf.status !== 'none' ? 'press Enter to find in PDF' : 'press Enter to view text';
+        html = `${n}${plus} match${n === 1 && !plus ? '' : 'es'}<span class="doc-find-hint"> · ${hint}</span>`;
     }
     elements.docFindCount.innerHTML = html;
 
@@ -2622,6 +2652,7 @@ function resetDocFind(doc) {
     clearTimeout(findState.timer);
     findState.timer = null;
     Object.assign(findState, { query: '', matches: [], capped: false, active: -1, marks: [], renderedKey: '', status: 'idle' });
+    resetPdfFind();
     if (!elements.docFindInput) return;
 
     // Opened from search results: start with the search terms highlighted.
@@ -2644,6 +2675,8 @@ async function runDocFind({ background = false } = {}) {
     const query = elements.docFindInput.value.trim();
     if (!buildFindRegex(query)) {
         Object.assign(findState, { query: '', matches: [], capped: false, active: -1, status: 'idle' });
+        resetPdfFind();
+        restorePlainPdf();
         updateDocFindUI();
         if (isTextTabActive()) renderModalText();
         return;
@@ -2664,6 +2697,7 @@ async function runDocFind({ background = false } = {}) {
     if (state.currentDocument !== doc || elements.docFindInput.value.trim() !== query) return;
 
     const { matches, capped } = computeFindMatches(doc.full_text || '', query);
+    if (findState.pdf.query !== query) resetPdfFind();
     Object.assign(findState, { query, matches, capped, active: matches.length ? 0 : -1, status: 'ready' });
     updateDocFindUI();
     if (isTextTabActive()) {
@@ -2676,6 +2710,11 @@ async function runDocFind({ background = false } = {}) {
 async function stepDocFind(delta) {
     const n = findState.matches.length;
     if (!n) return;
+    if (!isTextTabActive() && canFindInPdf()) {
+        // Document tab: jump the real PDF to the next page containing the terms
+        if (await stepPdfPage(delta)) return;
+        // No searchable text layer (scanned PDF): fall through to the extracted-text view
+    }
     if (isTextTabActive()) {
         findState.active = (findState.active + delta + n) % n;
     } else {
@@ -2685,6 +2724,72 @@ async function stepDocFind(delta) {
     renderModalText();
     markActiveMatch(true);
     updateDocFindUI();
+}
+
+// -- In-PDF search ------------------------------------------------------------
+// Asks the server which pages of the actual PDF contain the terms (works for PDFs
+// with a text layer) and loads a copy with the terms highlighted at that page.
+
+function canFindInPdf() {
+    const doc = state.currentDocument;
+    return !!doc && doc.file_type === 'pdf' && !isIOSDevice();
+}
+
+function pdfFindParams(query) {
+    return parseFindTerms(query).map(t => 't=' + encodeURIComponent(t.text + (t.prefix ? '*' : ''))).join('&');
+}
+
+function highlightedPdfBase(docId, query) {
+    return `${API_BASE}/documents/${docId}/highlighted?${pdfFindParams(query)}`;
+}
+
+/** Undo highlighting (query cleared): go back to the plain, cacheable file. */
+function restorePlainPdf() {
+    const doc = state.currentDocument;
+    const src = elements.pdfIframe && elements.pdfIframe.getAttribute('src');
+    if (doc && src && src.includes('/highlighted?')) loadPdfInViewer(pdfViewerUrl(doc.id));
+}
+
+async function loadPdfFindPages(doc, query) {
+    const pdf = findState.pdf;
+    pdf.query = query;
+    pdf.status = 'loading';
+    updateDocFindUI();
+    try {
+        const response = await fetch(`${API_BASE}/documents/${doc.id}/pdf-find?${pdfFindParams(query)}`);
+        if (!response.ok) throw new Error('pdf-find failed');
+        const data = await response.json();
+        if (state.currentDocument !== doc || findState.pdf !== pdf || pdf.query !== query) return false;
+        pdf.pages = data.searchable ? data.pages : [];
+        pdf.status = pdf.pages.length ? 'ready' : 'none';
+    } catch (e) {
+        console.error('Find in PDF failed', e);
+        if (findState.pdf !== pdf) return false;
+        pdf.pages = [];
+        pdf.status = 'none';
+    }
+    updateDocFindUI();
+    return true;
+}
+
+/** Move to the next/previous page with a match. Returns false if the PDF can't be searched. */
+async function stepPdfPage(delta) {
+    const doc = state.currentDocument;
+    const query = findState.query;
+    if (!doc || !query) return false;
+
+    if (findState.pdf.query === query && findState.pdf.status === 'loading') return true; // lookup in flight; ignore extra presses
+    if (findState.pdf.query !== query || findState.pdf.status === 'idle') {
+        if (!(await loadPdfFindPages(doc, query))) return true; // superseded; nothing more to do
+    }
+    const pdf = findState.pdf;
+    if (pdf.status !== 'ready') return false;
+
+    pdf.idx = pdf.idx < 0 ? 0 : (pdf.idx + delta + pdf.pages.length) % pdf.pages.length;
+    const url = `${highlightedPdfBase(doc.id, query)}#page=${pdf.pages[pdf.idx].page}&toolbar=0&navpanes=0&view=FitH`;
+    loadPdfInViewer(url);
+    updateDocFindUI();
+    return true;
 }
 
 function initDocFind() {

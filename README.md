@@ -30,6 +30,7 @@ If you operate a public deployment, please honor takedown requests from victims,
 - **Document browser** with category, subcategory, and file-type filters
 - **PDF viewer + extracted text** side-by-side, with original file download
 - **Find in document** — search inside the open file's extracted/OCR text with match count, next/previous, and highlighting; opens pre-filled with your search terms (supports `"exact phrase"` and `term*`)
+  - On PDFs with a text layer, Enter on the Document tab jumps the viewer to each page containing the terms, with the words highlighted in the PDF itself (`/api/documents/{id}/pdf-find`, `/highlighted`; PyMuPDF). Scanned PDFs with no text layer fall back to the extracted-text view.
 - **Image OCR** for scanned JPG/TIF productions (Tesseract)
 - **Audio/video transcription** via Lightning Whisper MLX (Apple Silicon), faster-whisper (CPU), or OpenAI Whisper API
 - **CSV export** of search results with optional full text
