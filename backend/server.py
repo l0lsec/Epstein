@@ -29,6 +29,7 @@ from sse_starlette.sse import EventSourceResponse
 from database import Database, VectorStore, build_index
 from llm import LLMAssistant, fetch_provider_balance
 from extractor import extract_email_date
+from alterations import analyze_versions
 from security_logger import (
     SecurityLogger, 
     RequestLoggingMiddleware, 
@@ -5900,10 +5901,14 @@ async def get_updated_documents_route(
     return result
 
 
-def _compute_text_diff(old_text, new_text, max_lines: int = 5000):
+def _compute_text_diff(old_text, new_text, max_lines: int = 5000, admin: bool = False):
     """Unified text diff (structured for rendering) between two document versions.
-    Shared by the admin and public diff endpoints."""
+    Shared by the admin and public diff endpoints. For admins it also carries
+    `analysis`, the reflow-tolerant verdict (alterations.analyze_versions) with the
+    removed words: the raw line diff over-counts whenever line breaks shifted, so
+    judge by `analysis`. Triage data is never sent to the public endpoint."""
     import difflib
+    analysis = analyze_versions(old_text, new_text).to_dict() if admin else None
     old_lines = (old_text or "").splitlines()
     new_lines = (new_text or "").splitlines()
     lines = []
@@ -5920,7 +5925,7 @@ def _compute_text_diff(old_text, new_text, max_lines: int = 5000):
             lines.append({"type": "del", "text": ln[1:]}); removed += 1
         else:
             lines.append({"type": "ctx", "text": ln[1:] if ln else ln})
-    return {
+    out = {
         "added": added,
         "removed": removed,
         "identical": added == 0 and removed == 0,
@@ -5928,6 +5933,9 @@ def _compute_text_diff(old_text, new_text, max_lines: int = 5000):
         "truncated": len(lines) > max_lines,
         "lines": lines[:max_lines],
     }
+    if analysis is not None:
+        out["analysis"] = analysis
+    return out
 
 
 @app.get("/api/admin/version-diff")
@@ -5965,7 +5973,7 @@ async def get_version_diff(
     if old_text is None and new_text is None:
         raise HTTPException(status_code=404, detail="Documents not found")
 
-    result = {"old": old, "new": new, **_compute_text_diff(old_text, new_text)}
+    result = {"old": old, "new": new, **_compute_text_diff(old_text, new_text, admin=True)}
     _admin_cache.set(cache_key, result)
     return result
 
@@ -5975,20 +5983,23 @@ async def admin_get_alterations(
     request: Request,
     x_api_key: str = Header(None),
     status: str = "pending",
-    sort: str = "removed",
+    sort: str = "severity",
     dataset: int = None,
     min_removed: int = None,
     max_removed: int = None,
     min_added: int = None,
     query: str = None,
     filename: str = None,
+    kind: str = None,
     limit: int = 100,
     offset: int = 0,
 ):
     """Admin review queue of DOJ-altered documents + status counts + matched_total.
 
     status: pending | exposed | cleared | trivial | all (default pending).
-    sort: removed | removed_asc | added | added_asc | recent | oldest | efta.
+    sort: severity (default; review priority from alterations.py) | severity_asc |
+    removed | removed_asc | added | added_asc | recent | oldest | efta | filename.
+    kind: redaction | removal | replaced | additive | cosmetic | identical | no_text.
     min_removed/max_removed/min_added: numeric range filters.
     query: keyword search over the ORIGINAL (pre-redaction) text via FTS — surfaces
     altered docs that mentioned a term so you can see if it was redacted. Admin auth.
@@ -5999,7 +6010,7 @@ async def admin_get_alterations(
     if not db:
         raise HTTPException(status_code=503, detail="Database not initialized")
 
-    cache_key = f"alterations:{status}:{sort}:{dataset}:{min_removed}:{max_removed}:{min_added}:{query}:{filename}:{limit}:{offset}"
+    cache_key = f"alterations:{status}:{sort}:{dataset}:{min_removed}:{max_removed}:{min_added}:{query}:{filename}:{kind}:{limit}:{offset}"
     cached = _admin_cache.get(cache_key)
     if cached:
         return cached
@@ -6008,13 +6019,13 @@ async def admin_get_alterations(
         return (db.get_alterations(status=status, sort=sort, dataset=dataset,
                                    min_removed=min_removed, max_removed=max_removed,
                                    min_added=min_added, query=query, filename=filename,
-                                   limit=limit, offset=offset,
+                                   kind=kind, limit=limit, offset=offset,
                                    timeout_seconds=_ADMIN_QUERY_TIMEOUT),
                 db.count_alterations_by_status(timeout_seconds=_ADMIN_QUERY_TIMEOUT),
                 db.count_alterations_matching(status=status, dataset=dataset,
                                               min_removed=min_removed, max_removed=max_removed,
                                               min_added=min_added, query=query, filename=filename,
-                                              timeout_seconds=_ADMIN_QUERY_TIMEOUT))
+                                              kind=kind, timeout_seconds=_ADMIN_QUERY_TIMEOUT))
 
     rows, counts, matched_total = await asyncio.to_thread(_work)
     result = {"alterations": rows, "counts": counts, "matched_total": matched_total}
@@ -6077,7 +6088,7 @@ class AlterationBulkReviewRequest(BaseModel):
     new_status: str                                   # pending | cleared | exposed | trivial
     mode: str = "selected"                            # "selected" | "filter"
     selected: Optional[List[Dict[str, Any]]] = None   # [{efta_num, file_type}, ...]
-    filter: Optional[Dict[str, Any]] = None           # {status,dataset,min_removed,max_removed,min_added}
+    filter: Optional[Dict[str, Any]] = None           # {status,dataset,min_removed,max_removed,min_added,query,filename,kind}
 
 
 @app.post("/api/admin/alterations/bulk-review")

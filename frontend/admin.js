@@ -4326,12 +4326,13 @@ function _altCurrentFilter() {
         min_added: g('alt-min-added') || '',
         query: (g('alt-search') || '').trim(),
         filename: (g('alt-filename') || '').trim(),
+        kind: g('alteration-kind-filter') || '',
     };
 }
 
 async function loadUpdatedDocuments() {
     const f = _altCurrentFilter();
-    const sort = (document.getElementById('alteration-sort') || {}).value || 'removed';
+    const sort = (document.getElementById('alteration-sort') || {}).value || 'severity';
     const listEl = document.getElementById('updated-docs-list');
     if (listEl) listEl.innerHTML = '<div class="loading"><span class="spinner"></span>Loading…</div>';
     try {
@@ -4342,6 +4343,7 @@ async function loadUpdatedDocuments() {
         if (f.min_added !== '') url += `&min_added=${encodeURIComponent(f.min_added)}`;
         if (f.query) url += `&query=${encodeURIComponent(f.query)}`;
         if (f.filename) url += `&filename=${encodeURIComponent(f.filename)}`;
+        if (f.kind) url += `&kind=${encodeURIComponent(f.kind)}`;
         const response = await authFetch(url);
         if (!response.ok) throw new Error('Failed to load alterations');
         const data = await response.json();
@@ -4360,6 +4362,24 @@ function _alterationBadge(st) {
                   cleared: ['#22c55e', 'Cleared'], trivial: ['#9ca3af', 'Trivial'] };
     const [c, label] = map[st] || ['#9ca3af', st || '—'];
     return `<span style="display:inline-block;padding:2px 8px;border-radius:10px;font-size:0.72rem;font-weight:600;color:${c};border:1px solid ${c};">${label}</span>`;
+}
+
+// Change kinds from backend/alterations.py: [label, colour, tooltip]. Anything not
+// listed (rows not yet scored) renders as a dash.
+const _ALT_KINDS = {
+    redaction: ['Redaction', '#ef4444', 'Redaction marks (█, [REDACTED], (b)(6)…) were added'],
+    removal:   ['Removed',   '#f97316', 'Content disappeared from the document'],
+    replaced:  ['Replaced',  '#f59e0b', 'Content was swapped for different content'],
+    additive:  ['Additions', '#9ca3af', 'Only additions — nothing removed'],
+    cosmetic:  ['Cosmetic',  '#9ca3af', 'Only line-break / OCR / page-footer differences'],
+    identical: ['Identical', '#9ca3af', 'Extracted text is identical — any change is visual only'],
+    no_text:   ['No text',   '#9ca3af', 'Neither version has extractable text — compare visually'],
+};
+
+function _altKindBadge(kind) {
+    const k = _ALT_KINDS[kind];
+    if (!k) return '<span style="color:var(--text-muted);">—</span>';
+    return `<span title="${escapeHtml(k[2])}" style="color:${k[1]};font-size:0.78rem;font-weight:600;">${k[0]}</span>`;
 }
 
 function _altKey(a) { return a.efta_num + '\t' + (a.file_type || ''); }
@@ -4450,6 +4470,8 @@ function renderUpdatedDocuments() {
         <th style="padding:var(--space-sm);"><input type="checkbox" id="alt-select-all" onchange="toggleSelectAllAlterations()" title="Select all on this page"></th>
         ${_altSortHeader('File', 'filename', 'filename_desc', 'var(--text-muted)', 'left')}
         <th style="text-align:left;padding:var(--space-sm);color:var(--text-muted);">Dataset</th>
+        ${_altSortHeader('Priority', 'severity', 'severity_asc', 'var(--warning, #f59e0b)')}
+        <th style="text-align:left;padding:var(--space-sm);color:var(--text-muted);">Change</th>
         ${_altSortHeader('Removed', 'removed', 'removed_asc', 'var(--danger)')}
         ${_altSortHeader('Added', 'added', 'added_asc', 'var(--success)')}
         ${_altSortHeader('DOJ changed', 'recent', 'oldest', 'var(--text-muted)', 'left')}
@@ -4467,7 +4489,9 @@ function renderUpdatedDocuments() {
             <td style="padding:var(--space-sm);"><input type="checkbox" id="${_altCbId(a)}" ${checked} onchange="toggleAlterationSel('${escapeJs(a.efta_num)}','${escapeJs(a.file_type||'')}')"></td>
             <td style="padding:var(--space-sm);font-family:var(--font-mono);font-size:0.85rem;">${escapeHtml(canonName)}</td>
             <td style="padding:var(--space-sm);">Set ${a.dataset_num}</td>
-            <td style="text-align:right;padding:var(--space-sm);color:var(--danger);font-weight:600;">${formatNumber(a.lines_removed||0)}</td>
+            <td style="text-align:right;padding:var(--space-sm);font-weight:600;">${a.change_kind ? formatNumber(a.severity||0) : '—'}</td>
+            <td style="padding:var(--space-sm);">${_altKindBadge(a.change_kind)}</td>
+            <td style="text-align:right;padding:var(--space-sm);color:var(--danger);font-weight:600;" ${a.change_kind ? `title="${formatNumber(a.words_removed||0)} words removed · ${formatNumber(a.redactions_added||0)} redaction marks added"` : ''}>${formatNumber(a.lines_removed||0)}</td>
             <td style="text-align:right;padding:var(--space-sm);color:var(--success);">${formatNumber(a.lines_added||0)}</td>
             <td style="padding:var(--space-sm);">${a.altered_on ? fmtArchivedAt(a.altered_on) : '—'}</td>
             <td style="padding:var(--space-sm);">${_alterationBadge(a.review_status)}</td>
@@ -4523,6 +4547,7 @@ async function bulkReviewAllMatching(newStatus) {
         min_added: f.min_added === '' ? null : Number(f.min_added),
         query: f.query || null,
         filename: f.filename || null,
+        kind: f.kind || null,
     };
     try {
         const resp = await authFetch(`${window.location.origin}/api/admin/alterations/bulk-review`, {
@@ -4750,6 +4775,28 @@ async function renderCompareVisual(modal, body) {
     }
 }
 
+// Verdict banner for the compare modal's text tab, from the reflow-tolerant analysis
+// (backend/alterations.py). The raw line diff below it counts every re-wrapped line,
+// so lead with what actually changed in the words.
+function _altVerdictHtml(an) {
+    if (!an) return '';
+    const k = _ALT_KINDS[an.kind] || [an.kind, '#9ca3af', ''];
+    const bits = [`<strong style="color:${k[1]};">${escapeHtml(k[0])}</strong> — ${escapeHtml(k[2])}`];
+    if (an.words_removed || an.words_added) {
+        bits.push(`<span style="color:var(--danger);">−${formatNumber(an.words_removed)} words</span> / <span style="color:var(--success);">+${formatNumber(an.words_added)} words</span>`);
+    }
+    if (an.redactions_added) bits.push(`${formatNumber(an.redactions_added)} redaction mark(s) added`);
+    if (an.names_removed) bits.push(`${formatNumber(an.names_removed)} name-like word(s) removed`);
+    if (an.identifiers_removed) bits.push(`${formatNumber(an.identifiers_removed)} email/phone/SSN removed`);
+    if (an.pages_removed) bits.push(`${formatNumber(an.pages_removed)} page(s) dropped`);
+    if (an.ocr_variants) bits.push(`${formatNumber(an.ocr_variants)} OCR spelling variant(s) ignored`);
+    bits.push(`${Math.round((an.similarity || 0) * 100)}% similar`);
+    const terms = (an.removed_terms || []).length
+        ? `<div style="margin-top:4px;color:var(--text-muted);">Removed: <span style="font-family:var(--font-mono);color:var(--danger);">${an.removed_terms.map(escapeHtml).join(' · ')}</span></div>`
+        : '';
+    return `<div style="padding:8px 10px;border-bottom:1px solid var(--border);font-size:0.85rem;">${bits.join(' · ')}${terms}</div>`;
+}
+
 async function renderCompareText(modal, body) {
     _revokeCompareUrls();
     body.innerHTML = '<div class="loading" style="padding:var(--space-lg);"><span class="spinner"></span>Computing diff…</div>';
@@ -4775,8 +4822,10 @@ async function renderCompareText(modal, body) {
             rows += `<div style="background:${bg}; color:${color}; white-space:pre-wrap; word-break:break-word; padding:0 8px;">${escapeHtml(prefix + (ln.text || ''))}</div>`;
         }
         const note = data.truncated ? '<div style="padding:8px; color:var(--warning); font-size:0.8rem;">Diff truncated to first 5,000 lines.</div>' : '';
+        const verdict = _altVerdictHtml(data.analysis);
         body.innerHTML = `
             <div style="width:100%; height:100%; display:flex; flex-direction:column;">
+                ${verdict}
                 <div style="padding:6px 10px; background:var(--bg-secondary); border-bottom:1px solid var(--border); font-size:0.85rem;">
                     <span style="color:var(--success); font-weight:600;">+${data.added}</span>
                     <span style="color:var(--danger); font-weight:600; margin-left:10px;">−${data.removed}</span>

@@ -2582,7 +2582,7 @@
                 </div>
                 <div class="card-body">
                     <p style="margin-bottom: var(--space-md); font-size: 0.9rem; color: var(--text-muted);">
-                        Documents DOJ re-issued after release. Compare before/after (the actual PDF and the transcribed text), then decide: <strong style="color:var(--success);">Clear</strong> if it's a legitimate redaction protecting a victim (older version stays hidden), or <strong style="color:var(--danger);">Expose</strong> if it appears to hide a perpetrator (publishes the before/after to the public). Built by <code>recheck_versions.py</code> + <code>compute_alterations.py</code>.
+                        Documents DOJ re-issued after release. Compare before/after (the actual PDF and the transcribed text), then decide: <strong style="color:var(--success);">Clear</strong> if it's a legitimate redaction protecting a victim (older version stays hidden), or <strong style="color:var(--danger);">Expose</strong> if it appears to hide a perpetrator (publishes the before/after to the public). Built by <code>recheck_versions.py</code> + <code>compute_alterations.py</code>, then scored by <code>python backend/alterations.py --apply</code> (ignores line-break/OCR noise, flags added redaction marks, ranks by priority).
                     </p>
                     <div style="margin-bottom: var(--space-md); display:flex; gap:var(--space-sm); align-items:center;">
                         <span style="color:var(--text-secondary);">🔎 Search original text:</span>
@@ -2598,8 +2598,21 @@
                             <option value="trivial">Trivial</option>
                             <option value="all">All</option>
                         </select>
+                        <span style="color:var(--text-secondary);">Change:</span>
+                        <select id="alteration-kind-filter" class="login-input" style="width:auto;display:inline-block;min-width:130px;" onchange="filterUpdatedData()" title="What the reflow-tolerant analysis found. Redaction = redaction marks added; Removal = content gone; Replaced = content swapped. The rest (Additive, Cosmetic, Identical, No text) are auto-marked Trivial — filter Status = Trivial to audit them.">
+                            <option value="">Any change</option>
+                            <option value="redaction">Redaction marks added</option>
+                            <option value="removal">Content removed</option>
+                            <option value="replaced">Content replaced</option>
+                            <option value="additive">Additions only</option>
+                            <option value="cosmetic">Cosmetic (reflow/OCR)</option>
+                            <option value="identical">Identical text</option>
+                            <option value="no_text">No text to compare</option>
+                        </select>
                         <span style="color:var(--text-secondary);">Sort:</span>
                         <select id="alteration-sort" class="login-input" style="width:auto;display:inline-block;min-width:150px;" onchange="filterUpdatedData()">
+                            <option value="severity">Highest priority</option>
+                            <option value="severity_asc">Lowest priority</option>
                             <option value="removed">Most removed</option>
                             <option value="removed_asc">Least removed</option>
                             <option value="added">Most added</option>

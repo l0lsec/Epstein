@@ -400,6 +400,23 @@ class Database:
                 except Exception:
                     conn.execute(f"ALTER TABLE document_alterations ADD COLUMN {_col} TEXT")
                     conn.commit()
+            # Migration: reflow-tolerant analysis written by analyze_alterations()
+            # (see alterations.py). severity is the 0-100 review priority; 0 until analysed.
+            for _col, _ddl in (("words_removed", "INTEGER DEFAULT 0"),
+                               ("words_added", "INTEGER DEFAULT 0"),
+                               ("redactions_added", "INTEGER DEFAULT 0"),
+                               ("similarity", "REAL"),
+                               ("change_kind", "TEXT"),
+                               ("severity", "INTEGER DEFAULT 0"),
+                               ("analyzed_at", "TIMESTAMP")):
+                try:
+                    conn.execute(f"SELECT {_col} FROM document_alterations LIMIT 1")
+                except Exception:
+                    conn.execute(f"ALTER TABLE document_alterations ADD COLUMN {_col} {_ddl}")
+                    conn.commit()
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_alterations_severity ON document_alterations(review_status, severity DESC)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_alterations_kind ON document_alterations(change_kind)")
+            conn.commit()
 
             # Keywords table for dynamic topic/keyword filtering
             conn.execute("""
@@ -2533,7 +2550,11 @@ class Database:
             return out
 
     # Sort keys for the review queue (bare column names; single-table query).
+    # Severity is 0 until analyze_alterations() has run, so severity-first ordering
+    # degrades to the old lines-removed ordering on an un-analysed queue.
     _ALTERATION_SORTS = {
+        "severity": "severity DESC, lines_removed DESC, chars_removed DESC",
+        "severity_asc": "severity ASC, lines_removed ASC, chars_removed ASC",
         "removed": "lines_removed DESC, chars_removed DESC",
         "removed_asc": "lines_removed ASC, chars_removed ASC",
         "added": "lines_added DESC",
@@ -2548,7 +2569,7 @@ class Database:
     @staticmethod
     def _alterations_where(status=None, dataset=None, min_removed=None,
                            max_removed=None, min_added=None, query=None,
-                           filename=None):
+                           filename=None, kind=None):
         """Build the WHERE clause shared by the list, the matched-count, and the
         bulk filter-update so a bulk action only ever touches the rows the admin is
         currently viewing. Uses bare column names (resolve on the single table whether
@@ -2574,22 +2595,26 @@ class Database:
             like = f"%{str(filename).strip()}%"
             conds.append("(canonical_filename LIKE ? OR printf('EFTA%08d', efta_num) LIKE ?)")
             params.extend([like, like])
+        if kind and str(kind).strip():
+            conds.append("change_kind = ?"); params.append(str(kind).strip())
         where = ("WHERE " + " AND ".join(conds)) if conds else ""
         return where, params
 
-    def get_alterations(self, status: str = "pending", sort: str = "removed",
+    def get_alterations(self, status: str = "pending", sort: str = "severity",
                         dataset: int = None, min_removed: int = None,
                         max_removed: int = None, min_added: int = None,
                         query: str = None, filename: str = None,
                         limit: int = 50, offset: int = 0,
-                        timeout_seconds: float = 0) -> List[Dict[str, Any]]:
+                        timeout_seconds: float = 0, kind: str = None) -> List[Dict[str, Any]]:
         """Admin review queue rows (canonical doc info + old version id for compare)."""
-        order = self._ALTERATION_SORTS.get(sort, self._ALTERATION_SORTS["removed"])
-        where, params = self._alterations_where(status, dataset, min_removed, max_removed, min_added, query, filename)
+        order = self._ALTERATION_SORTS.get(sort, self._ALTERATION_SORTS["severity"])
+        where, params = self._alterations_where(status, dataset, min_removed, max_removed, min_added, query, filename, kind)
         sql = (
             "SELECT a.efta_num, a.file_type, a.dataset_num, a.canonical_id, "
             "a.canonical_filename, a.old_id, a.old_filename, a.versions_count, "
             "a.lines_added, a.lines_removed, a.chars_removed, a.altered_on, "
+            "a.words_removed, a.words_added, a.redactions_added, a.similarity, "
+            "a.change_kind, a.severity, "
             "a.review_status, a.admin_notes, a.reviewed_at "
             f"FROM document_alterations a {where} ORDER BY {order} LIMIT ? OFFSET ?"
         )
@@ -2604,9 +2629,10 @@ class Database:
 
     def count_alterations_matching(self, status=None, dataset=None, min_removed=None,
                                    max_removed=None, min_added=None, query=None,
-                                   filename=None, timeout_seconds: float = 0) -> int:
+                                   filename=None, timeout_seconds: float = 0,
+                                   kind=None) -> int:
         """Count rows matching the SAME filter the list uses (for the 'apply to all N' UI)."""
-        where, params = self._alterations_where(status, dataset, min_removed, max_removed, min_added, query, filename)
+        where, params = self._alterations_where(status, dataset, min_removed, max_removed, min_added, query, filename, kind)
         with self.get_read_connection(timeout_seconds=timeout_seconds) as conn:
             return conn.execute(
                 f"SELECT COUNT(*) FROM document_alterations {where}", params
@@ -2637,7 +2663,7 @@ class Database:
                 where, params = self._alterations_where(
                     f.get("status"), f.get("dataset"), f.get("min_removed"),
                     f.get("max_removed"), f.get("min_added"), f.get("query"),
-                    f.get("filename"))
+                    f.get("filename"), f.get("kind"))
                 cur = conn.execute(
                     "UPDATE document_alterations SET review_status = ?, "
                     f"reviewed_at = CURRENT_TIMESTAMP {where}",
@@ -2674,6 +2700,100 @@ class Database:
                 (efta_num, file_type),
             ).fetchone()
             return row["canonical_id"] if row else None
+
+    def analyze_alterations(self, apply: bool = False, limit: Optional[int] = None,
+                            progress=None) -> Dict[str, Any]:
+        """Re-score document_alterations rows with alterations.analyze_versions.
+
+        Rows nobody has reviewed (reviewed_at IS NULL, status pending/trivial) get
+        fresh line/char counts, analysis columns and a status that follows the
+        analysis: pending->trivial for reflow/OCR noise, trivial->pending for
+        anything the old 0-lines-removed rule hid (e.g. a redaction mark added over
+        unchanged text). Admin decisions (cleared/exposed, or any row with a
+        reviewed_at) keep their status and counts; only analysis columns refresh.
+        Reads on the per-thread read connection and writes in short batches so the
+        CPU-heavy diffing never holds the global write lock. dry-run unless `apply`.
+        """
+        try:
+            from backend.alterations import analyze_versions
+        except ImportError:
+            from alterations import analyze_versions
+
+        sql = ("SELECT efta_num, file_type, old_id, canonical_id, review_status, reviewed_at "
+               "FROM document_alterations ORDER BY efta_num, file_type")
+        with self.get_read_connection() as conn:
+            rows = [dict(r) for r in conn.execute(sql + (" LIMIT ?" if limit else ""),
+                                                  (limit,) if limit else ())]
+
+        report = {"analyzed": 0, "skipped": 0, "by_kind": {}, "to_trivial": 0,
+                  "to_pending": 0, "left_alone": 0}
+        pending_writes: List[tuple] = []  # (sql, args, status moved to or None)
+
+        def flush():
+            if not (apply and pending_writes):
+                pending_writes.clear()
+                return
+            with self.get_connection() as wconn:
+                for stmt, args, moved_to in pending_writes:
+                    cur = wconn.execute(stmt, args)
+                    # An admin may have reviewed the row since we read it; the guarded
+                    # UPDATE then matches nothing and we leave their decision alone.
+                    if moved_to and cur.rowcount == 0:
+                        report["to_trivial" if moved_to == "trivial" else "to_pending"] -= 1
+                wconn.commit()
+            pending_writes.clear()
+
+        for i, row in enumerate(rows, start=1):
+            if progress and i % 50 == 0:
+                progress(i, len(rows))
+            if not (row["old_id"] and row["canonical_id"]):
+                report["skipped"] += 1
+                continue
+            with self.get_read_connection() as conn:
+                docs = {r["id"]: r for r in conn.execute(
+                    "SELECT id, full_text, page_count FROM documents WHERE id IN (?, ?)",
+                    (row["old_id"], row["canonical_id"]))}
+            old, new = docs.get(row["old_id"]), docs.get(row["canonical_id"])
+            if old is None or new is None:
+                report["skipped"] += 1
+                continue
+
+            a = analyze_versions(old["full_text"], new["full_text"],
+                                 old["page_count"], new["page_count"])
+            report["analyzed"] += 1
+            report["by_kind"][a.kind] = report["by_kind"].get(a.kind, 0) + 1
+
+            analysis_vals = (a.words_removed, a.words_added, a.redactions_added,
+                             a.similarity, a.kind, a.severity)
+            key = (row["efta_num"], row["file_type"])
+            decided = (row["reviewed_at"] is not None
+                       or row["review_status"] not in ("pending", "trivial"))
+            if decided:
+                report["left_alone"] += 1
+                pending_writes.append((
+                    "UPDATE document_alterations SET words_removed=?, words_added=?, "
+                    "redactions_added=?, similarity=?, change_kind=?, severity=?, "
+                    "analyzed_at=CURRENT_TIMESTAMP WHERE efta_num=? AND file_type=?",
+                    (*analysis_vals, *key), None))
+            else:
+                new_status = a.suggested_status
+                moved = new_status != row["review_status"]
+                if moved:
+                    report["to_trivial" if new_status == "trivial" else "to_pending"] += 1
+                pending_writes.append((
+                    "UPDATE document_alterations SET words_removed=?, words_added=?, "
+                    "redactions_added=?, similarity=?, change_kind=?, severity=?, "
+                    "lines_added=?, lines_removed=?, chars_removed=?, review_status=?, "
+                    "analyzed_at=CURRENT_TIMESTAMP "
+                    "WHERE efta_num=? AND file_type=? AND reviewed_at IS NULL AND review_status=?",
+                    (*analysis_vals, a.lines_added, a.lines_removed, a.chars_removed,
+                     new_status, *key, row["review_status"]), new_status if moved else None))
+            if len(pending_writes) >= 200:
+                flush()
+        flush()
+        if progress:
+            progress(len(rows), len(rows))
+        return report
 
     def get_exposed_alterations(self, limit: int = 60, offset: int = 0,
                                 timeout_seconds: float = 0) -> List[Dict[str, Any]]:
