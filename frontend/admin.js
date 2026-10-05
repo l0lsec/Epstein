@@ -2013,6 +2013,7 @@ let feedbackSelectedIds = new Set();
 let feedbackSortField = 'timestamp';
 let feedbackSortAsc = false; // newest first by default
 let feedbackSearchDebounce = null;
+let feedbackReplyEnabled = false; // true once the server has SMTP configured
 
 async function loadFeedbackData() {
     try {
@@ -2021,6 +2022,7 @@ async function loadFeedbackData() {
         const data = await response.json();
         
         allFeedbackData = data.feedback || [];
+        feedbackReplyEnabled = !!data.reply_enabled;
         
         renderFeedbackStats(data);
         renderFeedbackTypes(data.type_counts);
@@ -2377,6 +2379,7 @@ function renderFeedbackTable(feedback) {
         const messagePreview = fb.message ? truncate(fb.message, 60) : '';
         const ip = fb.ip || 'Unknown';
         const isChecked = feedbackSelectedIds.has(fb.id) ? 'checked' : '';
+        const replyCount = (fb.replies || []).length;
         
         return `
             <tr style="${isChecked ? 'background: var(--accent-glow);' : ''}">
@@ -2394,7 +2397,7 @@ function renderFeedbackTable(feedback) {
                 </td>
                 <td style="font-size: 0.9rem;">${escapeHtml(typeof email === 'string' ? email : '—')}</td>
                 <td>
-                    <span class="feedback-message-preview" onclick="openFeedbackModal('${fb.id}')" title="Click to view full message">
+                    ${replyCount ? `<span title="Replied ${replyCount} time(s)" style="color: var(--accent); margin-right: 6px;">↩</span>` : ''}<span class="feedback-message-preview" onclick="openFeedbackModal('${fb.id}')" title="Click to view full message">
                         ${escapeHtml(messagePreview)}
                     </span>
                 </td>
@@ -2475,8 +2478,9 @@ function openFeedbackModal(feedbackId) {
             </div>
             <div style="margin-top: var(--space-md);">
                 <span class="feedback-detail-label" style="display: block; margin-bottom: var(--space-sm);">Message</span>
-                <div class="feedback-message-full">${escapeHtml(feedback.message || 'No message')}</div>
+                <div class="feedback-message-full" dir="auto">${escapeHtml(feedback.message || 'No message')}</div>
             </div>
+            ${renderFeedbackReplySection(feedback)}
             <div style="margin-top: var(--space-lg); display: flex; gap: var(--space-md); justify-content: flex-end;">
                 <button class="btn btn-danger" onclick="deleteFeedback('${feedback.id}'); closeFeedbackModal();">
                     <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
@@ -2497,6 +2501,108 @@ function openFeedbackModal(feedbackId) {
     
     // Close on overlay click
     modal.addEventListener('click', handleModalOverlayClick);
+}
+
+const FEEDBACK_EMAIL_RE = /^[^@\s<>,;"']+@[^@\s<>,;"']+\.[^@\s<>,;"']+$/;
+const FEEDBACK_REPLY_DEFAULT_SUBJECT = 'Re: your feedback on Epstein Files Search';
+
+function renderFeedbackReplySection(feedback) {
+    const replies = feedback.replies || [];
+    const thread = replies.map(r => `
+        <div class="feedback-reply-item">
+            <div class="feedback-reply-meta">
+                You replied ${r.timestamp ? new Date(r.timestamp).toLocaleString() : ''} to ${escapeHtml(r.to)} &middot; <strong>${escapeHtml(r.subject)}</strong>
+            </div>
+            <div class="feedback-message-full" dir="auto">${escapeHtml(r.message)}</div>
+        </div>
+    `).join('');
+
+    const email = (feedback.email || '').trim();
+    let composer;
+    if (!FEEDBACK_EMAIL_RE.test(email)) {
+        composer = `<div class="feedback-reply-notice">No valid email address on this ticket, so it can't be replied to.</div>`;
+    } else if (!feedbackReplyEnabled) {
+        composer = `<div class="feedback-reply-notice">Replying is disabled: outbound email isn't configured. Set <code>SMTP_HOST</code> and <code>SMTP_FROM</code> (plus credentials) in <code>.env</code> and restart the server.</div>`;
+    } else {
+        composer = `
+            <span class="feedback-detail-label" style="display: block; margin-bottom: var(--space-sm);">Reply to ${escapeHtml(email)}</span>
+            <input type="text" id="feedback-reply-subject" class="feedback-reply-input" maxlength="200" dir="auto" value="${escapeHtml(FEEDBACK_REPLY_DEFAULT_SUBJECT)}">
+            <textarea id="feedback-reply-message" class="feedback-reply-input" rows="6" maxlength="10000" dir="auto" placeholder="Write your reply..."></textarea>
+            <div class="feedback-reply-actions">
+                <button class="btn btn-primary" id="feedback-reply-send" onclick="sendFeedbackReply('${feedback.id}')">
+                    <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+                    Send reply
+                </button>
+                <label style="font-size: 0.85rem; color: var(--text-muted); display: flex; align-items: center; gap: 6px;">
+                    After sending
+                    <select id="feedback-reply-status" style="background: var(--bg-tertiary); border: 1px solid var(--border); color: var(--text-primary); padding: 4px 8px; border-radius: 4px;">
+                        <option value="">keep current status</option>
+                        <option value="in-progress">set 🟡 In Progress</option>
+                        <option value="completed">set 🟢 Completed</option>
+                        <option value="archived">set ⚫ Archived</option>
+                    </select>
+                </label>
+            </div>
+            <div id="feedback-reply-error" class="feedback-reply-error" style="display: none;"></div>
+        `;
+    }
+
+    return `<div class="feedback-reply-section">${thread}${composer}</div>`;
+}
+
+async function sendFeedbackReply(feedbackId) {
+    const messageEl = document.getElementById('feedback-reply-message');
+    const subjectEl = document.getElementById('feedback-reply-subject');
+    const statusEl = document.getElementById('feedback-reply-status');
+    const sendBtn = document.getElementById('feedback-reply-send');
+    const errorEl = document.getElementById('feedback-reply-error');
+
+    const showError = msg => {
+        errorEl.textContent = msg;
+        errorEl.style.display = msg ? 'block' : 'none';
+    };
+
+    const message = messageEl.value.trim();
+    if (!message) {
+        showError('Write a reply before sending.');
+        return;
+    }
+
+    showError('');
+    sendBtn.disabled = true;
+    const originalLabel = sendBtn.innerHTML;
+    sendBtn.textContent = 'Sending...';
+
+    try {
+        const response = await authFetch(`${window.location.origin}/api/admin/feedback/${feedbackId}/reply`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                message,
+                subject: subjectEl.value.trim() || null,
+                set_status: statusEl.value || null
+            })
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(data.detail || 'Failed to send reply');
+
+        const fb = allFeedbackData.find(f => f.id === feedbackId);
+        if (data.recorded) {
+            if (fb) {
+                fb.replies = [...(fb.replies || []), data.reply];
+                if (data.status) fb.status = data.status;
+            }
+        } else {
+            alert('The email was sent, but it could not be saved to this ticket\'s history. Do not resend it.');
+        }
+        applyFeedbackFilterAndSort();
+        openFeedbackModal(feedbackId); // re-render so the sent reply shows in the thread
+    } catch (error) {
+        console.error('Error sending feedback reply:', error);
+        showError(error.message);
+        sendBtn.disabled = false;
+        sendBtn.innerHTML = originalLabel;
+    }
 }
 
 async function updateFeedbackStatusFromModal(feedbackId, newStatus) {
