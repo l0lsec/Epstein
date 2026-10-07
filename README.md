@@ -29,6 +29,8 @@ If you operate a public deployment, please honor takedown requests from victims,
 - **AI summaries** — per-document on-demand summaries
 - **Document browser** with category, subcategory, and file-type filters
 - **PDF viewer + extracted text** side-by-side, with original file download
+- **Find in document** — search inside the open file's extracted/OCR text with match count, next/previous, and highlighting; opens pre-filled with your search terms (supports `"exact phrase"` and `term*`)
+  - On PDFs with a text layer, Enter on the Document tab jumps the viewer to each page containing the terms, with the words highlighted in the PDF itself (`/api/documents/{id}/pdf-find`, `/highlighted`; PyMuPDF). Scanned PDFs with no text layer fall back to the extracted-text view.
 - **Image OCR** for scanned JPG/TIF productions (Tesseract)
 - **Audio/video transcription** via Lightning Whisper MLX (Apple Silicon), faster-whisper (CPU), or OpenAI Whisper API
 - **CSV export** of search results with optional full text
@@ -148,6 +150,11 @@ All configuration is via environment variables (loaded automatically from `.env`
 | `ALLOWED_ORIGINS` | `http://localhost:8000,http://127.0.0.1:8000` | Comma-separated CORS allow-list |
 | `ALLOWED_REFERERS` | own domain + major social platforms | Comma-separated referer allow-list for `/api/documents/{id}/file` (anti-scraping) |
 | `RECAPTCHA_SECRET_KEY` | _(unset)_ | Google reCAPTCHA v3 secret. If unset, feedback spam protection is disabled. |
+| `SMTP_HOST` / `SMTP_PORT` | _(unset)_ / `587` | Outbound mail server used to email replies to feedback submitters from the admin panel. Replying is disabled until `SMTP_HOST` and `SMTP_FROM` are set. |
+| `SMTP_USERNAME` / `SMTP_PASSWORD` | _(unset)_ | SMTP credentials (omit for an open relay) |
+| `SMTP_SECURITY` | `starttls` | `starttls` (port 587), `ssl` (port 465), or `none` |
+| `SMTP_FROM` | `SMTP_USERNAME` | From address for replies, e.g. `Epstein FTA <support@epsteinfta.com>` |
+| `SMTP_REPLY_TO` | _(unset)_ | Optional Reply-To address so the submitter's answer lands in your inbox |
 | `SESSION_SECRET_KEY` | random per-process | HMAC key for signed session IDs. Set explicitly in production so sessions survive restarts. |
 | `SESSION_COOKIE_SECURE` | `false` | Set `true` behind HTTPS to mark session cookies as Secure |
 | `TRUSTED_PROXIES` | _(empty)_ | Comma-separated proxy IPs trusted to set `X-Forwarded-For` |
@@ -277,7 +284,7 @@ Capabilities:
 
 - **Documents** — search, hide/unhide, pin/unpin, reclassify file type or category, re-download, re-extract
 - **Bulk actions** — multi-select documents for hide/unhide/re-extract
-- **Feedback** — triage user-submitted feedback with status transitions and bulk operations
+- **Feedback** — triage user-submitted feedback with status transitions and bulk operations, and email replies to submitters straight from the ticket (requires the `SMTP_*` settings; sent replies are kept on the ticket)
 - **Telemetry** — request counts, top endpoints, error rates, geo breakdown
 - **Maintenance** — toggle maintenance mode (creates/removes a `.maintenance` lock file)
 - **Index control** — manual `fix-fts`, `cleanup-db`, and reindex triggers

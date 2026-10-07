@@ -196,9 +196,9 @@ bump_version() {  # $1 = asset filename (e.g. app.js)   $2 = html file to edit
     cur=$(sed -n "s/.*${asset}?v=\([0-9]*\).*/\1/p" "$file" | head -1)
     cur=${cur:-0}
     new=$((cur + 1))
+    case " $BUMPED_FILES " in *" $file "*) ;; *) BUMPED_FILES="$BUMPED_FILES $file" ;; esac
     if [ "$DRY_RUN" = false ]; then
         sed -i.bak "s/${asset}?v=${cur}/${asset}?v=${new}/" "$file" && rm -f "${file}.bak"
-        case " $BUMPED_FILES " in *" $file "*) ;; *) BUMPED_FILES="$BUMPED_FILES $file" ;; esac
         success "Bumped ${asset} v=${cur} -> v=${new} in $(basename "$file")"
     else
         info "Would bump ${asset} v=${cur} -> v=${new} in $(basename "$file")"
@@ -217,6 +217,14 @@ if [ -n "$FRONTEND_CHANGED" ]; then
         warn "Frontend changed but no JS/CSS files — skipping cache bust"
     fi
 fi
+
+# The bump edits index.html / admin.html *after* DEPLOY_FILES was computed from git
+# history, so those files are only in the upload list if they happened to change for
+# another reason. Without this, production would keep the old ?v=N (and Cloudflare's
+# immutable cache of it) while serving new JS/CSS. Always ship what we bumped.
+for f in $BUMPED_FILES; do
+    echo "$DEPLOY_FILES" | grep -qx "$f" || DEPLOY_FILES=$(printf "%s\n%s" "$DEPLOY_FILES" "$f")
+done
 
 # ─── Dry run stops here ─────────────────────────────────────────────────────
 if [ "$DRY_RUN" = true ]; then

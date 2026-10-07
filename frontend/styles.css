@@ -2662,6 +2662,107 @@ a.modal-tab.doj-link {
     margin: var(--space-lg) 0;
 }
 
+/* Find in document (modal) */
+.doc-find {
+    display: flex;
+    align-items: center;
+    gap: var(--space-sm);
+    padding: var(--space-sm) var(--space-xl);
+    background: var(--bg-secondary);
+    border-bottom: 1px solid var(--border);
+}
+
+.doc-find.hidden {
+    display: none;
+}
+
+.doc-find-icon {
+    flex-shrink: 0;
+    color: var(--text-muted);
+}
+
+.doc-find-input {
+    flex: 1;
+    min-width: 0;
+    padding: 6px 10px;
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--text-primary);
+    font-family: var(--font-body);
+    font-size: 0.9rem;
+}
+
+.doc-find-input::placeholder {
+    color: var(--text-muted);
+}
+
+.doc-find-input:focus {
+    outline: none;
+    border-color: var(--accent-dim);
+    box-shadow: 0 0 0 2px var(--accent-glow);
+}
+
+.doc-find-count {
+    flex-shrink: 0;
+    min-width: 3.5rem;
+    color: var(--text-secondary);
+    font-family: var(--font-body);
+    font-size: 0.85rem;
+    text-align: right;
+    white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+}
+
+.doc-find-hint {
+    color: var(--text-muted);
+}
+
+.doc-find-btn {
+    flex-shrink: 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 30px;
+    height: 30px;
+    padding: 0;
+    background: transparent;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--text-secondary);
+    font-size: 1.1rem;
+    line-height: 1;
+    cursor: pointer;
+    transition: all var(--transition-fast);
+}
+
+.doc-find-btn:hover:not(:disabled) {
+    background: var(--bg-tertiary);
+    color: var(--text-primary);
+}
+
+.doc-find-btn:disabled {
+    opacity: 0.4;
+    cursor: default;
+}
+
+.doc-find-btn.hidden {
+    display: none;
+}
+
+/* Matches highlighted in the Text Content tab */
+.modal-text .find-hit {
+    background: rgba(201, 162, 39, 0.35);
+    color: var(--text-primary);
+    border-radius: 2px;
+}
+
+.modal-text .find-hit.active {
+    background: var(--accent);
+    color: #0a0b0d;
+    box-shadow: 0 0 0 2px var(--accent);
+}
+
 /* PDF Viewer */
 .pdf-viewer {
     width: 100%;
@@ -3743,6 +3844,19 @@ a.modal-tab.doj-link {
         font-size: 1.5rem;
     }
     
+    /* Mobile find-in-document bar */
+    .doc-find {
+        padding: var(--space-sm);
+    }
+
+    .doc-find-input {
+        font-size: 16px; /* prevents iOS Safari zooming the page on focus */
+    }
+
+    .doc-find-hint {
+        display: none;
+    }
+
     /* Mobile Modal Tabs - Stack vertically */
     .modal-tabs {
         padding: var(--space-sm);
@@ -5871,4 +5985,83 @@ html {
 /* Cards in the marquee's duplicate set remain clickable (no `inert`): they pass under the pointer too. */
 .pinned-dup {
     display: contents;
+}
+
+/* ---- Find in document: touch-sized controls ------------------------------------------------------------------- */
+@media (max-width: 768px), (pointer: coarse) {
+    .doc-find {
+        gap: 4px;
+        padding: 4px var(--space-sm);
+    }
+
+    .doc-find-icon {
+        display: none;
+    }
+
+    .doc-find-input {
+        min-height: 44px;
+        font-size: 16px;   /* below 16px iOS Safari zooms the page on focus (phones and iPads) */
+    }
+
+    .doc-find-btn {
+        width: 44px;
+        height: 44px;
+        font-size: 1.4rem;
+    }
+
+    /* "Page 12 · 3 of 5 pages" may wrap to two lines instead of squeezing the input to nothing. */
+    .doc-find-count {
+        min-width: 0;
+        max-width: 6.5rem;
+        font-size: 0.8rem;
+        line-height: 1.15;
+        white-space: normal;
+    }
+}
+
+/* Small phones: with a count showing, the input would shrink to nothing. Give the count its own line instead. */
+@media (max-width: 480px) {
+    .doc-find {
+        flex-wrap: wrap;
+    }
+
+    .doc-find-input {
+        flex: 1 1 0;
+    }
+
+    .doc-find-count {
+        order: 10;
+        flex: 1 0 100%;
+        max-width: none;
+        padding: 0 4px 2px;
+        text-align: left;
+    }
+
+    /* Stays in the accessibility tree (it is a live region) but takes no room until it has something to say. */
+    .doc-find-count:empty {
+        flex: 0 0 0;
+        width: 0;
+        min-width: 0;
+        padding: 0;
+    }
+}
+
+/* Keyboard focus on the find controls is as visible as everywhere else. */
+.doc-find-btn:focus-visible,
+.doc-find-input:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 1px;
+}
+
+/* Very narrow phones (320px): the three tabs must still fit on screen without scrolling the row. */
+@media (max-width: 340px) {
+    .modal-tablist {
+        gap: 2px;
+    }
+
+    .modal-tablist .modal-tab {
+        padding-left: 8px;
+        padding-right: 8px;
+        font-size: 0.8rem;
+    }
 }

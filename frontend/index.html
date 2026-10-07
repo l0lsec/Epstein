@@ -39,7 +39,7 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Crimson+Pro:wght@400;500;600&family=JetBrains+Mono:wght@400;500&family=Source+Sans+3:wght@300;400;500;600;700&display=swap" rel="stylesheet">
     <script>try{if(localStorage.getItem("ageVerified"))document.documentElement.classList.add("age-ok")}catch(e){}</script>
-    <link rel="stylesheet" href="/static/styles.css?v=61">
+    <link rel="stylesheet" href="/static/styles.css?v=62">
 
     <!-- Structured Data (JSON-LD) -->
     <script type="application/ld+json">
@@ -821,6 +821,23 @@
                             </div>
                         </div>
                     </div>
+                    <div id="doc-find" class="doc-find hidden" role="search" aria-label="Find in this document">
+                        <svg class="doc-find-icon" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                            <circle cx="11" cy="11" r="7"/>
+                            <path d="M21 21l-4.35-4.35"/>
+                        </svg>
+                        <input id="doc-find-input" class="doc-find-input" type="text" inputmode="search" enterkeyhint="search"
+                               placeholder='Find in this document (use "quotes" for an exact phrase)'
+                               aria-label="Find in this document" autocomplete="off" autocapitalize="off" spellcheck="false" maxlength="200">
+                        <button id="doc-find-clear" class="doc-find-btn hidden" type="button" aria-label="Clear search" title="Clear (Esc)">&times;</button>
+                        <span id="doc-find-count" class="doc-find-count" aria-live="polite"></span>
+                        <button id="doc-find-prev" class="doc-find-btn" type="button" aria-label="Previous match" title="Previous match (Shift+Enter)" disabled>
+                            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 15l-6-6-6 6"/></svg>
+                        </button>
+                        <button id="doc-find-next" class="doc-find-btn" type="button" aria-label="Next match" title="Next match (Enter)" disabled>
+                            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 9l6 6 6-6"/></svg>
+                        </button>
+                    </div>
                     <div id="modal-document-tab" class="tab-content active" role="tabpanel" aria-labelledby="tab-document">
                         <div id="modal-pdf-viewer" class="pdf-viewer">
                             <button type="button" id="pdf-fullscreen-btn" class="pdf-fullscreen-btn" title="Toggle Fullscreen" aria-label="Toggle fullscreen" aria-pressed="false">
@@ -1095,7 +1112,7 @@
     <div id="toast-region" class="toast-region" role="region" aria-label="Notifications" data-keep-active></div>
 
     <script src="https://www.google.com/recaptcha/api.js?render=6Lf9EDYsAAAAANDlA_xYFIM7Ylccgmc24LhZgDIr" async defer></script>
-    <script src="/static/app.js?v=53"></script>
+    <script src="/static/app.js?v=55"></script>
 </body>
 </html>
 

@@ -29,6 +29,7 @@ from sse_starlette.sse import EventSourceResponse
 from database import Database, VectorStore, build_index
 from llm import LLMAssistant, fetch_provider_balance
 from extractor import extract_email_date
+from alterations import analyze_versions
 from security_logger import (
     SecurityLogger, 
     RequestLoggingMiddleware, 
@@ -854,6 +855,59 @@ FEEDBACK_PATH = BASE_PATH / "feedback.json"
 # Rate limiting for feedback (IP -> last submission time)
 feedback_rate_limit: dict = {}
 FEEDBACK_RATE_LIMIT_SECONDS = 60  # One submission per minute per IP
+
+# Outbound email for admin replies to feedback tickets. Plain SMTP so any
+# provider works (Gmail app password, Resend, SES, SendGrid, Mailgun, ...).
+import smtplib
+import ssl
+from email.message import EmailMessage
+from email.utils import formatdate, make_msgid, parseaddr
+
+SMTP_HOST = os.getenv("SMTP_HOST")
+try:
+    SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
+except ValueError:
+    SMTP_PORT = 587
+SMTP_USERNAME = os.getenv("SMTP_USERNAME")
+SMTP_PASSWORD = os.getenv("SMTP_PASSWORD")
+SMTP_SECURITY = (os.getenv("SMTP_SECURITY") or "starttls").strip().lower()  # starttls | ssl | none
+SMTP_FROM = os.getenv("SMTP_FROM") or SMTP_USERNAME
+SMTP_REPLY_TO = os.getenv("SMTP_REPLY_TO")
+FEEDBACK_REPLY_ENABLED = bool(SMTP_HOST and SMTP_FROM)
+
+_EMAIL_ADDRESS_RE = re.compile(r"^[^@\s<>,;\"']+@[^@\s<>,;\"']+\.[^@\s<>,;\"']+$")
+
+
+def _send_feedback_reply_email(to_addr: str, subject: str, body: str, original: dict) -> None:
+    """Send a reply to a feedback submitter over SMTP. Blocking - call via asyncio.to_thread."""
+    quoted = "\n".join(f"> {line}" for line in (original.get("message") or "").splitlines())
+    sent_on = original.get("timestamp", "")[:10]
+    text = body.rstrip() + "\n\n"
+    if quoted:
+        text += f"--\nOn {sent_on}, you wrote:\n{quoted}\n"
+
+    msg = EmailMessage()
+    msg["From"] = SMTP_FROM
+    msg["To"] = to_addr
+    msg["Subject"] = subject
+    msg["Date"] = formatdate(localtime=True)
+    from_domain = parseaddr(SMTP_FROM)[1].rpartition("@")[2] or None
+    msg["Message-ID"] = make_msgid(domain=from_domain)
+    if SMTP_REPLY_TO:
+        msg["Reply-To"] = SMTP_REPLY_TO
+    msg.set_content(text)
+
+    context = ssl.create_default_context()
+    if SMTP_SECURITY == "ssl":
+        server = smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=20, context=context)
+    else:
+        server = smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=20)
+    with server:
+        if SMTP_SECURITY == "starttls":
+            server.starttls(context=context)
+        if SMTP_USERNAME and SMTP_PASSWORD:
+            server.login(SMTP_USERNAME, SMTP_PASSWORD)
+        server.send_message(msg)
 
 
 # API Routes
@@ -2014,6 +2068,95 @@ async def get_document_file(doc_id: str, request: Request):
         raise HTTPException(status_code=404, detail="Document not found")
 
     return _serve_document_file(doc, doc_id, client_ip, request_id)
+
+
+# In-PDF search: which pages contain the terms, and a copy of the PDF with them highlighted.
+# CPU-bound (PyMuPDF), so concurrency is capped and oversized files fall back to the plain file.
+_pdf_find_semaphore = asyncio.Semaphore(2)
+PDF_FIND_MAX_BYTES = 40 * 1024 * 1024
+
+
+async def _resolve_findable_pdf(doc_id: str, request: Request) -> tuple:
+    """Visibility-checked path of a public PDF for in-PDF search. Returns (doc, path, ip, request_id)."""
+    client_ip, request_id = get_client_info(request)
+    if not db:
+        raise HTTPException(status_code=503, detail="Database not initialized")
+    doc = await asyncio.to_thread(db.get_document, doc_id, include_hidden=False, include_full_text=False)
+    if doc and not await asyncio.to_thread(db.is_public_servable, doc_id):
+        doc = None
+    if not doc or doc.get("file_type") != "pdf":
+        raise HTTPException(status_code=404, detail="Document not found")
+    file_path = (BASE_PATH / doc["path"]).resolve()
+    if not str(file_path).startswith(str(BASE_PATH.resolve())):
+        raise HTTPException(status_code=403, detail="Access denied")
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail="File not found")
+    return doc, file_path, client_ip, request_id
+
+
+@app.get("/api/documents/{doc_id}/pdf-find")
+async def pdf_find_pages(doc_id: str, request: Request, t: List[str] = Query(default=[])):
+    """Pages of a PDF that contain the given terms (`t`, repeatable; trailing * = prefix).
+
+    `searchable` is false when the PDF has no text layer (scanned images); the client
+    then falls back to the extracted-text view.
+    """
+    import pdf_find
+    terms = pdf_find.parse_terms(t)
+    if not terms:
+        raise HTTPException(status_code=400, detail="No valid search terms")
+    doc, file_path, client_ip, request_id = await _resolve_findable_pdf(doc_id, request)
+    if file_path.stat().st_size > PDF_FIND_MAX_BYTES:
+        return {"searchable": False, "page_count": doc.get("page_count", 0), "pages": []}
+
+    async with _pdf_find_semaphore:
+        try:
+            result = await asyncio.to_thread(pdf_find.find_pages, str(file_path), terms)
+        except Exception as e:
+            security_logger.log_security_event(
+                event_type="pdf_find_error", severity="low", client_ip=client_ip,
+                message=f"PDF find failed for {doc_id}: {e}", request_id=request_id, document_id=doc_id
+            )
+            return {"searchable": False, "page_count": doc.get("page_count", 0), "pages": []}
+    return {
+        "searchable": result["has_text_layer"],
+        "page_count": result["page_count"],
+        "pages": result["pages"],
+    }
+
+
+@app.get("/api/documents/{doc_id}/highlighted")
+async def get_highlighted_pdf(doc_id: str, request: Request, t: List[str] = Query(default=[])):
+    """The PDF with the given terms highlighted. Falls back to the unmodified file when
+    there is nothing to highlight (no text layer, no matches, file too large, error)."""
+    import pdf_find
+    terms = pdf_find.parse_terms(t)
+    doc, file_path, client_ip, request_id = await _resolve_findable_pdf(doc_id, request)
+
+    data = None
+    if terms and file_path.stat().st_size <= PDF_FIND_MAX_BYTES:
+        async with _pdf_find_semaphore:
+            try:
+                data = await asyncio.to_thread(pdf_find.highlight_pdf, str(file_path), terms)
+            except Exception as e:
+                security_logger.log_security_event(
+                    event_type="pdf_highlight_error", severity="low", client_ip=client_ip,
+                    message=f"PDF highlight failed for {doc_id}: {e}", request_id=request_id, document_id=doc_id
+                )
+
+    if data is None:
+        return _serve_document_file(doc, doc_id, client_ip, request_id)
+
+    security_logger.log_document_access(
+        client_ip=client_ip, document_id=doc_id, document_path=doc["path"],
+        action="view_highlighted", request_id=request_id, filename=doc.get("filename", ""),
+        file_type=".pdf", file_size_bytes=len(data)
+    )
+    return Response(
+        content=data,
+        media_type="application/pdf",
+        headers={"Content-Disposition": "inline", "Cache-Control": "private, max-age=300"},
+    )
 
 
 @app.get("/api/admin/documents/{doc_id}/file")
@@ -3570,12 +3713,14 @@ async def get_feedback_telemetry(request: Request, x_api_key: str = Header(None)
             "email": fb.get("email", ""),
             "message": fb.get("message", ""),
             "ip": fb.get("ip", "Unknown"),
-            "status": fb.get("status", "new")
+            "status": fb.get("status", "new"),
+            "replies": fb.get("replies", [])
         })
-    
+
     return {
         "total_feedback": len(feedback_list),
         "type_counts": type_counts,
+        "reply_enabled": FEEDBACK_REPLY_ENABLED,
         "feedback": recent_feedback
     }
 
@@ -3741,6 +3886,103 @@ async def bulk_delete_feedback(bulk_delete: BulkFeedbackDelete, request: Request
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error bulk deleting feedback: {str(e)}")
+
+
+class FeedbackReply(BaseModel):
+    message: str
+    subject: Optional[str] = None
+    set_status: Optional[str] = None  # optionally move the ticket to this status after sending
+
+
+@app.post("/api/admin/feedback/{feedback_id}/reply")
+async def reply_to_feedback(feedback_id: str, reply: FeedbackReply, request: Request, x_api_key: str = Header(None)):
+    """Email a reply to the person who submitted a feedback entry (requires admin authentication)"""
+    is_authorized, error = verify_admin_access(request, x_api_key)
+    if not is_authorized:
+        raise HTTPException(status_code=401, detail=error)
+    client_ip, request_id = get_client_info(request)
+
+    if not FEEDBACK_REPLY_ENABLED:
+        raise HTTPException(
+            status_code=503,
+            detail="Outbound email is not configured. Set SMTP_HOST and SMTP_FROM (and credentials) in .env, then restart."
+        )
+
+    message = reply.message.strip()
+    if not message:
+        raise HTTPException(status_code=400, detail="Reply message cannot be empty")
+    if len(message) > 10000:
+        raise HTTPException(status_code=400, detail="Reply is too long (max 10000 characters)")
+    if reply.set_status and reply.set_status not in VALID_FEEDBACK_STATUSES:
+        raise HTTPException(status_code=400, detail=f"Invalid status. Must be one of: {', '.join(VALID_FEEDBACK_STATUSES)}")
+    # Collapse whitespace (incl. CR/LF) so the subject can never inject extra headers
+    subject = " ".join((reply.subject or "").split())[:200] or "Re: your feedback on Epstein Files Search"
+
+    def load_feedback() -> list:
+        if not FEEDBACK_PATH.exists():
+            return []
+        with open(FEEDBACK_PATH, 'r') as f:
+            return json.load(f)
+
+    try:
+        entry = next((fb for fb in load_feedback() if fb.get("id") == feedback_id), None)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error reading feedback: {str(e)}")
+    if not entry:
+        raise HTTPException(status_code=404, detail="Feedback entry not found")
+
+    to_addr = (entry.get("email") or "").strip()
+    if not _EMAIL_ADDRESS_RE.match(to_addr):
+        raise HTTPException(status_code=400, detail="This feedback has no valid email address to reply to")
+
+    try:
+        await asyncio.to_thread(_send_feedback_reply_email, to_addr, subject, message, entry)
+    except Exception as e:
+        security_logger.log_error(error=e, context="feedback_reply_send", client_ip=client_ip, request_id=request_id)
+        if isinstance(e, smtplib.SMTPAuthenticationError):
+            detail = "SMTP login failed - check SMTP_USERNAME / SMTP_PASSWORD"
+        elif isinstance(e, smtplib.SMTPRecipientsRefused):
+            detail = "The mail server rejected the recipient address"
+        elif isinstance(e, smtplib.SMTPSenderRefused):
+            detail = "The mail server rejected the sender address - check SMTP_FROM"
+        else:
+            detail = f"Could not send email ({type(e).__name__})"
+        raise HTTPException(status_code=502, detail=detail)
+
+    # The email is out - record it on the ticket. Re-read the file (nothing awaits between
+    # here and the write, so this is atomic w.r.t. other feedback endpoints).
+    reply_entry = {
+        "id": uuid.uuid4().hex[:12],
+        "timestamp": datetime.now().isoformat(),
+        "to": to_addr,
+        "subject": subject,
+        "message": message,
+    }
+    new_status = reply.set_status
+    try:
+        feedback_list = load_feedback()
+        target = next((fb for fb in feedback_list if fb.get("id") == feedback_id), None)
+        if target is None:
+            raise LookupError("feedback entry was deleted while sending")
+        target.setdefault("replies", []).append(reply_entry)
+        if new_status:
+            target["status"] = new_status
+        with open(FEEDBACK_PATH, 'w') as f:
+            json.dump(feedback_list, f, indent=2)
+        recorded = True
+    except Exception as e:
+        # Don't fail the request - the email was sent, and a retry would double-send.
+        security_logger.log_error(error=e, context="feedback_reply_record", client_ip=client_ip, request_id=request_id)
+        recorded = False
+
+    security_logger.log_system_event(
+        "feedback_reply",
+        f"Admin replied to feedback {feedback_id}",
+        feedback_id=feedback_id,
+        client_ip=client_ip,
+        request_id=request_id,
+    )
+    return {"message": "Reply sent", "id": feedback_id, "reply": reply_entry, "recorded": recorded, "status": new_status}
 
 
 # =============================================================================
@@ -5748,10 +5990,14 @@ async def get_updated_documents_route(
     return result
 
 
-def _compute_text_diff(old_text, new_text, max_lines: int = 5000):
+def _compute_text_diff(old_text, new_text, max_lines: int = 5000, admin: bool = False):
     """Unified text diff (structured for rendering) between two document versions.
-    Shared by the admin and public diff endpoints."""
+    Shared by the admin and public diff endpoints. For admins it also carries
+    `analysis`, the reflow-tolerant verdict (alterations.analyze_versions) with the
+    removed words: the raw line diff over-counts whenever line breaks shifted, so
+    judge by `analysis`. Triage data is never sent to the public endpoint."""
     import difflib
+    analysis = analyze_versions(old_text, new_text).to_dict() if admin else None
     old_lines = (old_text or "").splitlines()
     new_lines = (new_text or "").splitlines()
     lines = []
@@ -5768,7 +6014,7 @@ def _compute_text_diff(old_text, new_text, max_lines: int = 5000):
             lines.append({"type": "del", "text": ln[1:]}); removed += 1
         else:
             lines.append({"type": "ctx", "text": ln[1:] if ln else ln})
-    return {
+    out = {
         "added": added,
         "removed": removed,
         "identical": added == 0 and removed == 0,
@@ -5776,6 +6022,9 @@ def _compute_text_diff(old_text, new_text, max_lines: int = 5000):
         "truncated": len(lines) > max_lines,
         "lines": lines[:max_lines],
     }
+    if analysis is not None:
+        out["analysis"] = analysis
+    return out
 
 
 @app.get("/api/admin/version-diff")
@@ -5813,7 +6062,7 @@ async def get_version_diff(
     if old_text is None and new_text is None:
         raise HTTPException(status_code=404, detail="Documents not found")
 
-    result = {"old": old, "new": new, **_compute_text_diff(old_text, new_text)}
+    result = {"old": old, "new": new, **_compute_text_diff(old_text, new_text, admin=True)}
     _admin_cache.set(cache_key, result)
     return result
 
@@ -5823,20 +6072,23 @@ async def admin_get_alterations(
     request: Request,
     x_api_key: str = Header(None),
     status: str = "pending",
-    sort: str = "removed",
+    sort: str = "severity",
     dataset: int = None,
     min_removed: int = None,
     max_removed: int = None,
     min_added: int = None,
     query: str = None,
     filename: str = None,
+    kind: str = None,
     limit: int = 100,
     offset: int = 0,
 ):
     """Admin review queue of DOJ-altered documents + status counts + matched_total.
 
     status: pending | exposed | cleared | trivial | all (default pending).
-    sort: removed | removed_asc | added | added_asc | recent | oldest | efta.
+    sort: severity (default; review priority from alterations.py) | severity_asc |
+    removed | removed_asc | added | added_asc | recent | oldest | efta | filename.
+    kind: redaction | removal | replaced | additive | cosmetic | identical | no_text.
     min_removed/max_removed/min_added: numeric range filters.
     query: keyword search over the ORIGINAL (pre-redaction) text via FTS — surfaces
     altered docs that mentioned a term so you can see if it was redacted. Admin auth.
@@ -5847,7 +6099,7 @@ async def admin_get_alterations(
     if not db:
         raise HTTPException(status_code=503, detail="Database not initialized")
 
-    cache_key = f"alterations:{status}:{sort}:{dataset}:{min_removed}:{max_removed}:{min_added}:{query}:{filename}:{limit}:{offset}"
+    cache_key = f"alterations:{status}:{sort}:{dataset}:{min_removed}:{max_removed}:{min_added}:{query}:{filename}:{kind}:{limit}:{offset}"
     cached = _admin_cache.get(cache_key)
     if cached:
         return cached
@@ -5856,13 +6108,13 @@ async def admin_get_alterations(
         return (db.get_alterations(status=status, sort=sort, dataset=dataset,
                                    min_removed=min_removed, max_removed=max_removed,
                                    min_added=min_added, query=query, filename=filename,
-                                   limit=limit, offset=offset,
+                                   kind=kind, limit=limit, offset=offset,
                                    timeout_seconds=_ADMIN_QUERY_TIMEOUT),
                 db.count_alterations_by_status(timeout_seconds=_ADMIN_QUERY_TIMEOUT),
                 db.count_alterations_matching(status=status, dataset=dataset,
                                               min_removed=min_removed, max_removed=max_removed,
                                               min_added=min_added, query=query, filename=filename,
-                                              timeout_seconds=_ADMIN_QUERY_TIMEOUT))
+                                              kind=kind, timeout_seconds=_ADMIN_QUERY_TIMEOUT))
 
     rows, counts, matched_total = await asyncio.to_thread(_work)
     result = {"alterations": rows, "counts": counts, "matched_total": matched_total}
@@ -5925,7 +6177,7 @@ class AlterationBulkReviewRequest(BaseModel):
     new_status: str                                   # pending | cleared | exposed | trivial
     mode: str = "selected"                            # "selected" | "filter"
     selected: Optional[List[Dict[str, Any]]] = None   # [{efta_num, file_type}, ...]
-    filter: Optional[Dict[str, Any]] = None           # {status,dataset,min_removed,max_removed,min_added}
+    filter: Optional[Dict[str, Any]] = None           # {status,dataset,min_removed,max_removed,min_added,query,filename,kind}
 
 
 @app.post("/api/admin/alterations/bulk-review")
