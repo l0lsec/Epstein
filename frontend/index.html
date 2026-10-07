@@ -38,7 +38,8 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Crimson+Pro:wght@400;500;600&family=JetBrains+Mono:wght@400;500&family=Source+Sans+3:wght@300;400;500;600;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="/static/styles.css?v=60">
+    <script>try{if(localStorage.getItem("ageVerified"))document.documentElement.classList.add("age-ok")}catch(e){}</script>
+    <link rel="stylesheet" href="/static/styles.css?v=61">
 
     <!-- Structured Data (JSON-LD) -->
     <script type="application/ld+json">
@@ -60,146 +61,141 @@
     </script>
 </head>
 <body>
-    <!-- Age Verification Gate -->
-    <div id="age-gate" class="age-gate">
+    <a class="skip-link" href="#main">Skip to main content</a>
+
+    <!-- Age Verification Gate (hidden by CSS via html.age-ok for returning visitors, so it never flashes) -->
+    <div id="age-gate" class="age-gate" role="dialog" aria-modal="true" aria-labelledby="age-gate-title" aria-describedby="age-gate-desc">
         <div class="age-gate-content">
-            <div class="age-gate-icon">
+            <div class="age-gate-icon" aria-hidden="true">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" width="48" height="48">
                     <path d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126z"/>
                     <path d="M12 15.75h.007v.008H12v-.008z"/>
                 </svg>
             </div>
-            <h1>Content Warning</h1>
-            <p>This archive contains official government documents related to the Jeffrey Epstein case. Some materials may include descriptions of sexual abuse, exploitation, and other disturbing content.</p>
-            <p>By proceeding, you confirm that you are at least <strong>18 years of age</strong> and understand the nature of these documents.</p>
+            <h1 id="age-gate-title">Content Warning</h1>
+            <div id="age-gate-desc">
+                <p>This archive contains official government documents related to the Jeffrey Epstein case. Some materials may include descriptions of sexual abuse, exploitation, and other disturbing content.</p>
+                <p>By proceeding, you confirm that you are at least <strong>18 years of age</strong> and understand the nature of these documents.</p>
+            </div>
             <div class="age-gate-actions">
-                <button id="age-gate-confirm" class="age-gate-btn confirm">I am 18 or older &mdash; Enter</button>
-                <button id="age-gate-deny" class="age-gate-btn deny">I am under 18 &mdash; Leave</button>
+                <button type="button" id="age-gate-confirm" class="age-gate-btn confirm">I am 18 or older &mdash; Enter</button>
+                <button type="button" id="age-gate-deny" class="age-gate-btn deny">I am under 18 &mdash; Leave</button>
             </div>
         </div>
     </div>
 
-    <div class="noise-overlay"></div>
-    
+    <div class="noise-overlay" aria-hidden="true"></div>
+
     <header class="header">
         <div class="header-content">
             <div class="logo">
                 <div class="logo-icon">
-                    <img src="/static/logo2-icon.png?v=2" alt="Epstein Files Public Archive logo" width="44" height="44">
+                    <img src="/static/logo2-icon.png?v=2" alt="" width="44" height="44">
                 </div>
                 <div class="logo-text">
                     <span class="logo-title">EPSTEIN FILES</span>
                     <span class="logo-subtitle">PUBLIC ARCHIVE</span>
                 </div>
             </div>
-            <nav class="nav">
-                <button class="nav-btn active" data-view="search">Search</button>
-                <button class="nav-btn" data-view="browse">Browse</button>
-                <button class="nav-btn" data-view="ask">Ask AI</button>
-                <button class="nav-btn" data-view="about">About</button>
+            <nav class="nav" aria-label="Primary">
+                <button type="button" class="nav-btn active" data-view="search" aria-current="page">Search</button>
+                <button type="button" class="nav-btn" data-view="browse">Browse</button>
+                <button type="button" class="nav-btn" data-view="ask">Ask AI</button>
+                <button type="button" class="nav-btn" data-view="about">About</button>
             </nav>
+            <div class="header-actions">
+                <div class="share-dropdown">
+                    <button type="button" class="header-share-btn" id="site-share-btn" aria-label="Share this site" aria-haspopup="menu" aria-expanded="false" aria-controls="site-share-menu">
+                        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><path d="M8.59 13.51l6.83 3.98M15.41 6.51l-6.82 3.98"/></svg>
+                        <span class="share-btn-label">Share</span>
+                    </button>
+                    <div class="share-menu hidden" id="site-share-menu" role="menu" aria-label="Share this site">
+                        <button type="button" class="share-option" role="menuitem" data-platform="reddit">Reddit</button>
+                        <button type="button" class="share-option" role="menuitem" data-platform="twitter">X (Twitter)</button>
+                        <button type="button" class="share-option" role="menuitem" data-platform="bluesky">Bluesky</button>
+                        <button type="button" class="share-option" role="menuitem" data-platform="linkedin">LinkedIn</button>
+                        <button type="button" class="share-option" role="menuitem" data-platform="facebook">Facebook</button>
+                        <button type="button" class="share-option" role="menuitem" data-platform="telegram">Telegram</button>
+                        <button type="button" class="share-option" role="menuitem" data-platform="email">Email</button>
+                        <button type="button" class="share-option" role="menuitem" data-platform="copy">Copy link</button>
+                    </div>
+                </div>
+            </div>
         </div>
     </header>
 
-    <div class="donation-banner" id="donation-banner">
-        <span class="banner-text">Server costs are growing with the archive. If this site has helped you, a small donation keeps it free and online.</span>
-        <button type="button" class="banner-btn" onclick="openDonateModal('banner')">Support the Archive</button>
-        <button type="button" class="banner-dismiss" onclick="dismissDonationBanner()" aria-label="Dismiss banner">&times;</button>
-    </div>
-
-    <div class="share-bar share-bar-top">
-        <span class="share-bar-label">Share:</span>
-        <a class="share-bar-link" href="https://reddit.com/submit?url=https%3A%2F%2Fepsteinfta.com&amp;title=Epstein%20Files%20Public%20Archive%20%E2%80%94%20search%20court%20records%2C%20flight%20logs%20%26%20DOJ%20disclosures.%20Free%20%26%20open%20source." target="_blank" rel="noopener">Reddit</a>
-        <span class="share-bar-sep">·</span>
-        <a class="share-bar-link" href="https://x.com/intent/post?url=https%3A%2F%2Fepsteinfta.com&amp;text=Epstein%20Files%20Public%20Archive%20%E2%80%94%20search%20court%20records%2C%20flight%20logs%20%26%20DOJ%20disclosures.%20Free%20%26%20open%20source." target="_blank" rel="noopener">X</a>
-        <span class="share-bar-sep">·</span>
-        <a class="share-bar-link" href="https://bsky.app/intent/compose?text=Epstein%20Files%20Public%20Archive%20%E2%80%94%20search%20court%20records%2C%20flight%20logs%20%26%20DOJ%20disclosures.%20Free%20%26%20open%20source.%20https%3A%2F%2Fepsteinfta.com" target="_blank" rel="noopener">Bluesky</a>
-        <span class="share-bar-sep">·</span>
-        <a class="share-bar-link" href="https://www.linkedin.com/sharing/share-offsite/?url=https%3A%2F%2Fepsteinfta.com" target="_blank" rel="noopener">LinkedIn</a>
-        <span class="share-bar-sep">·</span>
-        <a class="share-bar-link" href="https://www.facebook.com/sharer/sharer.php?u=https%3A%2F%2Fepsteinfta.com" target="_blank" rel="noopener">Facebook</a>
-        <span class="share-bar-sep">·</span>
-        <a class="share-bar-link" href="https://t.me/share/url?url=https%3A%2F%2Fepsteinfta.com&amp;text=Epstein%20Files%20Public%20Archive%20%E2%80%94%20search%20court%20records%2C%20flight%20logs%20%26%20DOJ%20disclosures.%20Free%20%26%20open%20source." target="_blank" rel="noopener">Telegram</a>
-        <span class="share-bar-sep">·</span>
-        <a class="share-bar-link" href="mailto:?subject=Epstein%20Files%20Public%20Archive&amp;body=Search%20court%20records%2C%20flight%20logs%2C%20and%20DOJ%20disclosures%20from%20the%20Epstein%20Files%20%E2%80%94%20free%20%26%20open%20source.%0A%0Ahttps%3A%2F%2Fepsteinfta.com" rel="noopener">Email</a>
-        <span class="share-bar-sep">·</span>
-        <a class="share-bar-link" href="#" onclick="var el=this;copyToClipboard('https://epsteinfta.com').then(function(){var s=el.nextElementSibling;s.style.opacity='1';setTimeout(function(){s.style.opacity='0'},1500)});return false;">Copy link</a><span class="share-bar-copied">Copied</span>
-    </div>
-
-    <main class="main">
+    <main class="main" id="main" tabindex="-1">
         <!-- Search View -->
-        <section id="search-view" class="view active">
+        <section id="search-view" class="view active" aria-labelledby="search-heading">
             <div class="hero">
-                <h1 class="hero-title">Search the Epstein Files</h1>
-                <p class="hero-subtitle">A unified platform for researchers, journalists, and the public to search, view, and explore the DOJ's Epstein Files. Browse documents, PDFs, audio recordings, and video files all in one place as they are released.</p>
-                
-                <div id="pinned-documents-skeleton" class="pinned-documents-bar pinned-skeleton">
-                    <div class="pinned-header">
-                        <span class="pinned-icon">📌</span>
-                        <span class="pinned-title">Featured Documents</span>
-                        <span class="pinned-subtitle">Controversial & Notable Files</span>
-                    </div>
-                    <div class="pinned-scroll-container">
-                        <div class="pinned-scroll-skeleton">
-                            <div class="pinned-card-skeleton"></div>
-                            <div class="pinned-card-skeleton"></div>
-                            <div class="pinned-card-skeleton"></div>
-                            <div class="pinned-card-skeleton"></div>
-                        </div>
-                    </div>
-                </div>
+                <h1 class="hero-title" id="search-heading">Search the Epstein Files</h1>
+                <p class="hero-subtitle">Search, view, and explore the DOJ's Epstein Files &mdash; documents, PDFs, audio and video in one place as they are released.</p>
 
-                <div id="stats-display" class="stats-container">
-                    <h3 class="stats-title">Archive Statistics</h3>
-                    <div id="stats-grid" class="stats-grid"></div>
-                </div>
-                
-                <div class="search-container">
+                <div class="search-container" role="search">
                     <div class="search-box">
-                        <svg class="search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <svg class="search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
                             <circle cx="11" cy="11" r="8"/>
                             <path d="M21 21l-4.35-4.35"/>
                         </svg>
-                        <input type="text" id="search-input" placeholder="Search names, dates, locations, or any keyword..." autocomplete="off">
+                        <input type="text" id="search-input" aria-label="Search the archive" placeholder="Search names, dates, places…" autocomplete="off" autocapitalize="off" spellcheck="false" enterkeyhint="search">
                         <div class="search-buttons">
-                            <button id="search-btn" class="search-btn">
+                            <button type="button" id="search-btn" class="search-btn">
                                 <span>Search</span>
-                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
                                     <path d="M5 12h14m-7-7l7 7-7 7"/>
                                 </svg>
                             </button>
-                            <button id="clear-search-btn" class="clear-search-btn hidden" title="Clear search and reset filters">
-                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <button type="button" id="clear-search-btn" class="clear-search-btn hidden" title="Clear search and reset filters">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
                                     <path d="M18 6L6 18M6 6l12 12"/>
                                 </svg>
                                 <span>Clear</span>
                             </button>
                         </div>
                     </div>
-                    
-                    <div class="search-options">
+
+                    <div class="search-extras">
+                        <button type="button" class="filters-toggle" id="filters-toggle" aria-expanded="true" aria-controls="search-filters">
+                            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M3 5h18M6 12h12M10 19h4"/></svg>
+                            <span>Filters</span>
+                            <span class="filters-count hidden" id="filters-count" aria-hidden="true"></span>
+                        </button>
+                        <button class="search-help-toggle" id="search-help-toggle" type="button" aria-expanded="false" aria-controls="search-help-content">
+                            <svg class="help-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16" aria-hidden="true">
+                                <circle cx="12" cy="12" r="10"/>
+                                <path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/>
+                                <line x1="12" y1="17" x2="12.01" y2="17"/>
+                            </svg>
+                            <span>Search Tips &amp; Boolean Operators</span>
+                            <svg class="chevron-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16" aria-hidden="true">
+                                <polyline points="6 9 12 15 18 9"/>
+                            </svg>
+                        </button>
+                    </div>
+
+                    <div class="search-options" id="search-filters" role="group" aria-label="Search filters">
                         <div class="option-group">
-                            <label>Search Type:</label>
-                            <select id="search-type">
-                                <option value="hybrid">Hybrid (Recommended)</option>
-                                <option value="fulltext" selected>Full Text</option>
-                                <option value="semantic">Semantic AI</option>
+                            <label for="search-type">Search type:</label>
+                            <select id="search-type" aria-describedby="search-type-hint">
+                                <option value="fulltext" selected>Full Text (exact words)</option>
+                                <option value="hybrid">Hybrid (exact + related)</option>
+                                <option value="semantic">Semantic AI (by meaning)</option>
                             </select>
                         </div>
                         <div class="option-group">
-                            <label>File Set:</label>
+                            <label for="search-category">File set:</label>
                             <select id="search-category">
                                 <option value="">All File Sets</option>
                             </select>
                         </div>
-                        <div class="option-group" id="search-subcategory-group" style="display: none;">
-                            <label>Dataset/Section:</label>
+                        <div class="option-group hidden" id="search-subcategory-group">
+                            <label for="search-subcategory">Section:</label>
                             <select id="search-subcategory">
                                 <option value="">All Sections</option>
                             </select>
                         </div>
                         <div class="option-group">
-                            <label>File Type:</label>
+                            <label for="search-file-type">File type:</label>
                             <select id="search-file-type">
                                 <option value="">All Files</option>
                                 <option value="pdf">📄 PDF Documents</option>
@@ -209,36 +205,35 @@
                                 <option value="video">🎬 Video</option>
                             </select>
                         </div>
+                        <div class="option-group-date" role="group" aria-labelledby="date-range-label">
+                            <span class="date-range-label" id="date-range-label">Date range:</span>
+                            <div class="date-range-inputs">
+                                <input type="date" id="search-date-from" aria-label="From date" min="1900-01-01" max="2100-12-31">
+                                <span class="date-separator" aria-hidden="true">to</span>
+                                <input type="date" id="search-date-to" aria-label="To date" min="1900-01-01" max="2100-12-31">
+                            </div>
+                        </div>
                         <div class="option-group">
-                            <label>Exclude:</label>
+                            <span class="option-label" id="search-exclude-label">Exclude:</span>
                             <div class="exclude-dropdown-container">
-                                <button type="button" id="search-exclude-toggle" class="exclude-toggle-btn">
-                                    None ▼
+                                <button type="button" id="search-exclude-toggle" class="exclude-toggle-btn" data-popover aria-expanded="false" aria-controls="search-exclude-menu" aria-labelledby="search-exclude-label search-exclude-toggle">
+                                    None <span aria-hidden="true">▼</span>
                                 </button>
-                                <div id="search-exclude-menu" class="exclude-menu hidden">
+                                <div id="search-exclude-menu" class="exclude-menu hidden" role="group" aria-label="File sets to exclude">
                                     <div id="search-exclude-options" class="exclude-options"></div>
-                                    <button type="button" class="clear-exclusions-btn" onclick="clearExclusions()">Clear All</button>
+                                    <button type="button" class="clear-exclusions-btn" data-action="clear-exclusions">Clear All</button>
                                 </div>
                             </div>
                         </div>
+                        <p class="field-error hidden" id="date-range-error" role="alert"></p>
+                        <p class="option-hint" id="search-type-hint"></p>
                     </div>
-                    
+
                     <!-- Search Syntax Help -->
                     <div class="search-help">
-                        <button class="search-help-toggle" id="search-help-toggle" type="button" aria-expanded="false">
-                            <svg class="help-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
-                                <circle cx="12" cy="12" r="10"/>
-                                <path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/>
-                                <line x1="12" y1="17" x2="12.01" y2="17"/>
-                            </svg>
-                            <span>Search Tips &amp; Boolean Operators</span>
-                            <svg class="chevron-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
-                                <polyline points="6 9 12 15 18 9"/>
-                            </svg>
-                        </button>
                         <div class="search-help-content hidden" id="search-help-content">
                             <div class="help-section">
-                                <h4>Boolean Search Operators</h4>
+                                <h2 class="help-heading">Boolean Search Operators</h2>
                                 <div class="help-grid">
                                     <div class="help-item">
                                         <code class="help-syntax">-term</code>
@@ -277,7 +272,7 @@
                             </div>
                         </div>
                     </div>
-                    
+
                     <!-- Query Interpretation Feedback -->
                     <div class="query-feedback hidden" id="query-feedback">
                         <span class="feedback-label">Searching for:</span>
@@ -285,58 +280,95 @@
                     </div>
                 </div>
             </div>
-            
+
+            <!-- Everything below the search box; hidden while results are showing -->
+            <div id="home-extras" class="home-extras">
+                <aside class="donation-banner" id="donation-banner" aria-label="Support this archive">
+                    <span class="banner-text">Server costs are growing with the archive. If this site has helped you, a small donation keeps it free and online.</span>
+                    <button type="button" class="banner-btn" data-action="open-donate" data-source="banner">Support the Archive</button>
+                    <button type="button" class="banner-dismiss" data-action="dismiss-banner" aria-label="Dismiss banner">&times;</button>
+                </aside>
+
+                <div id="pinned-documents-skeleton" class="pinned-documents-bar pinned-skeleton" aria-hidden="true">
+                    <div class="pinned-header">
+                        <span class="pinned-icon">📌</span>
+                        <span class="pinned-title">Featured Documents</span>
+                        <span class="pinned-subtitle">Controversial & Notable Files</span>
+                    </div>
+                    <div class="pinned-scroll-container">
+                        <div class="pinned-scroll-skeleton">
+                            <div class="pinned-card-skeleton"></div>
+                            <div class="pinned-card-skeleton"></div>
+                            <div class="pinned-card-skeleton"></div>
+                            <div class="pinned-card-skeleton"></div>
+                        </div>
+                    </div>
+                </div>
+
+                <div id="stats-display" class="stats-container">
+                    <h2 class="stats-title">Archive Statistics</h2>
+                    <div id="stats-grid" class="stats-grid"></div>
+                </div>
+            </div>
+
             <div class="ad-slot ad-slot-leaderboard" id="ad-slot-search-top" data-ad-slot="search-top" aria-hidden="true"></div>
 
-            <div id="search-results" class="results-container hidden">
+            <div id="search-results" class="results-container hidden" aria-labelledby="results-title">
+                <div id="refine-bar" class="refine-bar" role="region" aria-label="Refine your search">
+                    <button type="button" id="refine-edit" class="refine-edit" data-action="edit-search">
+                        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 013 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>
+                        <span>Edit search</span>
+                    </button>
+                    <ul id="refine-chips" class="refine-chips" aria-label="Active filters"></ul>
+                </div>
                 <div class="results-header">
-                    <h2 class="results-title">Results</h2>
+                    <h2 class="results-title" id="results-title" tabindex="-1">Results</h2>
                     <span id="results-count" class="results-count"></span>
                     <div class="results-header-actions">
                         <div class="share-dropdown search-share-dropdown">
-                            <button class="share-btn" id="search-share-btn" aria-label="Share search results">
-                                <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2">
+                            <button type="button" class="share-btn" id="search-share-btn" aria-label="Share search results" aria-haspopup="menu" aria-expanded="false" aria-controls="search-share-menu">
+                                <svg aria-hidden="true" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2">
                                     <circle cx="18" cy="5" r="3"/>
                                     <circle cx="6" cy="12" r="3"/>
                                     <circle cx="18" cy="19" r="3"/>
                                     <path d="M8.59 13.51l6.83 3.98M15.41 6.51l-6.82 3.98"/>
                                 </svg>
-                                Share
+                                <span class="share-btn-label">Share</span>
                             </button>
-                            <div class="share-menu hidden" id="search-share-menu">
-                                <button class="share-option" data-platform="facebook">
-                                    <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor">
+                            <div class="share-menu hidden" id="search-share-menu" role="menu" aria-label="Share search results">
+                                <button type="button" class="share-option" role="menuitem" data-platform="facebook">
+                                    <svg aria-hidden="true" viewBox="0 0 24 24" width="18" height="18" fill="currentColor">
                                         <path d="M24 12.073c0-6.627-5.373-12-12-12s-12 5.373-12 12c0 5.99 4.388 10.954 10.125 11.854v-8.385H7.078v-3.47h3.047V9.43c0-3.007 1.792-4.669 4.533-4.669 1.312 0 2.686.235 2.686.235v2.953H15.83c-1.491 0-1.956.925-1.956 1.874v2.25h3.328l-.532 3.47h-2.796v8.385C19.612 23.027 24 18.062 24 12.073z"/>
                                     </svg>
                                     Facebook
                                 </button>
-                                <button class="share-option" data-platform="twitter">
-                                    <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor">
+                                <button type="button" class="share-option" role="menuitem" data-platform="twitter">
+                                    <svg aria-hidden="true" viewBox="0 0 24 24" width="18" height="18" fill="currentColor">
                                         <path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z"/>
                                     </svg>
                                     X (Twitter)
                                 </button>
-                                <button class="share-option" data-platform="linkedin">
-                                    <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor">
+                                <button type="button" class="share-option" role="menuitem" data-platform="linkedin">
+                                    <svg aria-hidden="true" viewBox="0 0 24 24" width="18" height="18" fill="currentColor">
                                         <path d="M20.447 20.452h-3.554v-5.569c0-1.328-.027-3.037-1.852-3.037-1.853 0-2.136 1.445-2.136 2.939v5.667H9.351V9h3.414v1.561h.046c.477-.9 1.637-1.85 3.37-1.85 3.601 0 4.267 2.37 4.267 5.455v6.286zM5.337 7.433c-1.144 0-2.063-.926-2.063-2.065 0-1.138.92-2.063 2.063-2.063 1.14 0 2.064.925 2.064 2.063 0 1.139-.925 2.065-2.064 2.065zm1.782 13.019H3.555V9h3.564v11.452zM22.225 0H1.771C.792 0 0 .774 0 1.729v20.542C0 23.227.792 24 1.771 24h20.451C23.2 24 24 23.227 24 22.271V1.729C24 .774 23.2 0 22.222 0h.003z"/>
                                     </svg>
                                     LinkedIn
                                 </button>
-                                <button class="share-option" data-platform="threads">
-                                    <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor">
+                                <button type="button" class="share-option" role="menuitem" data-platform="threads">
+                                    <svg aria-hidden="true" viewBox="0 0 24 24" width="18" height="18" fill="currentColor">
                                         <path d="M12.186 24h-.007c-3.581-.024-6.334-1.205-8.184-3.509C2.35 18.44 1.5 15.586 1.472 12.01v-.017c.03-3.579.879-6.43 2.525-8.482C5.845 1.205 8.6.024 12.18 0h.014c2.746.02 5.043.725 6.826 2.098 1.677 1.29 2.858 3.13 3.509 5.467l-2.04.569c-1.104-3.96-3.898-5.984-8.304-6.015-2.91.022-5.11.936-6.54 2.717C4.307 6.504 3.616 8.914 3.589 12c.027 3.086.718 5.496 2.057 7.164 1.43 1.783 3.631 2.698 6.54 2.717 2.623-.02 4.358-.631 5.8-2.045 1.647-1.613 1.618-3.593 1.09-4.798-.31-.71-.873-1.3-1.634-1.75-.192 1.352-.622 2.446-1.284 3.272-.886 1.102-2.14 1.704-3.73 1.79-1.202.065-2.361-.218-3.259-.801-1.063-.689-1.685-1.74-1.752-2.96-.065-1.17.408-2.253 1.332-3.05.857-.74 2.063-1.201 3.583-1.37.999-.111 2.099-.058 3.27.157.018-.858-.087-1.594-.313-2.185-.323-.84-.947-1.462-1.854-1.85-1.102-.47-2.57-.514-4.122-.124l-.538-1.962c2.005-.504 3.943-.423 5.457.228 1.308.564 2.273 1.525 2.788 2.78.472 1.148.555 2.509.249 4.053l-.055.27c1.205.652 2.144 1.546 2.678 2.575.716 1.379.891 3.2.488 5.118-.476 2.268-1.873 4.166-3.93 5.342C17.642 23.42 15.063 24 12.186 24zm.088-7.874c1.035-.057 1.83-.451 2.364-1.172.39-.525.663-1.21.82-2.054-.93-.178-1.819-.227-2.643-.146-1.129.112-1.993.43-2.496.92-.346.337-.51.737-.48 1.187.037.61.398 1.108 1.02 1.403.517.245 1.16.358 1.792.358l-.377-.496z"/>
                                     </svg>
                                     Threads
                                 </button>
-                                <button class="share-option" data-platform="email">
-                                    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2">
+                                <button type="button" class="share-option" role="menuitem" data-platform="email">
+                                    <svg aria-hidden="true" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2">
                                         <rect x="2" y="4" width="20" height="16" rx="2"/>
                                         <path d="M22 4l-10 8L2 4"/>
                                     </svg>
                                     Email
                                 </button>
-                                <button class="share-option" data-platform="copy">
-                                    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2">
+                                <button type="button" class="share-option" role="menuitem" data-platform="copy">
+                                    <svg aria-hidden="true" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2">
                                         <rect x="9" y="9" width="13" height="13" rx="2" ry="2"/>
                                         <path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/>
                                     </svg>
@@ -344,46 +376,47 @@
                                 </button>
                             </div>
                         </div>
-                        <button id="export-search-results" class="export-btn" title="Export all results to CSV">Export CSV</button>
+                        <button type="button" id="export-search-results" class="export-btn" title="Export all results to CSV">Export CSV</button>
                     </div>
                 </div>
-                <div id="results-list" class="results-list"></div>
-                <div id="search-pagination" class="pagination hidden">
-                    <button id="search-prev-page" class="page-btn" disabled>← Previous</button>
+                <div id="results-list" class="results-list" aria-busy="false"></div>
+                <nav id="search-pagination" class="pagination hidden" aria-label="Search results pages">
+                    <button type="button" id="search-prev-page" class="page-btn" disabled>← Previous</button>
                     <div id="search-page-numbers" class="page-numbers"></div>
                     <span class="go-to-page">
                         <label for="search-page-input">Go to page</label>
-                        <input type="number" id="search-page-input" min="1" />
+                        <input type="number" id="search-page-input" min="1" inputmode="numeric" />
                         <button type="button" id="search-go-page" class="page-btn">Go</button>
                     </span>
-                    <button id="search-next-page" class="page-btn">Next →</button>
-                </div>
+                    <button type="button" id="search-next-page" class="page-btn">Next →</button>
+                </nav>
             </div>
         </section>
 
         <!-- Browse View -->
-        <section id="browse-view" class="view">
+        <section id="browse-view" class="view" aria-labelledby="browse-heading">
             <div class="browse-header">
-                <h1>Browse Documents</h1>
+                <h1 id="browse-heading">Browse Documents</h1>
                 <p>Explore the complete archive by category</p>
-                <img src="/static/logo1.png?v=1" alt="Epstein Files Public Archive" class="browse-logo" />
+                <img src="/static/logo1.png?v=1" alt="" class="browse-logo" />
             </div>
-            
-            <div class="browse-filters">
+
+            <div class="browse-filters" role="group" aria-label="Browse filters">
                 <div class="filename-search">
-                    <input type="text" id="browse-filename" placeholder="🔍 Search by filename..." />
+                    <label for="browse-filename" class="sr-only">Search by filename</label>
+                    <input type="text" id="browse-filename" placeholder="🔍 Search by filename..." autocomplete="off" />
                 </div>
-                <select id="browse-keyword">
+                <select id="browse-keyword" aria-label="Topic">
                     <option value="">All Topics</option>
                     <!-- Keywords are loaded dynamically from /api/keywords -->
                 </select>
-                <select id="browse-category">
+                <select id="browse-category" aria-label="File set">
                     <option value="">All File Sets</option>
                 </select>
-                <select id="browse-subcategory" style="display: none;">
+                <select id="browse-subcategory" class="hidden" aria-label="Section">
                     <option value="">All Sections</option>
                 </select>
-                <select id="browse-file-type">
+                <select id="browse-file-type" aria-label="File type">
                     <option value="">All File Types</option>
                     <option value="pdf">📄 PDF Documents</option>
                     <option value="document">📄 Scanned Documents</option>
@@ -392,53 +425,55 @@
                     <option value="video">🎬 Video</option>
                 </select>
                 <div class="exclude-dropdown-container">
-                    <button id="browse-exclude-toggle" class="exclude-toggle-btn">
-                        Exclude ▼
+                    <button type="button" id="browse-exclude-toggle" class="exclude-toggle-btn" data-popover aria-expanded="false" aria-controls="browse-exclude-menu">
+                        Exclude <span aria-hidden="true">▼</span>
                     </button>
-                    <div id="browse-exclude-menu" class="exclude-menu hidden">
+                    <div id="browse-exclude-menu" class="exclude-menu hidden" role="group" aria-label="File sets to exclude">
                         <div id="browse-exclude-options" class="exclude-options"></div>
-                        <button type="button" class="clear-exclusions-btn" onclick="clearExclusions()">Clear All</button>
+                        <button type="button" class="clear-exclusions-btn" data-action="clear-exclusions">Clear All</button>
                     </div>
                 </div>
+                <button type="button" id="browse-clear" class="export-btn hidden" data-action="clear-browse-filters">Clear filters</button>
                 <div class="pagination-info">
                     <span id="browse-count"></span>
-                    <button id="export-browse-results" class="export-btn" title="Export all documents to CSV">Export CSV</button>
+                    <button type="button" id="export-browse-results" class="export-btn" title="Export all documents to CSV">Export CSV</button>
                 </div>
             </div>
-            
+
             <div class="ad-slot ad-slot-leaderboard" id="ad-slot-browse-top" data-ad-slot="browse-top" aria-hidden="true"></div>
 
-            <div id="documents-grid" class="documents-grid"></div>
-            
-            <div class="pagination">
-                <button id="prev-page" class="page-btn" disabled>← Previous</button>
+            <div id="documents-grid" class="documents-grid" aria-busy="false"></div>
+
+            <nav class="pagination" aria-label="Browse pages">
+                <button type="button" id="prev-page" class="page-btn" disabled>← Previous</button>
                 <span id="page-info"></span>
                 <span class="go-to-page">
                     <label for="browse-page-input">Go to page</label>
-                    <input type="number" id="browse-page-input" min="1" />
+                    <input type="number" id="browse-page-input" min="1" inputmode="numeric" />
                     <button type="button" id="browse-go-page" class="page-btn">Go</button>
                 </span>
-                <button id="next-page" class="page-btn">Next →</button>
-            </div>
+                <button type="button" id="next-page" class="page-btn">Next →</button>
+            </nav>
         </section>
 
         <!-- Ask AI View -->
-        <section id="ask-view" class="view">
+        <section id="ask-view" class="view" aria-labelledby="ask-heading">
             <div class="ask-header">
-                <h1>Ask the AI Assistant</h1>
+                <h1 id="ask-heading">Ask the AI Assistant</h1>
                 <p>Get intelligent answers powered by document analysis</p>
-                <div id="llm-status" class="llm-status"></div>
+                <div id="llm-status" class="llm-status" role="status"></div>
             </div>
             
             <div class="ai-disclaimer">
-                <span class="disclaimer-icon">⚠️</span>
+                <span class="disclaimer-icon" aria-hidden="true">⚠️</span>
                 <span class="disclaimer-text"><strong>Disclaimer:</strong> AI responses may be inaccurate or incomplete. Always verify information by checking the original source documents.</span>
             </div>
             
             <div class="ask-container">
                 <div class="ask-input-container">
+                    <label for="ask-input" class="sr-only">Your question</label>
                     <textarea id="ask-input" placeholder="Ask a question about the documents... e.g., 'Who are the individuals mentioned in the flight logs?' or 'What did the DOJ report conclude?'"></textarea>
-                    <button id="ask-btn" class="ask-btn">
+                    <button type="button" id="ask-btn" class="ask-btn">
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                             <path d="M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z"/>
                         </svg>
@@ -446,7 +481,7 @@
                     </button>
                 </div>
                 
-                <div id="ask-response" class="ask-response hidden">
+                <div id="ask-response" class="ask-response hidden" aria-live="polite">
                     <div class="response-content">
                         <h3>Answer</h3>
                         <div id="answer-text"></div>
@@ -462,19 +497,19 @@
                 <div class="example-questions">
                     <h4>Example Questions</h4>
                     <div class="example-grid">
-                        <button class="example-btn">Who appears most frequently in the flight logs?</button>
-                        <button class="example-btn">What were the findings of the OIG report?</button>
-                        <button class="example-btn">What properties are mentioned in the documents?</button>
-                        <button class="example-btn">What dates are significant in the court records?</button>
+                        <button type="button" class="example-btn">Who appears most frequently in the flight logs?</button>
+                        <button type="button" class="example-btn">What were the findings of the OIG report?</button>
+                        <button type="button" class="example-btn">What properties are mentioned in the documents?</button>
+                        <button type="button" class="example-btn">What dates are significant in the court records?</button>
                     </div>
                 </div>
             </div>
         </section>
 
         <!-- About View -->
-        <section id="about-view" class="view">
+        <section id="about-view" class="view" aria-labelledby="about-heading">
             <div class="about-content">
-                <h1>About This Archive</h1>
+                <h1 id="about-heading">About This Archive</h1>
 
                 <div class="about-logo">
                     <img src="/static/logo1-about.png?v=1" alt="Epstein Files Public Archive logo" width="280" height="280">
@@ -550,7 +585,7 @@
                     <p>This platform does not endorse or promote any narrative, theory, or interpretation. It exists solely to make public records searchable, verifiable, and preserved exactly as released.</p>
                 </div>
                 
-                <div class="about-section affiliate-section" id="affiliate-section" style="display:none;">
+                <div class="about-section affiliate-section hidden" id="affiliate-section">
                     <h2>Further Reading</h2>
                     <p>Books, documentaries, and longform investigations that go deeper than the primary-source documents alone.</p>
                     <div class="affiliate-strip" id="affiliate-strip">
@@ -612,9 +647,9 @@
         </section>
 
         <!-- Privacy Policy View -->
-        <section id="privacy-view" class="view">
+        <section id="privacy-view" class="view" aria-labelledby="privacy-heading">
             <div class="about-content">
-                <h1>Privacy Policy</h1>
+                <h1 id="privacy-heading">Privacy Policy</h1>
                 <p class="privacy-updated"><em>Last updated: May 31, 2026</em></p>
 
                 <div class="about-section">
@@ -708,71 +743,76 @@
         <!-- Document Modal -->
         <div id="document-modal" class="modal hidden">
             <div class="modal-backdrop"></div>
-            <div class="modal-content">
-                <button class="modal-close">&times;</button>
+            <div class="modal-content" role="dialog" aria-modal="true" aria-labelledby="modal-title" tabindex="-1">
+                <button type="button" class="modal-close" aria-label="Close document">&times;</button>
                 <div class="modal-header">
                     <h2 id="modal-title"></h2>
                     <div id="modal-meta" class="modal-meta"></div>
+                    <div id="modal-alteration" class="modal-alteration hidden"></div>
                 </div>
                 <div class="modal-body">
+                    <div id="modal-state" class="modal-state" role="status" aria-live="polite"></div>
                     <div class="modal-tabs">
-                        <button class="modal-tab active" data-tab="document">Document</button>
-                        <button class="modal-tab" data-tab="content">Text Content</button>
-                        <button class="modal-tab" data-tab="summary">AI Summary</button>
-                        
-                        <a id="doj-original-link" class="modal-tab doj-link" href="#" target="_blank" rel="noopener noreferrer" style="display: none;">
-                            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
+                        <div class="modal-tablist" role="tablist" aria-label="Document views">
+                            <button type="button" role="tab" class="modal-tab active" id="tab-document" data-tab="document" aria-selected="true" aria-controls="modal-document-tab">Document</button>
+                            <button type="button" role="tab" class="modal-tab" id="tab-content" data-tab="content" aria-selected="false" aria-controls="modal-content-tab" tabindex="-1">Text Content</button>
+                            <button type="button" role="tab" class="modal-tab" id="tab-summary" data-tab="summary" aria-selected="false" aria-controls="modal-summary-tab" tabindex="-1">AI Summary</button>
+                        </div>
+
+                        <a id="doj-original-link" class="modal-tab doj-link hidden" href="#" target="_blank" rel="noopener noreferrer">
+                            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
                                 <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>
                                 <polyline points="15 3 21 3 21 9"/>
                                 <line x1="10" y1="14" x2="21" y2="3"/>
                             </svg>
-                            View Original
+                            <span><span class="doj-prefix">View </span>Original</span>
+                            <span class="sr-only">(opens in a new tab)</span>
                         </a>
-                        
+
                         <div class="share-dropdown">
-                            <button class="share-btn" id="share-btn" aria-label="Share document">
-                                <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2">
+                            <button type="button" class="share-btn" id="share-btn" aria-label="Share document" aria-haspopup="menu" aria-expanded="false" aria-controls="share-menu">
+                                <svg aria-hidden="true" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2">
                                     <circle cx="18" cy="5" r="3"/>
                                     <circle cx="6" cy="12" r="3"/>
                                     <circle cx="18" cy="19" r="3"/>
                                     <path d="M8.59 13.51l6.83 3.98M15.41 6.51l-6.82 3.98"/>
                                 </svg>
-                                Share
+                                <span class="share-btn-label">Share</span>
                             </button>
-                            <div class="share-menu hidden" id="share-menu">
-                                <button class="share-option" data-platform="facebook">
-                                    <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor">
+                            <div class="share-menu hidden" id="share-menu" role="menu" aria-label="Share document">
+                                <button type="button" class="share-option" role="menuitem" data-platform="facebook">
+                                    <svg aria-hidden="true" viewBox="0 0 24 24" width="18" height="18" fill="currentColor">
                                         <path d="M24 12.073c0-6.627-5.373-12-12-12s-12 5.373-12 12c0 5.99 4.388 10.954 10.125 11.854v-8.385H7.078v-3.47h3.047V9.43c0-3.007 1.792-4.669 4.533-4.669 1.312 0 2.686.235 2.686.235v2.953H15.83c-1.491 0-1.956.925-1.956 1.874v2.25h3.328l-.532 3.47h-2.796v8.385C19.612 23.027 24 18.062 24 12.073z"/>
                                     </svg>
                                     Facebook
                                 </button>
-                                <button class="share-option" data-platform="twitter">
-                                    <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor">
+                                <button type="button" class="share-option" role="menuitem" data-platform="twitter">
+                                    <svg aria-hidden="true" viewBox="0 0 24 24" width="18" height="18" fill="currentColor">
                                         <path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z"/>
                                     </svg>
                                     X (Twitter)
                                 </button>
-                                <button class="share-option" data-platform="linkedin">
-                                    <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor">
+                                <button type="button" class="share-option" role="menuitem" data-platform="linkedin">
+                                    <svg aria-hidden="true" viewBox="0 0 24 24" width="18" height="18" fill="currentColor">
                                         <path d="M20.447 20.452h-3.554v-5.569c0-1.328-.027-3.037-1.852-3.037-1.853 0-2.136 1.445-2.136 2.939v5.667H9.351V9h3.414v1.561h.046c.477-.9 1.637-1.85 3.37-1.85 3.601 0 4.267 2.37 4.267 5.455v6.286zM5.337 7.433c-1.144 0-2.063-.926-2.063-2.065 0-1.138.92-2.063 2.063-2.063 1.14 0 2.064.925 2.064 2.063 0 1.139-.925 2.065-2.064 2.065zm1.782 13.019H3.555V9h3.564v11.452zM22.225 0H1.771C.792 0 0 .774 0 1.729v20.542C0 23.227.792 24 1.771 24h20.451C23.2 24 24 23.227 24 22.271V1.729C24 .774 23.2 0 22.222 0h.003z"/>
                                     </svg>
                                     LinkedIn
                                 </button>
-                                <button class="share-option" data-platform="threads">
-                                    <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor">
+                                <button type="button" class="share-option" role="menuitem" data-platform="threads">
+                                    <svg aria-hidden="true" viewBox="0 0 24 24" width="18" height="18" fill="currentColor">
                                         <path d="M12.186 24h-.007c-3.581-.024-6.334-1.205-8.184-3.509C2.35 18.44 1.5 15.586 1.472 12.01v-.017c.03-3.579.879-6.43 2.525-8.482C5.845 1.205 8.6.024 12.18 0h.014c2.746.02 5.043.725 6.826 2.098 1.677 1.29 2.858 3.13 3.509 5.467l-2.04.569c-1.104-3.96-3.898-5.984-8.304-6.015-2.91.022-5.11.936-6.54 2.717C4.307 6.504 3.616 8.914 3.589 12c.027 3.086.718 5.496 2.057 7.164 1.43 1.783 3.631 2.698 6.54 2.717 2.623-.02 4.358-.631 5.8-2.045 1.647-1.613 1.618-3.593 1.09-4.798-.31-.71-.873-1.3-1.634-1.75-.192 1.352-.622 2.446-1.284 3.272-.886 1.102-2.14 1.704-3.73 1.79-1.202.065-2.361-.218-3.259-.801-1.063-.689-1.685-1.74-1.752-2.96-.065-1.17.408-2.253 1.332-3.05.857-.74 2.063-1.201 3.583-1.37.999-.111 2.099-.058 3.27.157.018-.858-.087-1.594-.313-2.185-.323-.84-.947-1.462-1.854-1.85-1.102-.47-2.57-.514-4.122-.124l-.538-1.962c2.005-.504 3.943-.423 5.457.228 1.308.564 2.273 1.525 2.788 2.78.472 1.148.555 2.509.249 4.053l-.055.27c1.205.652 2.144 1.546 2.678 2.575.716 1.379.891 3.2.488 5.118-.476 2.268-1.873 4.166-3.93 5.342C17.642 23.42 15.063 24 12.186 24zm.088-7.874c1.035-.057 1.83-.451 2.364-1.172.39-.525.663-1.21.82-2.054-.93-.178-1.819-.227-2.643-.146-1.129.112-1.993.43-2.496.92-.346.337-.51.737-.48 1.187.037.61.398 1.108 1.02 1.403.517.245 1.16.358 1.792.358l-.377-.496z"/>
                                     </svg>
                                     Threads
                                 </button>
-                                <button class="share-option" data-platform="email">
-                                    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2">
+                                <button type="button" class="share-option" role="menuitem" data-platform="email">
+                                    <svg aria-hidden="true" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2">
                                         <rect x="2" y="4" width="20" height="16" rx="2"/>
                                         <path d="M22 4l-10 8L2 4"/>
                                     </svg>
                                     Email
                                 </button>
-                                <button class="share-option" data-platform="copy">
-                                    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2">
+                                <button type="button" class="share-option" role="menuitem" data-platform="copy">
+                                    <svg aria-hidden="true" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2">
                                         <rect x="9" y="9" width="13" height="13" rx="2" ry="2"/>
                                         <path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/>
                                     </svg>
@@ -781,9 +821,9 @@
                             </div>
                         </div>
                     </div>
-                    <div id="modal-document-tab" class="tab-content active">
+                    <div id="modal-document-tab" class="tab-content active" role="tabpanel" aria-labelledby="tab-document">
                         <div id="modal-pdf-viewer" class="pdf-viewer">
-                            <button id="pdf-fullscreen-btn" class="pdf-fullscreen-btn" title="Toggle Fullscreen">
+                            <button type="button" id="pdf-fullscreen-btn" class="pdf-fullscreen-btn" title="Toggle Fullscreen" aria-label="Toggle fullscreen" aria-pressed="false">
                                 <svg class="fullscreen-enter" xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                                     <path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3"></path>
                                 </svg>
@@ -791,7 +831,7 @@
                                     <path d="M8 3v3a2 2 0 0 1-2 2H3m18 0h-3a2 2 0 0 1-2-2V3m0 18v-3a2 2 0 0 1 2-2h3M3 16h3a2 2 0 0 1 2 2v3"></path>
                                 </svg>
                             </button>
-                            <iframe id="pdf-iframe" src="" frameborder="0" scrolling="yes" allow="fullscreen"></iframe>
+                            <iframe id="pdf-iframe" title="Document preview" src="" scrolling="yes" allow="fullscreen"></iframe>
                             <div id="media-viewer" class="media-viewer hidden"></div>
                             <div id="pdf-fallback" class="pdf-fallback hidden">
                                 <p>📄 Preview not available</p>
@@ -799,14 +839,14 @@
                             </div>
                         </div>
                         <div id="document-navigation" class="document-navigation hidden">
-                            <button id="doc-prev-btn" class="doc-nav-btn" disabled>
+                            <button type="button" id="doc-prev-btn" class="doc-nav-btn" aria-label="Previous document" disabled>
                                 <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2">
                                     <path d="M19 12H5M12 19l-7-7 7-7"/>
                                 </svg>
                                 <span>Previous</span>
                             </button>
-                            <span id="doc-nav-info" class="doc-nav-info">1 of 1</span>
-                            <button id="doc-next-btn" class="doc-nav-btn" disabled>
+                            <span id="doc-nav-info" class="doc-nav-info" aria-live="polite">1 of 1</span>
+                            <button type="button" id="doc-next-btn" class="doc-nav-btn" aria-label="Next document" disabled>
                                 <span>Next</span>
                                 <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2">
                                     <path d="M5 12h14M12 5l7 7-7 7"/>
@@ -814,20 +854,20 @@
                             </button>
                         </div>
                     </div>
-                    <div id="modal-content-tab" class="tab-content">
+                    <div id="modal-content-tab" class="tab-content" role="tabpanel" aria-labelledby="tab-content" tabindex="0">
                         <div class="modal-ocr-disclaimer" role="note">
-                            <span class="disclaimer-icon">&#9888;</span>
+                            <span class="disclaimer-icon" aria-hidden="true">&#9888;</span>
                             <p>This text was extracted using OCR and may contain errors, especially for handwritten content, photographs of documents, or poor-quality scans. Refer to the <strong>Document</strong> tab for the original source.</p>
                         </div>
                         <div id="modal-text" class="modal-text"></div>
                     </div>
-                    <div id="modal-summary-tab" class="tab-content">
+                    <div id="modal-summary-tab" class="tab-content" role="tabpanel" aria-labelledby="tab-summary" tabindex="0">
                         <div class="modal-ocr-disclaimer" role="note">
-                            <span class="disclaimer-icon">&#9888;</span>
+                            <span class="disclaimer-icon" aria-hidden="true">&#9888;</span>
                             <p>This summary was generated by AI and may contain inaccuracies, hallucinations, or misinterpretations of the source material. Always verify claims against the original document in the <strong>Document</strong> tab.</p>
                         </div>
                         <div id="modal-summary" class="modal-summary">
-                            <p class="loading">Generating summary...</p>
+                            <p class="loading">Open this tab to generate an AI summary.</p>
                         </div>
                     </div>
                 </div>
@@ -837,10 +877,10 @@
         <!-- Export CSV Modal -->
         <div id="export-modal" class="modal hidden">
             <div class="modal-backdrop"></div>
-            <div class="modal-content export-modal-content">
-                <button class="modal-close" id="export-modal-close">&times;</button>
+            <div class="modal-content export-modal-content" role="dialog" aria-modal="true" aria-labelledby="export-modal-title" tabindex="-1">
+                <button type="button" class="modal-close" id="export-modal-close" aria-label="Close export dialog">&times;</button>
                 <div class="modal-header">
-                    <h2>Export CSV</h2>
+                    <h2 id="export-modal-title">Export CSV</h2>
                 </div>
                 <div class="export-modal-body">
                     <p>Choose what to include in the export:</p>
@@ -854,8 +894,8 @@
                         </label>
                     </div>
                     <div class="export-modal-actions">
-                        <button id="export-modal-cancel" class="export-modal-btn cancel">Cancel</button>
-                        <button id="export-modal-confirm" class="export-modal-btn confirm">Export</button>
+                        <button type="button" id="export-modal-cancel" class="export-modal-btn cancel">Cancel</button>
+                        <button type="button" id="export-modal-confirm" class="export-modal-btn confirm">Export</button>
                     </div>
                 </div>
             </div>
@@ -863,9 +903,9 @@
 
         <!-- Donate Modal -->
         <div id="donate-modal" class="modal hidden">
-            <div class="modal-backdrop" onclick="closeDonateModal()"></div>
-            <div class="modal-content donate-modal-content">
-                <button class="modal-close" onclick="closeDonateModal()" aria-label="Close">&times;</button>
+            <div class="modal-backdrop" data-action="close-donate"></div>
+            <div class="modal-content donate-modal-content" role="dialog" aria-modal="true" aria-labelledby="donate-modal-title" aria-describedby="donate-modal-subtitle" tabindex="-1">
+                <button type="button" class="modal-close" data-action="close-donate" aria-label="Close donation dialog">&times;</button>
                 <div class="modal-header">
                     <h2 id="donate-modal-title">Help Keep the Archive Free</h2>
                     <p id="donate-modal-subtitle" class="donate-modal-subtitle">You&rsquo;ve been digging through the documents &mdash; thank you. The server bill grows with the archive. A small donation keeps this online and ad-light for everyone.</p>
@@ -885,15 +925,15 @@
                     <p>This archive is maintained through public donations. Your support helps cover server costs and keeps this information freely accessible.</p>
 
                     <div class="donate-panel" id="donate-panel">
-                        <div class="donate-tabs" role="tablist">
-                            <button type="button" class="donate-tab active" data-donate-tab="paypal" role="tab" aria-selected="true">PayPal</button>
-                            <button type="button" class="donate-tab" data-donate-tab="card" role="tab" aria-selected="false">Stripe</button>
-                            <button type="button" class="donate-tab" data-donate-tab="crypto" role="tab" aria-selected="false">Crypto</button>
-                            <button type="button" class="donate-tab" data-donate-tab="github" role="tab" aria-selected="false">GitHub</button>
-                            <button type="button" class="donate-tab" data-donate-tab="kofi" role="tab" aria-selected="false">Ko-fi</button>
+                        <div class="donate-tabs" role="tablist" aria-label="Ways to donate">
+                            <button type="button" class="donate-tab active" id="donate-tab-paypal" data-donate-tab="paypal" role="tab" aria-selected="true" aria-controls="donate-panel-paypal">PayPal</button>
+                            <button type="button" class="donate-tab" id="donate-tab-card" data-donate-tab="card" role="tab" aria-selected="false" aria-controls="donate-panel-card" tabindex="-1">Stripe</button>
+                            <button type="button" class="donate-tab" id="donate-tab-crypto" data-donate-tab="crypto" role="tab" aria-selected="false" aria-controls="donate-panel-crypto" tabindex="-1">Crypto</button>
+                            <button type="button" class="donate-tab" id="donate-tab-github" data-donate-tab="github" role="tab" aria-selected="false" aria-controls="donate-panel-github" tabindex="-1">GitHub</button>
+                            <button type="button" class="donate-tab" id="donate-tab-kofi" data-donate-tab="kofi" role="tab" aria-selected="false" aria-controls="donate-panel-kofi" tabindex="-1">Ko-fi</button>
                         </div>
 
-                        <div class="donate-tab-panel active" data-donate-panel="paypal">
+                        <div class="donate-tab-panel active" id="donate-panel-paypal" role="tabpanel" aria-labelledby="donate-tab-paypal" data-donate-panel="paypal">
                             <p class="donate-panel-desc">One-time or recurring donations via PayPal. No PayPal account required &mdash; debit/credit cards accepted on the PayPal page.</p>
                             <form action="https://www.paypal.com/donate" method="post" target="_blank" rel="noopener noreferrer">
                                 <input type="hidden" name="business" value="KRYTAPVDR46SY" />
@@ -909,17 +949,17 @@
                             </form>
                         </div>
 
-                        <div class="donate-tab-panel" data-donate-panel="card">
+                        <div class="donate-tab-panel" id="donate-panel-card" role="tabpanel" aria-labelledby="donate-tab-card" data-donate-panel="card">
                             <p class="donate-panel-desc">Pay with any debit or credit card via Stripe. Pick an amount below.</p>
                             <div class="donate-amount-grid" id="stripe-amount-grid">
                                 <!-- Populated by app.js with links from DONATE_CONFIG.stripe -->
                             </div>
-                            <p class="donate-panel-fineprint" id="stripe-fineprint" style="display:none;">Card payments not configured yet.</p>
+                            <p class="donate-panel-fineprint hidden" id="stripe-fineprint">Card payments not configured yet.</p>
                         </div>
 
-                        <div class="donate-tab-panel" data-donate-panel="crypto">
+                        <div class="donate-tab-panel" id="donate-panel-crypto" role="tabpanel" aria-labelledby="donate-tab-crypto" data-donate-panel="crypto">
                             <p class="donate-panel-desc">Pay with crypto via Crypto.com Pay, or send directly to one of the wallets below.</p>
-                            <a id="crypto-pay-link" class="donate-btn crypto-btn" href="#" target="_blank" rel="noopener noreferrer" style="display:none;">
+                            <a id="crypto-pay-link" class="donate-btn crypto-btn hidden" href="#" target="_blank" rel="noopener noreferrer">
                                 <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M12 0 2 6v12l10 6 10-6V6L12 0zm0 2.31 7.92 4.75L12 11.81 4.08 7.06 12 2.31zM4 8.69l7 4.2v8.2l-7-4.2v-8.2zm9 12.4v-8.2l7-4.2v8.2l-7 4.2z"/></svg>
                                 Pay with Crypto.com
                             </a>
@@ -929,7 +969,7 @@
                             <p class="donate-panel-fineprint">Send only the matching coin to each address. Wrong-chain transfers cannot be recovered.</p>
                         </div>
 
-                        <div class="donate-tab-panel" data-donate-panel="github">
+                        <div class="donate-tab-panel" id="donate-panel-github" role="tabpanel" aria-labelledby="donate-tab-github" data-donate-panel="github">
                             <p class="donate-panel-desc">For developers, journalists, and researchers who use the open-source code. Recurring monthly tiers available.</p>
                             <a id="github-sponsors-link" class="donate-btn github-btn" href="https://github.com/sponsors/l0lsec" target="_blank" rel="noopener noreferrer">
                                 <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M12 .297c-6.63 0-12 5.373-12 12 0 5.303 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61C4.422 18.07 3.633 17.7 3.633 17.7c-1.087-.744.084-.729.084-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.399 3-.405 1.02.006 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 22.092 24 17.592 24 12.297c0-6.627-5.373-12-12-12"/></svg>
@@ -937,9 +977,9 @@
                             </a>
                         </div>
 
-                        <div class="donate-tab-panel" data-donate-panel="kofi">
+                        <div class="donate-tab-panel" id="donate-panel-kofi" role="tabpanel" aria-labelledby="donate-tab-kofi" data-donate-panel="kofi">
                             <p class="donate-panel-desc">Buy us a coffee &mdash; the fastest way to make a one-time donation.</p>
-                            <a id="kofi-link" class="donate-btn kofi-btn" href="#" target="_blank" rel="noopener noreferrer" style="display:none;">
+                            <a id="kofi-link" class="donate-btn kofi-btn hidden" href="#" target="_blank" rel="noopener noreferrer">
                                 <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M23.881 8.948c-.773-4.085-4.859-4.593-4.859-4.593H.723c-.604 0-.679.798-.679.798s-.082 7.324-.022 11.822c.164 2.424 2.586 2.672 2.586 2.672s8.267-.023 11.966-.049c2.438-.426 2.683-2.566 2.658-3.734 4.352.24 7.422-2.831 6.649-6.916zm-11.062 3.511c-1.246 1.453-4.011 3.976-4.011 3.976s-.121.119-.31.023c-.076-.057-.108-.09-.108-.09-.443-.441-3.368-3.049-4.034-3.954-.709-.965-1.041-2.7-.091-3.71.951-1.01 3.005-1.086 4.363.407 0 0 1.565-1.782 3.468-.963 1.904.82 1.832 3.011.723 4.311zm6.173.478c-.928.116-1.682.028-1.682.028V7.284h1.77s1.971.551 1.971 2.638c0 1.913-.985 2.667-2.059 3.015z"/></svg>
                                 Support on Ko-fi
                             </a>
@@ -956,12 +996,13 @@
                     <p>Found an issue? Have a suggestion? We'd love to hear from you.</p>
                     <form id="feedback-form" class="feedback-form">
                         <!-- Honeypot field - hidden from humans, bots will fill it -->
-                        <div class="form-group" style="position:absolute;left:-9999px;opacity:0;height:0;overflow:hidden;" aria-hidden="true">
-                            <input type="text" id="feedback-website" name="website" tabindex="-1" autocomplete="off">
+                        <div class="form-group hp-field" aria-hidden="true">
+                            <input type="text" id="feedback-website" class="hp-input" name="website" tabindex="-1" autocomplete="off">
                         </div>
                         <input type="hidden" id="feedback-timestamp" value="">
-                        
+
                         <div class="form-group">
+                            <label class="field-label" for="feedback-type">Feedback type</label>
                             <select id="feedback-type" required>
                                 <option value="">Select feedback type...</option>
                                 <option value="bug">🐛 Bug Report</option>
@@ -972,19 +1013,22 @@
                             </select>
                         </div>
                         <div class="form-group">
-                            <input type="email" id="feedback-email" placeholder="Your email" required>
+                            <label class="field-label" for="feedback-email">Your email</label>
+                            <input type="email" id="feedback-email" placeholder="you@example.com" autocomplete="email" required>
                         </div>
                         <div class="form-group">
+                            <label class="field-label" for="feedback-message">Your message</label>
                             <textarea id="feedback-message" placeholder="Your message..." rows="3" required></textarea>
                         </div>
-                        <button type="button" class="feedback-btn" onclick="submitFeedback()">
-                            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2">
+                        <button type="submit" class="feedback-btn">
+                            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
                                 <path d="M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z"/>
                             </svg>
                             Submit Feedback
                         </button>
                     </form>
-                    <div id="feedback-status" class="feedback-status hidden"></div>
+                    <div id="feedback-status" class="feedback-status hidden" role="status"></div>
+                    <p class="recaptcha-disclosure">This site is protected by reCAPTCHA and the Google <a href="https://policies.google.com/privacy" target="_blank" rel="noopener noreferrer">Privacy Policy</a> and <a href="https://policies.google.com/terms" target="_blank" rel="noopener noreferrer">Terms of Service</a> apply.</p>
                 </div>
             </div>
         </div>
@@ -992,9 +1036,9 @@
             <img src="/static/logo1.png?v=1" alt="Epstein Files Public Archive" class="footer-logo" />
             <p>Epstein Files Public Archive</p>
             <nav class="footer-links">
-                <a href="#" class="footer-link" onclick="switchView('about'); window.scrollTo(0,0); return false;">About</a>
+                <a href="/?view=about" class="footer-link" data-action="goto-view" data-view="about">About</a>
                 <span class="footer-link-sep">&middot;</span>
-                <a href="#" class="footer-link" onclick="switchView('privacy'); window.scrollTo(0,0); return false;">Privacy Policy</a>
+                <a href="/?view=privacy" class="footer-link" data-action="goto-view" data-view="privacy">Privacy Policy</a>
             </nav>
             <div class="share-bar share-bar-footer">
                 <span class="share-bar-label">Share:</span>
@@ -1012,41 +1056,46 @@
                 <span class="share-bar-sep">·</span>
                 <a class="share-bar-link" href="mailto:?subject=Epstein%20Files%20Public%20Archive&amp;body=Search%20court%20records%2C%20flight%20logs%2C%20and%20DOJ%20disclosures%20from%20the%20Epstein%20Files%20%E2%80%94%20free%20%26%20open%20source.%0A%0Ahttps%3A%2F%2Fepsteinfta.com" rel="noopener">Email</a>
                 <span class="share-bar-sep">·</span>
-                <a class="share-bar-link" href="#" onclick="var el=this;copyToClipboard('https://epsteinfta.com').then(function(){var s=el.nextElementSibling;s.style.opacity='1';setTimeout(function(){s.style.opacity='0'},1500)});return false;">Copy link</a><span class="share-bar-copied">Copied</span>
+                <button type="button" class="share-bar-link share-bar-copy" data-action="copy-site-link">Copy link</button><span class="share-bar-copied" role="status"></span>
             </div>
         </div>
     </footer>
 
     <!-- Public before/after compare for DOJ-altered documents -->
     <div id="public-compare-modal" class="modal hidden">
-        <div class="modal-backdrop" onclick="closePublicCompare()"></div>
-        <div class="modal-content" style="max-width:1400px;width:97%;height:92vh;display:flex;flex-direction:column;">
-            <div class="modal-header" style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;">
-                <h2 id="public-compare-title" style="font-size:1rem;margin:0;">What changed</h2>
-                <div style="display:flex;gap:6px;align-items:center;">
-                    <button class="btn-compare-tab active" id="public-compare-tab-visual" onclick="switchPublicCompareTab('visual')" style="cursor:pointer;border:1px solid var(--border,#333);background:transparent;color:inherit;border-radius:6px;padding:4px 10px;">Side-by-side</button>
-                    <button class="btn-compare-tab" id="public-compare-tab-text" onclick="switchPublicCompareTab('text')" style="cursor:pointer;border:1px solid var(--border,#333);background:transparent;color:inherit;border-radius:6px;padding:4px 10px;">Text diff</button>
-                    <button class="modal-close" onclick="closePublicCompare()" style="position:static;">&times;</button>
+        <div class="modal-backdrop" data-action="close-compare"></div>
+        <div class="modal-content compare-modal-content" role="dialog" aria-modal="true" aria-labelledby="public-compare-title" tabindex="-1">
+            <div class="modal-header compare-header">
+                <h2 id="public-compare-title" class="compare-title">What changed</h2>
+                <div class="compare-tabs" role="tablist" aria-label="Comparison views">
+                    <button type="button" role="tab" class="compare-tab active" id="public-compare-tab-visual" aria-selected="true" aria-controls="public-compare-body" data-action="compare-tab" data-tab="visual">Side-by-side</button>
+                    <button type="button" role="tab" class="compare-tab" id="public-compare-tab-text" aria-selected="false" aria-controls="public-compare-body" tabindex="-1" data-action="compare-tab" data-tab="text">Text diff</button>
                 </div>
+                <button type="button" class="modal-close" data-action="close-compare" aria-label="Close comparison">&times;</button>
             </div>
-            <div class="modal-body" id="public-compare-body" style="flex:1;min-height:0;display:flex;padding:0;background:var(--bg-tertiary,#111);"></div>
+            <div class="modal-body compare-body" id="public-compare-body" role="tabpanel"></div>
         </div>
     </div>
 
     <!-- Public gallery of all exposed (DOJ-altered) documents -->
     <div id="altered-gallery-modal" class="modal hidden">
-        <div class="modal-backdrop" onclick="closeAlteredGallery()"></div>
-        <div class="modal-content" style="max-width:1100px;width:95%;height:88vh;display:flex;flex-direction:column;">
-            <div class="modal-header" style="display:flex;align-items:center;justify-content:space-between;">
-                <h2 style="margin:0;font-size:1.05rem;">🚩 Altered by DOJ — full list</h2>
-                <button class="modal-close" onclick="closeAlteredGallery()" style="position:static;">&times;</button>
+        <div class="modal-backdrop" data-action="close-gallery"></div>
+        <div class="modal-content gallery-modal-content" role="dialog" aria-modal="true" aria-labelledby="altered-gallery-title" tabindex="-1">
+            <div class="modal-header gallery-header">
+                <h2 id="altered-gallery-title" class="gallery-title">🚩 Altered by DOJ — full list</h2>
+                <button type="button" class="modal-close" data-action="close-gallery" aria-label="Close list">&times;</button>
             </div>
-            <div class="modal-body" id="altered-gallery-body" style="flex:1;min-height:0;overflow:auto;padding:0;"></div>
+            <div class="modal-body gallery-body" id="altered-gallery-body"></div>
         </div>
     </div>
 
-    <script src="https://www.google.com/recaptcha/api.js?render=6Lf9EDYsAAAAANDlA_xYFIM7Ylccgmc24LhZgDIr" async defer onerror="window.__recaptchaFailed=true"></script>
-    <script src="/static/app.js?v=52"></script>
+    <!-- Live regions + toasts (kept active while a dialog makes the rest of the page inert) -->
+    <div id="a11y-status" class="sr-only" role="status" aria-live="polite" aria-atomic="true" data-keep-active></div>
+    <div id="a11y-alert" class="sr-only" role="alert" aria-live="assertive" aria-atomic="true" data-keep-active></div>
+    <div id="toast-region" class="toast-region" role="region" aria-label="Notifications" data-keep-active></div>
+
+    <script src="https://www.google.com/recaptcha/api.js?render=6Lf9EDYsAAAAANDlA_xYFIM7Ylccgmc24LhZgDIr" async defer></script>
+    <script src="/static/app.js?v=53"></script>
 </body>
 </html>
 

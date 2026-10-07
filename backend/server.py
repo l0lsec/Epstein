@@ -735,8 +735,70 @@ class SearchRequest(BaseModel):
     file_type: Optional[str] = None  # "pdf", "document", "image", "audio", "video"
     date_from: Optional[str] = None  # YYYY-MM-DD format
     date_to: Optional[str] = None    # YYYY-MM-DD format
+    # Category names to leave out of results, totals and facets (e.g. the UI's
+    # "Exclude file sets" preference). Applied server-side so pagination stays correct.
+    exclude_categories: Optional[List[str]] = None
     limit: int = 50  # Results per page (unlimited total via pagination)
     offset: int = 0
+
+
+# Defensive caps for the "exclude these categories" filter (query string / request body).
+_MAX_EXCLUDE_CATEGORIES = 50
+_MAX_EXCLUDE_CATEGORY_LEN = 200
+
+
+def _sanitize_exclude_categories(values) -> Optional[List[str]]:
+    """Normalize a client-supplied category-exclusion list.
+
+    Keeps only non-blank strings of at most _MAX_EXCLUDE_CATEGORY_LEN characters,
+    drops duplicates (first occurrence wins, order preserved) and keeps at most
+    _MAX_EXCLUDE_CATEGORIES entries. Returns None when nothing usable remains so
+    callers can treat "no exclusions" uniformly. Values are bound as SQL parameters
+    downstream; this is only input hygiene, not escaping.
+    """
+    if not values:
+        return None
+    if isinstance(values, str):
+        values = [values]
+    cleaned: List[str] = []
+    for v in values:
+        if not isinstance(v, str):
+            continue
+        if not v.strip() or len(v) > _MAX_EXCLUDE_CATEGORY_LEN:
+            continue
+        if v in cleaned:
+            continue
+        cleaned.append(v)
+        if len(cleaned) >= _MAX_EXCLUDE_CATEGORIES:
+            break
+    return cleaned or None
+
+
+def _semantic_candidate_allowed(doc: dict, exclude_categories=None, subcategory=None,
+                                file_type=None, date_from=None, date_to=None) -> bool:
+    """Apply the same filters the full-text SQL applies to a semantic/hybrid candidate.
+
+    `doc` is the row from db.get_document(). Date bounds are YYYY-MM-DD strings compared
+    lexically exactly like the SQL (document_date >= date_from / <= date_to), and a
+    candidate whose document_date is NULL is dropped when a bound is set (SQL NULL
+    comparison semantics). With no filters set this always returns True.
+    """
+    if exclude_categories and doc.get("category") in exclude_categories:
+        return False
+    if subcategory and doc.get("subcategory") != subcategory:
+        return False
+    if file_type and doc.get("file_type") != file_type:
+        return False
+    if date_from or date_to:
+        doc_date = doc.get("document_date")
+        if doc_date is None:
+            return False
+        doc_date = str(doc_date)
+        if date_from and not doc_date >= date_from:
+            return False
+        if date_to and not doc_date <= date_to:
+            return False
+    return True
 
 
 class AskRequest(BaseModel):
@@ -1496,6 +1558,7 @@ async def search(search_request: SearchRequest, request: Request) -> dict:
     # Parse the query for Boolean operators (for full-text search)
     parsed = parse_boolean_query(search_request.query)
     fts_query = parsed['fts_query']
+    exclude_categories = _sanitize_exclude_categories(search_request.exclude_categories)
     
     def _do_search():
         """Run all search DB work in a thread to avoid blocking the event loop."""
@@ -1512,7 +1575,7 @@ async def search(search_request: SearchRequest, request: Request) -> dict:
                     offset=search_request.offset, category=search_request.category,
                     subcategory=search_request.subcategory, file_type=search_request.file_type,
                     date_from=search_request.date_from, date_to=search_request.date_to,
-                    include_hidden=False
+                    include_hidden=False, exclude_categories=exclude_categories
                 )
                 for r in ft_results:
                     _results.append({**r, "search_type": "fulltext", "score": abs(r.get("score", 0))})
@@ -1529,7 +1592,7 @@ async def search(search_request: SearchRequest, request: Request) -> dict:
                         query=fts_query, category=search_request.category,
                         subcategory=search_request.subcategory, file_type=search_request.file_type,
                         date_from=search_request.date_from, date_to=search_request.date_to,
-                        include_hidden=False
+                        include_hidden=False, exclude_categories=exclude_categories
                     )
                 except sqlite3.OperationalError:
                     _total = len(_results) + search_request.limit
@@ -1548,7 +1611,16 @@ async def search(search_request: SearchRequest, request: Request) -> dict:
                     if not db.is_document_visible(doc_id):
                         continue
                     doc = db.get_document(doc_id, include_full_text=False)
-                    if doc:
+                    # Honor the same filters as full-text (category exclusion, subcategory,
+                    # file type, date range) so semantic/hybrid results are not looser.
+                    if doc and _semantic_candidate_allowed(
+                        doc,
+                        exclude_categories=exclude_categories,
+                        subcategory=search_request.subcategory,
+                        file_type=search_request.file_type,
+                        date_from=search_request.date_from,
+                        date_to=search_request.date_to,
+                    ):
                         text = r.get("text", "")
                         _results.append({
                             "id": doc_id,
@@ -1574,7 +1646,7 @@ async def search(search_request: SearchRequest, request: Request) -> dict:
                     query=fts_query, category=search_request.category,
                     subcategory=search_request.subcategory, file_type=search_request.file_type,
                     date_from=search_request.date_from, date_to=search_request.date_to,
-                    include_hidden=False
+                    include_hidden=False, exclude_categories=exclude_categories
                 )
             except (sqlite3.OperationalError, Exception):
                 pass
@@ -1632,20 +1704,26 @@ async def list_documents(
     file_type: Optional[str] = None,
     filename: Optional[str] = None,
     keyword: Optional[str] = None,
-    search: Optional[str] = None
+    search: Optional[str] = None,
+    exclude_category: Optional[List[str]] = Query(None),
 ):
     """List all documents with pagination (cached for common queries)
     
     Args:
         search: Searches both filename AND subcategory (for admin document search)
+        exclude_category: Repeatable; category names to leave out of results and the total
     
     Note: Hidden documents and hidden categories are excluded from results.
     """
     if not db:
         raise HTTPException(status_code=503, detail="Database not initialized")
     
+    exclude_categories = _sanitize_exclude_categories(exclude_category)
+    # Order-insensitive, unambiguous (JSON) so ["a,b"] can't collide with ["a", "b"]
+    exclude_key = json.dumps(sorted(exclude_categories)) if exclude_categories else ""
+    
     # Create cache key for filtered queries
-    cache_key = f"docs:{limit}:{offset}:{category}:{subcategory}:{file_type}:{keyword}"
+    cache_key = f"docs:{limit}:{offset}:{category}:{subcategory}:{file_type}:{keyword}:{exclude_key}"
     
     # Only cache simple queries (no filename search, no text search)
     can_cache = not filename and not search
@@ -1658,7 +1736,9 @@ async def list_documents(
             return cached
     
     # Unfiltered browse: no category, subcategory, file_type, filename, keyword, search
-    unfiltered = not category and not subcategory and not file_type and not filename and not keyword and not search
+    # (any category exclusion makes it a filtered query: the cached unfiltered total would be wrong)
+    unfiltered = (not category and not subcategory and not file_type and not filename
+                  and not keyword and not search and not exclude_categories)
     
     def _do_browse():
         if unfiltered:
@@ -1673,10 +1753,11 @@ async def list_documents(
             return db.get_all_documents_with_total(
                 limit=limit, offset=offset, category=category, subcategory=subcategory,
                 file_type=file_type, filename=filename, include_hidden=False,
+                exclude_categories=exclude_categories,
             )
         else:
-            _docs = db.get_all_documents(limit=limit, offset=offset, category=category, subcategory=subcategory, file_type=file_type, filename=filename, keyword=keyword, search=search, include_hidden=False)
-            _total = db.count_documents(category=category, subcategory=subcategory, file_type=file_type, filename=filename, keyword=keyword, include_hidden=False)
+            _docs = db.get_all_documents(limit=limit, offset=offset, category=category, subcategory=subcategory, file_type=file_type, filename=filename, keyword=keyword, search=search, include_hidden=False, exclude_categories=exclude_categories)
+            _total = db.count_documents(category=category, subcategory=subcategory, file_type=file_type, filename=filename, keyword=keyword, include_hidden=False, exclude_categories=exclude_categories)
             return _docs, _total
 
     docs, total = await asyncio.to_thread(_do_browse)
@@ -1707,7 +1788,10 @@ async def export_documents(
     keyword: Optional[str] = None,
     search_query: Optional[str] = None,
     search_type: str = "fulltext",
-    include_text: bool = False
+    include_text: bool = False,
+    exclude_category: Optional[List[str]] = Query(None),
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
 ):
     """Export documents as a list for CSV download
     
@@ -1723,6 +1807,9 @@ async def export_documents(
         search_query: Full-text search query
         search_type: Type of search (fulltext, semantic, hybrid)
         include_text: Include extracted text content (caps results at 5,000)
+        exclude_category: Repeatable; category names to leave out of the export
+        date_from: Only documents dated on/after this YYYY-MM-DD (undated documents are dropped)
+        date_to: Only documents dated on/before this YYYY-MM-DD (undated documents are dropped)
     
     Returns:
         JSON with documents array containing filename, category, subcategory,
@@ -1744,7 +1831,9 @@ async def export_documents(
             category=category, subcategory=subcategory,
             file_type=file_type, filename=filename,
             keyword=keyword, search_query=fts_query,
-            include_text=include_text
+            include_text=include_text,
+            exclude_categories=_sanitize_exclude_categories(exclude_category),
+            date_from=date_from, date_to=date_to
         )
         
         return {

@@ -29,37 +29,1426 @@ let state = {
     documentList: [],  // Current list of documents (from search or browse)
     documentIndex: -1,  // Current index within documentList
     // User category exclusion preferences (stored in localStorage)
-    excludedCategories: JSON.parse(localStorage.getItem('excludedCategories') || '[]'),
+    excludedCategories: loadExcludedCategories(),
     // Prefetched first browse page (from bootstrap), consumed once
-    _prefetchedBrowse: null
+    _prefetchedBrowse: null,
+    // URL state / async guards (see ux modules below)
+    restoreSeq: 0,           // newest URL restore wins (Back/Forward during a slow restore)
+    renderedKey: '',         // canonical base-query of what is currently rendered
+    modalPushed: false,      // the open document pushed its own history entry
+    openDocId: null,
+    searchSeq: 0, browseSeq: 0, docSeq: 0,   // drop stale responses
+    ageConfirmed: false,
+    _initialized: false,
+    _delegated: false,
+    askDisabled: false,
+    _subSeq: {},
+    _refocusSearchBtn: false,
+    _ageGateBound: false
 };
 
 // DOM Elements
 const elements = {};
 
+// ---- UX plumbing: constants and shared mutable bits ----------------------------------
+const SITE_URL = 'https://epsteinfta.com';
+const SITE_TITLE = 'Epstein Files Public Archive';
+const DEFAULT_TITLE = 'Epstein Files Public Archive | Public Document Search';
+const SEARCH_DEFAULT_TYPE = 'fulltext';
+const SEARCH_TYPES = ['fulltext', 'hybrid', 'semantic'];
+const SEARCH_TYPE_HINTS = {
+    fulltext: 'Full Text matches your exact words. Best for names, dates and file numbers.',
+    hybrid: 'Hybrid adds AI-found related passages to the exact matches. Slower.',
+    semantic: 'Semantic AI finds passages with a similar meaning, even without your exact words.'
+};
+const FILE_TYPE_LABELS = { pdf: 'PDF Documents', document: 'Scanned Documents', audio: 'Audio', image: 'Images', video: 'Video' };
+const VALID_KINDS = ['pdf', 'document', 'image', 'audio', 'video'];
+const VALID_VIEWS = ['search', 'browse', 'ask', 'about', 'privacy'];
+const VIEW_TITLES = { search: 'Search', browse: 'Browse Documents', ask: 'Ask the AI Assistant', about: 'About This Archive', privacy: 'Privacy Policy' };
+const SEARCH_BTN_HTML = '<span>Search</span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M5 12h14m-7-7l7 7-7 7"/></svg>';
+const ASK_BTN_HTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z"/></svg> Ask Question';
+const MOBILE_QUERY = window.matchMedia ? window.matchMedia('(max-width: 768px)') : { matches: false };
+const REDUCED_MOTION = window.matchMedia ? window.matchMedia('(prefers-reduced-motion: reduce)') : { matches: false };
+const dialogStack = [];
+// Buttons that open a popover (share menus, exclude menu). Disclosures such as Filters/Tips are NOT popovers.
+const _announceQueue = { status: [], alert: [] };
+const _announceTimer = {};
+const POPOVER_BTN = 'button[aria-controls][aria-haspopup], button[aria-controls][data-popover]';
+const POPOVER_OPEN = '[aria-expanded="true"][aria-controls][aria-haspopup], [aria-expanded="true"][data-popover]';
+
+// Every former inline onclick="" is now a data-action handled by one delegated listener.
+const ACTIONS = {
+    'open-donate': (el) => openDonateModal(el.dataset.source),
+    'close-donate': () => closeDonateModal(),
+    'dismiss-banner': () => dismissDonationBanner(),
+    'clear-exclusions': () => clearExclusions(),
+    'goto-view': (el, e) => {
+        if (isModifiedClick(e)) return;
+        e.preventDefault();
+        switchView(el.dataset.view, { userInitiated: true });
+        window.scrollTo({ top: 0, behavior: scrollBehavior() });
+    },
+    'copy-site-link': (el) => copySiteLink(el),
+    'open-gallery': () => openAlteredGallery(),
+    'close-gallery': () => closeAlteredGallery(),
+    'open-compare': (el) => openPublicCompare(el.dataset.old, el.dataset.new, el.dataset.title),
+    'open-exposed-compare': () => openExposedCompare(),
+    'close-compare': () => closePublicCompare(),
+    'compare-tab': (el) => switchPublicCompareTab(el.dataset.tab),
+    'open-doc': (el, e) => {
+        if (isModifiedClick(e)) return;
+        e.preventDefault();
+        openDocument(el.dataset.docId, docIndexFor(el), { trigger: el });
+    },
+    'edit-search': () => editSearch(),
+    'remove-filter': (el) => removeSearchFilter(el.dataset.filter),
+    'clear-search-filters': () => clearSearchFilters(),
+    'switch-search-type': (el) => switchSearchType(el.dataset.type),
+    'open-search-help': () => openSearchHelp(),
+    'search-first-page': () => { state.searchPage = 0; runSearch({ history: 'push', focusHeading: true }); },
+    'retry-search': () => runSearch({ history: 'none', focusHeading: true }),
+    'retry-browse': () => loadDocuments({ history: 'none', focusHeading: true }),
+    'retry-doc': (el) => openDocument(el.dataset.docId, -1, { history: 'none' }),   // -1: recompute the index for THIS document
+    'close-doc': () => requestCloseDocument(),
+    'clear-browse-filters': () => clearBrowseFilters(),
+    'toggle-pinned': (el) => togglePinnedMotion(el)
+};
+
+// =============================================================================
+// UX modules: core plumbing, URL state, search flow, document modal
+// =============================================================================
+
+function isModifiedClick(e) {
+    return !!e && (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey);
+}
+
+function setHidden(el, hidden) {
+    if (el) el.classList.toggle('hidden', !!hidden);
+}
+
+function scrollBehavior() {
+    return REDUCED_MOTION.matches ? 'auto' : 'smooth';
+}
+
+function docIndexFor(el) {
+    const n = parseInt(el && el.dataset ? el.dataset.index : '', 10);
+    return Number.isFinite(n) ? n : -1;
+}
+
+/** Per-dialog live regions: some screen readers ignore content outside an aria-modal dialog. */
+function ensureDialogLive(content) {
+    let host = content.querySelector(':scope > [data-dlg-live]');
+    if (!host) {
+        host = document.createElement('div');
+        host.className = 'sr-only';
+        host.setAttribute('data-dlg-live', '');
+        host.innerHTML = '<div role="status" aria-live="polite" aria-atomic="true"></div><div role="alert" aria-live="assertive" aria-atomic="true"></div>';
+        content.appendChild(host);
+    }
+    return { polite: host.children[0], alert: host.children[1] };
+}
+
+function liveRegion(assertive) {
+    const top = topDialog();
+    return top && top.live ? (assertive ? top.live.alert : top.live.polite)
+        : document.getElementById(assertive ? 'a11y-alert' : 'a11y-status');
+}
+
+/**
+ * Speak a message through a visually hidden live region (the open dialog's own region when there is one).
+ * Polite by default; assertive for errors that need immediate attention.
+ * Messages sent within the same ~60ms window are joined, so one never silences another.
+ * The target region is resolved when the text is written, so a dialog that closed in between is never used.
+ */
+function announce(message, { assertive = false } = {}) {
+    const key = assertive ? 'alert' : 'status';
+    const queue = _announceQueue[key];
+    if (!queue.includes(message)) queue.push(message);
+    clearTimeout(_announceTimer[key]);
+    const first = liveRegion(assertive);
+    if (first) first.textContent = '';   // clearing first, then writing later, makes screen readers re-announce identical text
+    _announceTimer[key] = setTimeout(() => {
+        const el = liveRegion(assertive);
+        if (el) el.textContent = queue.join('. ');
+        queue.length = 0;
+    }, 60);
+}
+
+/** Toasts live inside the top dialog while one is open (same reason as above). */
+function toastRegion() {
+    const top = topDialog();
+    if (!top) return document.getElementById('toast-region');
+    let region = top.content.querySelector(':scope > .toast-region');
+    if (!region) {
+        region = document.createElement('div');
+        region.className = 'toast-region';
+        region.setAttribute('role', 'region');
+        region.setAttribute('aria-label', 'Notifications');
+        top.content.appendChild(region);
+    }
+    return region;
+}
+
+/** Non-blocking replacement for alert(). */
+function showToast(message, { type = 'info', actionLabel = '', onAction = null, timeout = 7000 } = {}) {
+    const region = toastRegion();
+    if (!region) return null;
+    const toast = document.createElement('div');
+    toast.className = `toast ${type}`;
+    toast.setAttribute('role', type === 'error' ? 'alert' : 'status');
+    const msg = document.createElement('span');
+    msg.className = 'toast-msg';
+    msg.textContent = message;
+    toast.appendChild(msg);
+    if (actionLabel && onAction) {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.textContent = actionLabel;
+        btn.addEventListener('click', () => {
+            const dlg = topDialog();
+            const inDialog = !!(dlg && dlg.content.contains(toast));
+            toast.remove();
+            onAction();
+            // the clicked button is gone: keep keyboard focus inside the dialog instead of dropping to <body>
+            if (inDialog && dlg.content.isConnected) dlg.content.focus({ preventScroll: true });
+        });
+        toast.appendChild(btn);
+    }
+    region.appendChild(toast);
+    if (timeout) setTimeout(() => toast.remove(), timeout);
+    return toast;
+}
+
+function focusableIn(root) {
+    const sel = 'a[href], button:not([disabled]), input:not([disabled]):not([type="hidden"]), select:not([disabled]), textarea:not([disabled]), iframe, audio[controls], video[controls], [tabindex]:not([tabindex="-1"])';
+    return [...root.querySelectorAll(sel)].filter(el =>
+        el.tabIndex >= 0 && !el.closest('[inert]') && el.getClientRects().length > 0 && getComputedStyle(el).visibility !== 'hidden');
+}
+
+/** Make everything outside the top dialog inert (not focusable, not announced). */
+function applyDialogInert() {
+    document.querySelectorAll('[data-dlg-inert]').forEach(el => {
+        el.inert = false;
+        el.removeAttribute('data-dlg-inert');
+    });
+    const top = dialogStack[dialogStack.length - 1];
+    if (!top) return;
+    let node = top.el;
+    while (node && node !== document.body && node.parentElement) {
+        const parent = node.parentElement;
+        for (const sib of parent.children) {
+            if (sib === node || sib.hasAttribute('data-keep-active') || ['SCRIPT', 'STYLE', 'LINK'].includes(sib.tagName)) continue;
+            if (!sib.inert) {
+                sib.inert = true;
+                sib.setAttribute('data-dlg-inert', '');
+            }
+        }
+        node = parent;
+    }
+}
+
+function openDialog(modalEl, { trigger = null, initialFocus = null, onRequestClose = null } = {}) {
+    if (!modalEl) return;
+    const content = modalEl.matches('[role="dialog"]') ? modalEl : (modalEl.querySelector('[role="dialog"]') || modalEl);
+    const existing = dialogStack.findIndex(d => d.el === modalEl);
+    if (existing !== -1) dialogStack.splice(existing, 1);
+    const entry = { el: modalEl, content, trigger: trigger || document.activeElement, onRequestClose, live: ensureDialogLive(content) };
+    dialogStack.push(entry);
+    modalEl.classList.remove('hidden');
+    document.body.classList.add('modal-open');
+    document.body.style.overflow = 'hidden';
+    applyDialogInert();
+    const target = (initialFocus && content.querySelector(initialFocus)) || content;
+    if (target && typeof target.focus === 'function') target.focus({ preventScroll: true });
+}
+
+function closeDialog(modalEl, { restoreFocus = true } = {}) {
+    if (!modalEl) return;
+    const idx = dialogStack.findIndex(d => d.el === modalEl);
+    const entry = idx !== -1 ? dialogStack.splice(idx, 1)[0] : null;
+    modalEl.classList.add('hidden');
+    // Whatever the dialog was showing must not leak into its next opening: stale toasts, an open share menu.
+    modalEl.querySelectorAll('.toast-region .toast').forEach(t => t.remove());
+    closePopovers();
+    applyDialogInert();
+    if (!dialogStack.length) {
+        document.body.classList.remove('modal-open');
+        document.body.style.overflow = '';
+    }
+    if (entry && restoreFocus) {
+        const t = entry.trigger;
+        if (t && t.isConnected && typeof t.focus === 'function' && t.getClientRects().length > 0) {
+            t.focus({ preventScroll: true });
+        } else {
+            const fallback = document.getElementById('results-title') && !document.getElementById('search-results').classList.contains('hidden')
+                ? document.getElementById('results-title')
+                : document.getElementById('main');
+            if (fallback) fallback.focus({ preventScroll: true });
+        }
+    }
+}
+
+function topDialog() {
+    return dialogStack[dialogStack.length - 1] || null;
+}
+
+/** Keep Tab / Shift+Tab inside the top dialog. */
+function trapDialogTab(e) {
+    const top = topDialog();
+    if (!top) return;
+    const items = focusableIn(top.content);
+    if (!items.length) { e.preventDefault(); top.content.focus(); return; }
+    const first = items[0];
+    const last = items[items.length - 1];
+    const active = document.activeElement;
+    const inside = top.content.contains(active);
+    if (e.shiftKey && (active === first || active === top.content || !inside)) {
+        e.preventDefault();
+        last.focus();
+    } else if (!e.shiftKey && (active === last || !inside)) {
+        e.preventDefault();
+        first.focus();
+    }
+}
+
+function togglePopover(btn, force) {
+    const menu = document.getElementById(btn.getAttribute('aria-controls'));
+    if (!menu) return;
+    const open = typeof force === 'boolean' ? force : menu.classList.contains('hidden');
+    if (open) closePopovers(menu);
+    menu.classList.toggle('hidden', !open);
+    btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+    if (open && menu.getAttribute('role') === 'menu') {
+        const first = menu.querySelector('[role="menuitem"]');
+        if (first) first.focus();
+    }
+}
+
+/** Close every open popover (optionally keeping one). Returns true when something closed. */
+function closePopovers(except = null) {
+    let closed = false;
+    document.querySelectorAll(POPOVER_OPEN).forEach(btn => {
+        const menu = document.getElementById(btn.getAttribute('aria-controls'));
+        if (menu && menu === except) return;
+        if (menu) menu.classList.add('hidden');
+        btn.setAttribute('aria-expanded', 'false');
+        closed = true;
+    });
+    return closed;
+}
+
+function handleMenuKeydown(e) {
+    const menu = e.target.closest('[role="menu"]');
+    if (!menu) return;
+    const items = [...menu.querySelectorAll('[role="menuitem"]')];
+    if (!items.length) return;
+    const i = items.indexOf(document.activeElement);
+    let next = -1;
+    if (e.key === 'ArrowDown') next = (i + 1) % items.length;
+    else if (e.key === 'ArrowUp') next = (i - 1 + items.length) % items.length;
+    else if (e.key === 'Home') next = 0;
+    else if (e.key === 'End') next = items.length - 1;
+    if (next >= 0) { e.preventDefault(); items[next].focus(); }
+}
+
+function syncTabs(tablist, selectedTab) {
+    if (!tablist) return;
+    tablist.querySelectorAll('[role="tab"]').forEach(t => {
+        const sel = t === selectedTab;
+        t.setAttribute('aria-selected', sel ? 'true' : 'false');
+        t.tabIndex = sel ? 0 : -1;
+        t.classList.toggle('active', sel);
+    });
+}
+
+function handleTablistKeydown(e) {
+    const tab = e.target.closest('[role="tab"]');
+    if (!tab) return;
+    const tabs = [...tab.closest('[role="tablist"]').querySelectorAll('[role="tab"]')].filter(t => t.getClientRects().length > 0);
+    const i = tabs.indexOf(tab);
+    if (i === -1) return;
+    let next = i;
+    if (e.key === 'ArrowRight') next = (i + 1) % tabs.length;
+    else if (e.key === 'ArrowLeft') next = (i - 1 + tabs.length) % tabs.length;
+    else if (e.key === 'Home') next = 0;
+    else if (e.key === 'End') next = tabs.length - 1;
+    e.preventDefault();
+    tabs[next].focus();
+    tabs[next].click();
+}
+
+function handleEscape(e) {
+    const popBtn = document.querySelector(POPOVER_OPEN);
+    if (popBtn) {
+        e.preventDefault();
+        closePopovers();
+        popBtn.focus();
+        return;
+    }
+    const pdf = document.getElementById('modal-pdf-viewer');
+    if (pdf && pdf.classList.contains('fullscreen')) {
+        e.preventDefault();
+        togglePdfFullscreen(pdf);
+        return;
+    }
+    const top = topDialog();
+    if (top && typeof top.onRequestClose === 'function') {
+        e.preventDefault();
+        top.onRequestClose();
+    }
+}
+
+function setupGlobalDelegation() {
+    document.addEventListener('click', (e) => {
+        const target = e.target;
+        if (!(target instanceof Element)) return;
+
+        // Header Share: phones get the native share sheet; desktops get the menu (with Copy link) even when
+        // the browser also exposes navigator.share.
+        if (target.closest('#site-share-btn') && typeof navigator.share === 'function' && (MOBILE_QUERY.matches || isMobileDevice())) {
+            closePopovers();
+            navigator.share({ title: SITE_TITLE, text: 'Search court records, flight logs & DOJ disclosures. Free & open source.', url: SITE_URL }).catch(() => {});
+            return;
+        }
+
+        // Popovers: close any that the click landed outside of.
+        const popBtn = target.closest(POPOVER_BTN);
+        const keepMenu = popBtn ? document.getElementById(popBtn.getAttribute('aria-controls')) : null;
+        document.querySelectorAll(POPOVER_OPEN).forEach(btn => {
+            const menu = document.getElementById(btn.getAttribute('aria-controls'));
+            if (btn.contains(target) || (menu && menu.contains(target))) return;
+            if (menu && menu === keepMenu) return;
+            if (menu) menu.classList.add('hidden');
+            btn.setAttribute('aria-expanded', 'false');
+        });
+        if (popBtn) togglePopover(popBtn);
+
+        // Share menu options
+        const opt = target.closest('.share-menu .share-option');
+        if (opt) {
+            const menu = opt.closest('.share-menu');
+            const owner = document.querySelector(`[aria-controls="${menu.id}"]`);
+            closePopovers();
+            if (owner) owner.focus({ preventScroll: true });
+            if (menu.id === 'site-share-menu') handleSiteShare(opt.dataset.platform, opt);
+            else if (menu.id === 'search-share-menu') handleSearchShare(opt.dataset.platform, opt);
+            else handleShare(opt.dataset.platform, opt);
+            return;
+        }
+
+        // data-action
+        const actionEl = target.closest('[data-action]');
+        if (actionEl) {
+            const fn = ACTIONS[actionEl.dataset.action];
+            if (fn) { fn(actionEl, e); return; }
+        }
+
+        // Whole-card click (results and browse cards): open unless the click was on a link/button or text is being selected.
+        const card = target.closest('[data-doc-card]');
+        if (card && !target.closest('a[href], button') && !(window.getSelection && String(window.getSelection()).length)) {
+            openDocument(card.dataset.docId, docIndexFor(card), { trigger: card.querySelector('a[data-action="open-doc"]') || card });
+        }
+    });
+
+    document.addEventListener('keydown', (e) => {
+        if (e.defaultPrevented) return;
+        if (e.key === 'Escape') { handleEscape(e); return; }
+        if (e.key === 'Tab') {
+            if (e.target instanceof Element && e.target.closest('[role="menu"]')) closePopovers();
+            trapDialogTab(e);
+            return;
+        }
+        const t = e.target instanceof Element ? e.target : null;
+        if (t && t.closest('[role="tablist"]') && ['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(e.key)) {
+            handleTablistKeydown(e);
+            return;
+        }
+        if (t && t.closest('[role="menu"]') && ['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(e.key)) {
+            handleMenuKeydown(e);
+            return;
+        }
+        // Arrow keys step through the result list while the document modal is the top dialog.
+        if ((e.key === 'ArrowLeft' || e.key === 'ArrowRight') && !(e.metaKey || e.ctrlKey || e.altKey || e.shiftKey)
+            && isDocumentOpen() && topDialog() && topDialog().el === elements.modal && state.documentList.length > 1
+            && !(t && t.closest('input, textarea, select, audio, video, [contenteditable], [role="tablist"], [role="menu"]'))) {
+            e.preventDefault();
+            navigateDocument(e.key === 'ArrowLeft' ? -1 : 1);
+        }
+    });
+
+    // Thumbnails that fail to load reveal their icon fallback (replaces inline onerror="").
+    document.addEventListener('error', (e) => {
+        const img = e.target;
+        if (!(img instanceof HTMLImageElement)) return;
+        const wrap = img.closest('.result-thumbnail, .document-thumbnail, .pinned-card-thumbnail');
+        if (!wrap) return;
+        img.classList.add('hidden');
+        const fb = wrap.querySelector('.thumbnail-fallback');
+        if (fb) fb.classList.add('is-visible');
+    }, true);
+
+    // Media downloads are intentionally discouraged in the viewer (replaces inline oncontextmenu="").
+    document.addEventListener('contextmenu', (e) => {
+        if (e.target instanceof Element && e.target.closest('.audio-element, .video-element')) e.preventDefault();
+    });
+}
+
+/** The header and the refine bar are sticky: keep their heights in CSS variables (sticky offset + scroll-padding). */
+function syncHeaderHeight() {
+    const header = document.querySelector('.header');
+    if (!header) return;
+    const root = document.documentElement;
+    const set = () => root.style.setProperty('--header-h', `${header.offsetHeight}px`);
+    set();
+    if (window.ResizeObserver) new ResizeObserver(set).observe(header);
+    else window.addEventListener('resize', set);
+
+    const bar = document.getElementById('refine-bar');
+    if (bar) {
+        const setBar = () => root.style.setProperty('--refine-h', bar.offsetParent ? `${bar.offsetHeight}px` : '0px');
+        setBar();
+        if (window.ResizeObserver) new ResizeObserver(setBar).observe(bar);
+    }
+}
+
+function updateDocumentTitle() {
+    let title = DEFAULT_TITLE;
+    if (isDocumentOpen() && state.currentDocument && state.currentDocument.filename) {
+        title = `${state.currentDocument.filename} | ${SITE_TITLE}`;
+    } else if (state.currentView === 'search') {
+        if (state.lastSearchParams && state.lastSearchParams.query) title = `“${state.lastSearchParams.query}” – Search | ${SITE_TITLE}`;
+    } else {
+        title = `${VIEW_TITLES[state.currentView] || 'Search'} | ${SITE_TITLE}`;
+    }
+    document.title = title;
+}
+
+function readUrlState() {
+    const p = new URLSearchParams(window.location.search);
+    const view = VALID_VIEWS.includes(p.get('view')) ? p.get('view') : 'search';
+    const page = (() => { const n = parseInt(p.get('page') || '', 10); return Number.isFinite(n) && n > 0 ? n : 1; })();
+    // Real calendar dates only (2020-13-99 matches the shape but is not a date).
+    const date = (k) => {
+        const v = p.get(k) || '';
+        const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(v);
+        if (!m) return '';
+        const d = new Date(Date.UTC(+m[1], +m[2] - 1, +m[3]));
+        return d.getUTCFullYear() === +m[1] && d.getUTCMonth() === +m[2] - 1 && d.getUTCDate() === +m[3] ? v : '';
+    };
+    const kind = VALID_KINDS.includes(p.get('kind')) ? p.get('kind') : '';
+    const doc = /^[a-zA-Z0-9_\-]+$/.test(p.get('doc') || '') ? p.get('doc') : '';
+    return {
+        view,
+        q: (p.get('q') || '').trim().slice(0, 500),
+        type: SEARCH_TYPES.includes(p.get('type')) ? p.get('type') : SEARCH_DEFAULT_TYPE,
+        set: (p.get('set') || '').slice(0, 200),
+        section: (p.get('section') || '').slice(0, 200),
+        kind,
+        from: date('from'),
+        to: date('to'),
+        page,
+        name: (p.get('name') || '').slice(0, 200),
+        topic: (p.get('topic') || '').slice(0, 200),
+        doc
+    };
+}
+
+function fieldsForView(view) {
+    if (view === 'search') {
+        const s = state.lastSearchParams;
+        if (!s) return {};
+        return {
+            q: s.query, type: s.search_type, set: s.category || '', section: s.subcategory || '', kind: s.file_type || '',
+            from: s.date_from || '', to: s.date_to || '', page: state.searchPage + 1
+        };
+    }
+    if (view === 'browse') {
+        return {
+            name: state.browseFilename, topic: state.browseKeyword, set: state.browseCategory,
+            section: state.browseSubcategory, kind: state.browseFileType, page: state.browsePage + 1
+        };
+    }
+    return {};
+}
+
+function baseQuery(view, f) {
+    const p = new URLSearchParams();
+    if (view !== 'search') p.set('view', view);
+    const add = (k, v) => { if (v) p.set(k, v); };
+    if (view === 'search' && f.q) {
+        p.set('q', f.q);
+        if (f.type && f.type !== SEARCH_DEFAULT_TYPE) p.set('type', f.type);
+        add('set', f.set); add('section', f.section); add('kind', f.kind); add('from', f.from); add('to', f.to);
+        if (f.page > 1) p.set('page', String(f.page));
+    } else if (view === 'browse') {
+        add('name', f.name); add('topic', f.topic); add('set', f.set); add('section', f.section); add('kind', f.kind);
+        if (f.page > 1) p.set('page', String(f.page));
+    }
+    return p;
+}
+
+function currentBaseKey() {
+    return baseQuery(state.currentView, fieldsForView(state.currentView)).toString();
+}
+
+function urlBaseKey(u) {
+    return baseQuery(u.view, u).toString();
+}
+
+function buildUrl({ doc = '' } = {}) {
+    const p = baseQuery(state.currentView, fieldsForView(state.currentView));
+    if (doc) p.set('doc', doc);
+    const qs = p.toString();
+    return window.location.pathname + (qs ? `?${qs}` : '');
+}
+
+/**
+ * Write the current state to the address bar (no-op for mode 'none' or when unchanged).
+ * Restores from the URL pass history:'none' everywhere, so there is no global "restoring" guard: a visitor who acts
+ * while a slow Back/Forward re-render is still loading must still get their action written to the URL.
+ */
+function syncUrl(mode, { doc = '', overlay = false } = {}) {
+    if (mode === 'none') return;
+    const url = buildUrl({ doc });
+    if (url === window.location.pathname + window.location.search) return;
+    try {
+        history[mode === 'replace' ? 'replaceState' : 'pushState'](overlay ? { ov: 1 } : {}, '', url);
+    } catch (e) { /* history API can be blocked in sandboxed frames */ }
+}
+
+function setSelectValue(select, value) {
+    if (!select) return;
+    if (value && ![...select.options].some(o => o.value === value)) {
+        const opt = document.createElement('option');
+        opt.value = value;
+        opt.textContent = value;
+        select.appendChild(opt);
+    }
+    select.value = value || '';
+}
+
+/** Re-render everything from the address bar (initial load and Back/Forward). */
+async function applyUrlState() {
+    const token = ++state.restoreSeq;        // a newer navigation supersedes this restore at its next await
+    const u = readUrlState();
+    let corrected = false;
+    try {
+        if (u.view === 'ask' && state.askDisabled) { u.view = 'search'; u.q = ''; corrected = true; }   // feature switched off
+        if (u.view !== state.currentView || urlBaseKey(u) !== state.renderedKey) {
+            switchView(u.view, { history: 'none', skipLoad: true });
+            // The restore writes the controls/state before its first await, but nothing is rendered for this URL until it
+            // finishes: a Back+Forward inside that window must run a full restore, not be skipped as "already rendered".
+            if (u.view === 'search' || u.view === 'browse') state.renderedKey = null;
+            if (u.view === 'search') await restoreSearchFromUrl(u, token);
+            else if (u.view === 'browse') await restoreBrowseFromUrl(u, token);
+            if (token !== state.restoreSeq) return;
+        }
+        if (u.doc) {
+            if (!isDocumentOpen() || state.openDocId !== u.doc) await openDocument(u.doc, -1, { history: 'none' });
+        } else if (isDocumentOpen()) {
+            closeDocumentDom();
+        }
+    } finally {
+        updateDocumentTitle();
+        if (corrected && token === state.restoreSeq) syncUrl('replace', { doc: isDocumentOpen() ? state.openDocId : '', overlay: state.modalPushed });
+    }
+}
+
+async function restoreSearchFromUrl(u, token) {
+    if (!u.q) { showSearchHome(); return; }
+    elements.searchInput.value = u.q;
+    elements.searchType.value = u.type;
+    updateSearchTypeHint();
+    setSelectValue(elements.searchCategory, u.set);
+    await loadSubcategories(u.set, 'search');
+    if (token !== state.restoreSeq) return;      // the visitor navigated again while this was loading
+    if (u.section) {
+        setSelectValue(elements.searchSubcategory, u.section);
+        setHidden(elements.searchSubcategoryGroup, false);
+    }
+    setSelectValue(elements.searchFileType, u.kind);
+    elements.searchDateFrom.value = u.from;
+    elements.searchDateTo.value = u.to;
+    state.lastSearchParams = {
+        query: u.q, search_type: u.type, category: u.set || null, subcategory: u.section || null,
+        file_type: u.kind || null, date_from: u.from || null, date_to: u.to || null
+    };
+    state.searchPage = u.page - 1;
+    if (hasActiveFilterControls()) setFiltersOpen(true);
+    updateFiltersCount();
+    if (!validateDateRange()) {          // e.g. ?from=2020-01-01&to=2019-01-01: explain, let the visitor fix it
+        state.lastSearchParams = null;
+        setHidden(elements.searchResults, true);
+        setHidden(document.getElementById('home-extras'), false);
+        return;
+    }
+    await runSearch({ history: 'none', scroll: false });
+}
+
+async function restoreBrowseFromUrl(u, token) {
+    state.browseFilename = u.name;
+    state.browseKeyword = u.topic;
+    state.browseCategory = u.set;
+    state.browseSubcategory = u.section;
+    state.browseFileType = u.kind;
+    state.browsePage = u.page - 1;
+    if (elements.browseFilename) elements.browseFilename.value = u.name;
+    setSelectValue(elements.browseKeyword, u.topic);
+    setSelectValue(elements.browseCategory, u.set);
+    await loadSubcategories(u.set, 'browse');
+    if (token !== state.restoreSeq) return;
+    if (u.section) {
+        setSelectValue(elements.browseSubcategory, u.section);
+        setHidden(elements.browseSubcategory, false);
+    }
+    setSelectValue(elements.browseFileType, u.kind);
+    await loadDocuments({ history: 'none' });
+}
+
+function readSearchControls() {
+    const subVisible = elements.searchSubcategoryGroup && !elements.searchSubcategoryGroup.classList.contains('hidden');
+    return {
+        query: elements.searchInput.value.trim(),
+        search_type: elements.searchType.value,
+        category: elements.searchCategory.value || null,
+        subcategory: (subVisible && elements.searchSubcategory && elements.searchSubcategory.value) || null,
+        file_type: (elements.searchFileType && elements.searchFileType.value) || null,
+        date_from: (elements.searchDateFrom && elements.searchDateFrom.value) || null,
+        date_to: (elements.searchDateTo && elements.searchDateTo.value) || null
+    };
+}
+
+/** An inverted date range is rejected with a message instead of silently returning nothing. */
+function validateDateRange() {
+    const from = elements.searchDateFrom ? elements.searchDateFrom.value : '';
+    const to = elements.searchDateTo ? elements.searchDateTo.value : '';
+    const bad = !!(from && to && from > to);
+    const err = document.getElementById('date-range-error');
+    if (err) {
+        err.textContent = bad ? 'The start date must be on or before the end date.' : '';
+        setHidden(err, !bad);
+    }
+    [elements.searchDateFrom, elements.searchDateTo].forEach(input => {
+        if (!input) return;
+        if (bad) input.setAttribute('aria-invalid', 'true'); else input.removeAttribute('aria-invalid');
+    });
+    return !bad;
+}
+
+function updateSearchTypeHint() {
+    const hint = document.getElementById('search-type-hint');
+    if (hint && elements.searchType) hint.textContent = SEARCH_TYPE_HINTS[elements.searchType.value] || '';
+}
+
+function hasActiveFilterControls() {
+    const c = readSearchControls();
+    return !!(c.category || c.subcategory || c.file_type || c.date_from || c.date_to || state.excludedCategories.length);
+}
+
+function updateFiltersCount() {
+    const c = readSearchControls();
+    let n = 0;
+    if (c.category) n++;
+    if (c.subcategory) n++;
+    if (c.file_type) n++;
+    if (c.date_from || c.date_to) n++;
+    if (state.excludedCategories.length) n++;
+    const badge = document.getElementById('filters-count');
+    const toggle = document.getElementById('filters-toggle');
+    if (badge) { badge.textContent = String(n); setHidden(badge, n === 0); }
+    if (toggle) toggle.setAttribute('aria-label', n ? `Filters, ${n} active` : 'Filters');
+}
+
+function setFiltersOpen(open) {
+    const panel = document.getElementById('search-filters');
+    const toggle = document.getElementById('filters-toggle');
+    setHidden(panel, !open);
+    if (toggle) toggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+}
+
+function setSearchLoading(on) {
+    if (on && document.activeElement === elements.searchBtn) state._refocusSearchBtn = true;   // disabling drops focus
+    elements.searchBtn.disabled = on;
+    elements.searchBtn.innerHTML = on
+        ? '<span class="loading-spinner" aria-hidden="true"></span><span>Searching…</span>'
+        : SEARCH_BTN_HTML;
+    elements.resultsList.setAttribute('aria-busy', on ? 'true' : 'false');
+    if (!on) {
+        if (state._refocusSearchBtn) {
+            state._refocusSearchBtn = false;
+            if (document.activeElement === document.body) elements.searchBtn.focus({ preventScroll: true });
+        }
+        return;
+    }
+    setHidden(elements.searchResults, false);
+    setHidden(document.getElementById('home-extras'), true);
+    setHidden(elements.clearSearchBtn, false);
+    setHidden(elements.searchPagination, true);
+    elements.resultsCount.textContent = 'Searching…';
+    elements.resultsList.innerHTML = Array.from({ length: 6 }, () =>
+        '<div class="result-skeleton" aria-hidden="true"><div class="skeleton sk-thumb"></div><div class="sk-lines">' +
+        '<div class="skeleton sk-line"></div><div class="skeleton sk-line mid"></div><div class="skeleton sk-line short"></div></div></div>'
+    ).join('');
+    announce('Searching…');
+}
+
+/** Bring the results to the top of the screen, just under the sticky header (the refine bar then sticks right there). */
+function scrollToResults() {
+    if (state.currentView !== 'search' || !elements.searchResults.offsetParent) return;   // visitor has moved on: do not scroll their current page
+    const header = document.querySelector('.header');
+    const top = window.scrollY + elements.searchResults.getBoundingClientRect().top - (header ? header.offsetHeight : 0) - 4;
+    window.scrollTo({ top: Math.max(0, top), behavior: scrollBehavior() });
+}
+
+async function runSearch({ history: mode = 'push', focusHeading = false, scroll = true } = {}) {
+    const params = state.lastSearchParams;
+    if (!params) return;
+    const seq = ++state.searchSeq;
+    syncUrl(mode);
+    state.renderedKey = null;            // nothing is rendered for this URL until the response lands (Back must re-render)
+    updateDocumentTitle();
+    setSearchLoading(true);
+    updateRefineBar();
+
+    const body = { ...params, limit: state.searchLimit, offset: state.searchPage * state.searchLimit };
+    // Exclusions are applied by the server (so totals and pages stay correct); a specific file set overrides them.
+    if (!params.category && state.excludedCategories.length) body.exclude_categories = state.excludedCategories.slice();
+
+    try {
+        const response = await fetch(`${API_BASE}/search`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body)
+        });
+        if (!response.ok) {
+            let detail = '';
+            try { detail = (await response.json()).detail || ''; } catch (e) { /* not JSON */ }
+            const err = new Error(detail || 'Search failed');
+            err.status = response.status;
+            err.detail = typeof detail === 'string' ? detail : '';
+            throw err;
+        }
+        const data = await response.json();
+        if (seq !== state.searchSeq) return;            // a newer search superseded this one
+        state.searchTotal = data.total;
+        renderSearchResults(data, { focusHeading });
+        if (data.parsed_query) displayQueryFeedback(data.parsed_query);
+        state.renderedKey = currentBaseKey();
+        if (scroll) scrollToResults();
+    } catch (error) {
+        if (seq !== state.searchSeq) return;
+        console.error('Search error:', error);
+        renderSearchError(error);
+        if (focusHeading && elements.resultsTitle) elements.resultsTitle.focus({ preventScroll: true });
+    } finally {
+        if (seq === state.searchSeq) setSearchLoading(false);
+    }
+}
+
+function activeFilters(params) {
+    const list = [];
+    if (!params) return list;
+    if (params.category) list.push({ key: 'category', label: params.category });
+    if (params.subcategory) list.push({ key: 'subcategory', label: params.subcategory });
+    if (params.file_type) list.push({ key: 'file_type', label: FILE_TYPE_LABELS[params.file_type] || params.file_type });
+    if (params.date_from || params.date_to) {
+        const label = params.date_from && params.date_to ? `${params.date_from} to ${params.date_to}`
+            : params.date_from ? `From ${params.date_from}` : `Until ${params.date_to}`;
+        list.push({ key: 'date', label });
+    }
+    if (params.search_type && params.search_type !== SEARCH_DEFAULT_TYPE) {
+        list.push({ key: 'search_type', label: params.search_type === 'hybrid' ? 'Hybrid search' : 'Semantic search' });
+    }
+    if (!params.category && state.excludedCategories.length) {
+        const n = state.excludedCategories.length;
+        list.push({ key: 'exclusions', label: `Excluding ${n} file set${n > 1 ? 's' : ''}` });
+    }
+    return list;
+}
+
+function updateRefineBar() {
+    const bar = document.getElementById('refine-bar');
+    const chips = document.getElementById('refine-chips');
+    if (!bar || !chips) return;
+    const filters = activeFilters(state.lastSearchParams);
+    chips.innerHTML = filters.map(f => `
+        <li><button type="button" class="refine-chip" data-action="remove-filter" data-filter="${f.key}" aria-label="Remove filter: ${escapeHtml(f.label)}">
+            <span>${escapeHtml(f.label)}</span><span class="chip-x" aria-hidden="true">×</span>
+        </button></li>`).join('');
+}
+
+function removeSearchFilter(key) {
+    const p = state.lastSearchParams;
+    if (!p) return;
+    switch (key) {
+        case 'category':
+            p.category = null; p.subcategory = null;
+            elements.searchCategory.value = '';
+            loadSubcategories('', 'search');
+            break;
+        case 'subcategory':
+            p.subcategory = null;
+            if (elements.searchSubcategory) elements.searchSubcategory.value = '';
+            break;
+        case 'file_type':
+            p.file_type = null;
+            elements.searchFileType.value = '';
+            break;
+        case 'date':
+            p.date_from = null; p.date_to = null;
+            elements.searchDateFrom.value = ''; elements.searchDateTo.value = '';
+            validateDateRange();
+            break;
+        case 'search_type':
+            p.search_type = SEARCH_DEFAULT_TYPE;
+            elements.searchType.value = SEARCH_DEFAULT_TYPE;
+            updateSearchTypeHint();
+            break;
+        case 'exclusions':
+            state.excludedCategories = [];
+            saveExcludedCategories();
+            renderExcludeDropdowns();
+            loadCategories();
+            break;
+        default:
+            return;
+    }
+    state.searchPage = 0;
+    updateFiltersCount();
+    runSearch({ history: 'push', focusHeading: true });
+}
+
+function clearSearchFilters() {
+    const p = state.lastSearchParams;
+    if (!p) return;
+    p.category = null; p.subcategory = null; p.file_type = null; p.date_from = null; p.date_to = null;
+    elements.searchCategory.value = '';
+    if (elements.searchSubcategory) elements.searchSubcategory.value = '';
+    elements.searchFileType.value = '';
+    elements.searchDateFrom.value = ''; elements.searchDateTo.value = '';
+    loadSubcategories('', 'search');
+    validateDateRange();
+    state.searchPage = 0;
+    updateFiltersCount();
+    runSearch({ history: 'push', focusHeading: true });
+}
+
+function switchSearchType(type) {
+    if (!SEARCH_TYPES.includes(type) || !state.lastSearchParams) return;
+    elements.searchType.value = type;
+    state.lastSearchParams.search_type = type;
+    updateSearchTypeHint();
+    state.searchPage = 0;
+    runSearch({ history: 'push', focusHeading: true });
+}
+
+function openSearchHelp() {
+    if (elements.searchHelpToggle && elements.searchHelpToggle.getAttribute('aria-expanded') !== 'true') toggleSearchHelp();
+    if (elements.searchHelpContent) elements.searchHelpContent.scrollIntoView({ behavior: scrollBehavior(), block: 'center' });
+}
+
+/** Back to the search box (and filters, when any are active) from anywhere in the results. */
+function editSearch() {
+    if (hasActiveFilterControls()) setFiltersOpen(true);
+    elements.searchInput.scrollIntoView({ behavior: scrollBehavior(), block: 'center' });
+    elements.searchInput.focus({ preventScroll: true });
+    elements.searchInput.select();
+}
+
+function renderSearchError(error) {
+    const syntax = error && error.status === 400;
+    const message = syntax
+        ? (error.detail || 'That search could not be run. Check the spelling and any quotes or operators, then try again.')
+        : 'We could not reach the archive just now. Check your connection and try again.';
+    elements.resultsCount.textContent = '';
+    setHidden(elements.searchPagination, true);
+    elements.resultsList.innerHTML = `
+        <div class="state-panel state-error" role="alert">
+            <h3>${syntax ? 'That search didn’t work' : 'Search didn’t go through'}</h3>
+            <p>${escapeHtml(message)}</p>
+            <div class="state-actions">
+                <button type="button" class="state-btn primary" data-action="retry-search">Try again</button>
+                <button type="button" class="state-btn" data-action="edit-search">Edit search</button>
+            </div>
+        </div>`;
+    updateRefineBar();
+}
+
+function renderSearchEmpty() {
+    const p = state.lastSearchParams;
+    const filters = activeFilters(p).filter(f => f.key !== 'exclusions' && f.key !== 'search_type');
+    const tips = ['<li>Check the spelling, or try fewer or more general words.</li>'];
+    if (filters.length) {
+        tips.push(`<li>${filters.length} filter${filters.length > 1 ? 's are' : ' is'} narrowing this search: <button type="button" class="inline-link" data-action="clear-search-filters">remove ${filters.length > 1 ? 'all filters' : 'the filter'}</button>.</li>`);
+    }
+    if (!p.category && state.excludedCategories.length) {
+        tips.push(`<li>You are excluding ${state.excludedCategories.length} file set${state.excludedCategories.length > 1 ? 's' : ''}: <button type="button" class="inline-link" data-action="clear-exclusions">include all file sets</button>.</li>`);
+    }
+    if (p.search_type === 'fulltext') {
+        tips.push('<li>Full Text matches exact words. <button type="button" class="inline-link" data-action="switch-search-type" data-type="hybrid">Try Hybrid search</button> to include related passages.</li>');
+    }
+    tips.push('<li>Use quotes for an exact phrase (<code>"flight log"</code>), or <button type="button" class="inline-link" data-action="open-search-help">see the search tips</button>.</li>');
+    elements.resultsList.innerHTML = `
+        <div class="state-panel state-empty">
+            <h3>No documents matched “${escapeHtml(p.query)}”</h3>
+            <p>Nothing in the archive fits this search yet.</p>
+            <ul class="state-tips">${tips.join('')}</ul>
+        </div>`;
+}
+
+function resultCardHtml(result, index) {
+    const id = String(result.id);
+    const href = buildUrl({ doc: id });
+    const score = result.score ? formatRelevanceScore(result.score, result.search_type) : '';
+    return `
+        <article class="result-item" data-doc-card data-doc-id="${escapeHtml(id)}" data-index="${index}">
+            <div class="result-thumbnail" data-file-type="${escapeHtml(result.file_type || 'pdf')}" aria-hidden="true">
+                <img src="${API_BASE}/documents/${encodeURIComponent(id)}/thumbnail" alt="" loading="lazy" />
+                <div class="thumbnail-fallback">${getDocumentIcon(result.file_type)}</div>
+            </div>
+            <div class="result-content">
+                <div class="result-header">
+                    <h3 class="result-title"><a class="result-filename" href="${escapeHtml(href)}" data-action="open-doc" data-doc-id="${escapeHtml(id)}" data-index="${index}">${escapeHtml(result.filename)}</a></h3>
+                    ${score ? `<span class="result-score">${score}</span>` : ''}
+                </div>
+                <div class="result-meta">
+                    <span class="result-category">${escapeHtml(result.category)}</span>
+                    ${result.document_date ? `<span class="result-date">${formatDocumentDate(result.document_date)}</span>` : ''}
+                    ${result.subcategory ? `<span>${escapeHtml(result.subcategory)}</span>` : ''}
+                    <span>${getSearchResultMeta(result)}</span>
+                </div>
+                ${result.snippet ? `<div class="result-snippet">${sanitizeSnippet(result.snippet)}</div>` : ''}
+            </div>
+        </article>`;
+}
+
+/** Reset the search UI to the home state without touching the network (except refreshing category counts). */
+function showSearchHome() {
+    state.lastSearchParams = null;
+    state.searchPage = 0;
+    state.searchTotal = 0;
+    state.searchSeq++;
+    elements.searchInput.value = '';
+    elements.searchCategory.value = '';
+    if (elements.searchSubcategory) elements.searchSubcategory.value = '';
+    elements.searchFileType.value = '';
+    elements.searchDateFrom.value = '';
+    elements.searchDateTo.value = '';
+    validateDateRange();
+    setHidden(elements.searchSubcategoryGroup, true);
+    setHidden(elements.searchResults, true);
+    setHidden(document.getElementById('home-extras'), false);
+    setHidden(elements.clearSearchBtn, true);
+    setHidden(elements.queryFeedback, true);
+    setHidden(elements.searchPagination, true);
+    elements.resultsList.setAttribute('aria-busy', 'false');
+    elements.searchBtn.disabled = false;
+    elements.searchBtn.innerHTML = SEARCH_BTN_HTML;
+    state.renderedKey = '';
+    updateFiltersCount();
+    updateDocumentTitle();
+    renderStats();         // restores the unfiltered file-type counts
+    loadCategories();      // restores the unfiltered file-set counts
+}
+
+function browseHasFilters() {
+    return !!(state.browseCategory || state.browseSubcategory || state.browseFileType || state.browseFilename ||
+        state.browseKeyword || state.excludedCategories.length);
+}
+
+function updateBrowseClearButton() {
+    setHidden(document.getElementById('browse-clear'), !browseHasFilters());
+}
+
+async function clearBrowseFilters() {
+    state.browseCategory = '';
+    state.browseSubcategory = '';
+    state.browseFileType = '';
+    state.browseFilename = '';
+    state.browseKeyword = '';
+    state.browsePage = 0;
+    state.excludedCategories = [];
+    saveExcludedCategories();
+    if (elements.browseFilename) elements.browseFilename.value = '';
+    if (elements.browseKeyword) elements.browseKeyword.value = '';
+    elements.browseCategory.value = '';
+    if (elements.browseFileType) elements.browseFileType.value = '';
+    await loadSubcategories('', 'browse');
+    renderExcludeDropdowns();
+    loadCategories();
+    loadDocuments({ history: 'push', focusHeading: true });
+}
+
+function focusBrowseHeading() {
+    const h = document.getElementById('browse-heading');
+    if (h) { h.tabIndex = -1; h.focus({ preventScroll: true }); }
+}
+
+function renderBrowseError() {
+    state.documentList = [];
+    elements.browseCount.textContent = '';
+    elements.documentsGrid.innerHTML = `
+        <div class="state-panel state-error" role="alert">
+            <h3>We couldn’t load the documents</h3>
+            <p>Check your connection and try again.</p>
+            <div class="state-actions"><button type="button" class="state-btn primary" data-action="retry-browse">Try again</button></div>
+        </div>`;
+}
+
+function documentCardHtml(doc, index) {
+    const id = String(doc.id);
+    const href = buildUrl({ doc: id });
+    const titleId = `doc-title-${id}`;
+    // The whole card is the link (large touch target); it is named by the filename heading only.
+    return `
+        <article class="document-card" data-doc-card data-doc-id="${escapeHtml(id)}" data-index="${index}">
+            <a class="document-link" href="${escapeHtml(href)}" data-action="open-doc" data-doc-id="${escapeHtml(id)}" data-index="${index}" aria-labelledby="${escapeHtml(titleId)}">
+                <div class="document-thumbnail" data-file-type="${escapeHtml(doc.file_type || 'pdf')}" aria-hidden="true">
+                    <img src="${API_BASE}/documents/${encodeURIComponent(id)}/thumbnail" alt="" loading="lazy" />
+                    <div class="thumbnail-fallback">${getDocumentIcon(doc.file_type)}</div>
+                </div>
+                <h3 class="document-title" id="${escapeHtml(titleId)}">${escapeHtml(doc.filename)}</h3>
+                <div class="document-meta">
+                    ${getDocumentTileLabel(doc)} • ${getDocumentMeta(doc)}
+                </div>
+            </a>
+        </article>`;
+}
+
+/**
+ * Load a URL into the document preview iframe WITHOUT adding session-history entries.
+ * Assigning iframe.src adds an entry to the joint session history, so Back would rewind the frame
+ * instead of closing the modal. A freshly inserted iframe's first navigation does not add one.
+ */
+function loadPdfFrame(url) {
+    const old = elements.pdfIframe;
+    if (!old) return;
+    const fresh = old.cloneNode(false);
+    fresh.removeAttribute('src');
+    if (url) fresh.src = url;
+    old.replaceWith(fresh);
+    elements.pdfIframe = fresh;
+}
+
+function isDocumentOpen() {
+    return !!elements.modal && !elements.modal.classList.contains('hidden');
+}
+
+function showModalLoading({ trigger = null } = {}) {
+    const content = elements.modalContent;
+    // Stepping between documents keeps the tabs and Prev/Next in the DOM (so keyboard focus is not destroyed);
+    // a first open, or a retry after an error, shows the full loading state.
+    const refreshing = isDocumentOpen() && !content.classList.contains('is-error');
+    content.classList.remove('is-error');
+    if (refreshing) {
+        content.classList.add('is-refreshing');
+        content.setAttribute('aria-busy', 'true');
+        elements.modalState.textContent = '';
+    } else {
+        content.classList.add('is-loading');
+        elements.modalTitle.textContent = 'Loading document…';
+        elements.modalMeta.textContent = '';
+        elements.modalAlteration.innerHTML = '';
+        setHidden(elements.modalAlteration, true);
+        elements.modalState.setAttribute('role', 'status');
+        elements.modalState.innerHTML = '<span class="loading-spinner" aria-hidden="true"></span><p>Loading document…</p>';
+    }
+    // Stop whatever the previous document was playing / showing.
+    loadPdfFrame('');
+    const mediaViewer = document.getElementById('media-viewer');
+    if (mediaViewer) mediaViewer.innerHTML = '';
+    if (!isDocumentOpen()) {
+        openDialog(elements.modal, { trigger: trigger || document.activeElement, onRequestClose: requestCloseDocument });
+    }
+}
+
+function showModalError(docId, error) {
+    const content = elements.modalContent;
+    content.classList.remove('is-loading', 'is-refreshing');
+    content.removeAttribute('aria-busy');
+    content.classList.add('is-error');
+    // The previous document's details must not sit under "Couldn't open document" (nor its altered badge / compare button).
+    elements.modalMeta.textContent = '';
+    elements.modalAlteration.innerHTML = '';
+    setHidden(elements.modalAlteration, true);
+    state.currentDocument = null;
+    updateDocumentTitle();
+    const notFound = error && error.status === 404;
+    elements.modalTitle.textContent = 'Couldn’t open document';
+    elements.modalState.setAttribute('role', 'alert');
+    elements.modalState.innerHTML = `
+        <h3>${notFound ? 'This document wasn’t found' : 'Something went wrong'}</h3>
+        <p>${notFound
+            ? 'It may have been removed, or the link may be incorrect.'
+            : 'We couldn’t load this document. Check your connection and try again.'}</p>
+        <div class="state-actions">
+            ${notFound ? '' : `<button type="button" class="state-btn primary" data-action="retry-doc" data-doc-id="${escapeHtml(docId)}">Try again</button>`}
+            <button type="button" class="state-btn${notFound ? ' primary' : ''}" data-action="close-doc">Close</button>
+        </div>`;
+    const first = elements.modalState.querySelector('button');
+    if (first && (document.activeElement === elements.modalContent || document.activeElement === document.body)) first.focus();
+}
+
+/** Close from the UI (X, Escape, backdrop). Undoes the history entry the open pushed, if any. */
+function requestCloseDocument() {
+    if (!isDocumentOpen()) return;
+    if (state.modalPushed) {
+        state.modalPushed = false;
+        history.back();                 // popstate -> applyUrlState() closes the dialog
+    } else {
+        closeDocumentDom();
+        syncUrl('replace');
+    }
+}
+
+/** Pure DOM close (also used when Back/Forward removes ?doc= from the URL). */
+function closeDocumentDom() {
+    state.docSeq++;                     // discard any in-flight load
+    loadPdfFrame('');
+    const mediaViewer = document.getElementById('media-viewer');
+    if (mediaViewer) mediaViewer.innerHTML = '';
+    const pdfViewer = document.getElementById('modal-pdf-viewer');
+    if (pdfViewer && pdfViewer.classList.contains('fullscreen')) togglePdfFullscreen(pdfViewer);
+    state.currentDocument = null;
+    state.openDocId = null;
+    elements.modalContent.classList.remove('is-loading', 'is-error', 'is-refreshing');   // a closed-mid-load dialog must not stay dimmed/busy
+    elements.modalContent.removeAttribute('aria-busy');
+    closeDialog(elements.modal);
+    updateDocumentTitle();
+}
+
+function loadExcludedCategories() {
+    try {
+        const v = JSON.parse(localStorage.getItem('excludedCategories') || '[]');
+        return Array.isArray(v) ? v.filter(x => typeof x === 'string') : [];
+    } catch (e) {
+        return [];
+    }
+}
+
+/** WCAG 2.2.2: auto-moving content must be pausable. Works for every marquee bar (featured + altered). */
+function togglePinnedMotion(btn) {
+    const bar = btn.closest('.pinned-documents-bar');
+    const scroll = bar && bar.querySelector('.pinned-scroll');
+    if (!scroll) return;
+    const paused = scroll.classList.toggle('is-paused');
+    btn.setAttribute('aria-pressed', paused ? 'true' : 'false');
+    const label = btn.querySelector('.pinned-pause-label');
+    const icon = btn.querySelector('.pinned-pause-icon');
+    if (label) label.textContent = paused ? 'Play' : 'Pause';
+    if (icon) icon.textContent = paused ? '▶' : '⏸';
+}
+
+/** Totals, pages and facets all depend on exclusions, so whatever is on screen is re-fetched. */
+function refreshAfterExclusionChange() {
+    state._prefetchedBrowse = null;
+    updateFiltersCount();
+    updateBrowseClearButton();
+    loadCategories(state.currentView === 'browse' ? (state.browseKeyword || null) : null);
+    // Toggling a checkbox must not steal focus from the menu; actions elsewhere (empty-state button, chip) move it to the results.
+    const inMenu = !!(document.activeElement && document.activeElement.closest && document.activeElement.closest('.exclude-menu'));
+    if (state.currentView === 'browse') {
+        state.browsePage = 0;
+        loadDocuments({ history: 'replace', focusHeading: !inMenu });
+    } else if (state.lastSearchParams) {
+        state.searchPage = 0;
+        runSearch({ history: 'replace', scroll: false, focusHeading: !inMenu });
+    }
+}
+
+function shareTo(platform, cfg, itemEl) {
+    const enc = encodeURIComponent;
+    const { shareUrl, shareText } = cfg;
+    let webUrl = '';
+    let appUrl = '';
+    let intentUrl = '';
+
+    switch (platform) {
+        case 'facebook':
+            webUrl = `https://www.facebook.com/sharer/sharer.php?u=${enc(shareUrl)}&quote=${enc(shareText)}`;
+            appUrl = `fb://share/?link=${enc(shareUrl)}`;
+            intentUrl = `intent://share/?link=${enc(shareUrl)}#Intent;package=com.facebook.katana;scheme=fb;end`;
+            break;
+        case 'twitter':
+            // Twitter/X has no reliable share deep link: web only
+            webUrl = `https://twitter.com/intent/tweet?url=${enc(shareUrl)}&text=${enc(shareText)}`;
+            break;
+        case 'linkedin':
+            webUrl = cfg.linkedinWeb || `https://www.linkedin.com/sharing/share-offsite/?url=${enc(shareUrl)}`;
+            appUrl = `linkedin://shareArticle?url=${enc(shareUrl)}&title=${enc(shareText)}`;
+            intentUrl = `intent://shareArticle?url=${enc(shareUrl)}&title=${enc(shareText)}#Intent;package=com.linkedin.android;scheme=linkedin;end`;
+            break;
+        case 'threads':
+            webUrl = `https://www.threads.net/intent/post?text=${enc(shareText + ' ' + shareUrl)}`;
+            // iOS: a Universal Link that opens the app when installed
+            appUrl = webUrl;
+            intentUrl = `intent://post?text=${enc(shareText + ' ' + shareUrl)}#Intent;package=com.instagram.barcelona;scheme=threads;end`;
+            break;
+        case 'reddit':
+            webUrl = `https://reddit.com/submit?url=${enc(shareUrl)}&title=${enc(shareText)}`;
+            break;
+        case 'bluesky':
+            webUrl = `https://bsky.app/intent/compose?text=${enc(shareText + ' ' + shareUrl)}`;
+            break;
+        case 'telegram':
+            webUrl = `https://t.me/share/url?url=${enc(shareUrl)}&text=${enc(shareText)}`;
+            break;
+        case 'email':
+            window.location.href = `mailto:?subject=${enc(cfg.emailSubject)}&body=${enc(cfg.emailBody)}`;
+            return;
+        case 'copy':
+            copyToClipboard(shareUrl).then(success => {
+                if (success) showToast('Link copied to the clipboard.', { type: 'success', timeout: 2500 });
+            });
+            return;
+        default:
+            return;
+    }
+
+    // On mobile, try to launch the native app; otherwise open the web share page.
+    if (isMobileDevice() && (appUrl || intentUrl)) {
+        if (isIOS()) {
+            window.location.href = appUrl;
+        } else if (isAndroid() && intentUrl) {
+            window.location.href = intentUrl;
+        } else {
+            openNativeAppOrFallback(appUrl, webUrl, intentUrl);
+        }
+    } else {
+        window.open(webUrl, '_blank', 'width=600,height=400,menubar=no,toolbar=no');
+    }
+}
+
+/** Share the site itself (header Share button menu). */
+function handleSiteShare(platform, el) {
+    const shareText = 'Epstein Files Public Archive — search court records, flight logs & DOJ disclosures. Free & open source.';
+    shareTo(platform, {
+        shareUrl: SITE_URL, shareText,
+        emailSubject: 'Epstein Files Public Archive',
+        emailBody: `Search court records, flight logs, and DOJ disclosures from the Epstein Files — free & open source.\n\n${SITE_URL}`
+    }, el);
+}
+
+function copySiteLink(btn) {
+    copyToClipboard(SITE_URL).then(ok => {
+        const note = btn.nextElementSibling;
+        if (!ok || !note || !note.classList.contains('share-bar-copied')) return;
+        note.textContent = 'Copied';
+        note.classList.add('is-visible');
+        setTimeout(() => { note.classList.remove('is-visible'); note.textContent = ''; }, 1500);
+    });
+}
+
+/** Runs one export. `type` and `includeText` are passed in so the toast's "Try again" can repeat exactly this export. */
+async function performExport(exportType, includeText) {
+    if (!exportType) return;
+    if (exportType === 'search' && !state.lastSearchParams) {
+        showToast('Run a search first, then export its results.');
+        return;
+    }
+    const confirmBtn = document.getElementById('export-modal-confirm');
+    confirmBtn.textContent = 'Exporting...';
+    confirmBtn.disabled = true;
+
+    try {
+        const params = new URLSearchParams();
+        const p = state.lastSearchParams;
+        if (exportType === 'search') {
+            if (p.query) params.append('search_query', p.query);
+            if (p.search_type) params.append('search_type', p.search_type);
+            if (p.category) params.append('category', p.category);
+            if (p.subcategory) params.append('subcategory', p.subcategory);
+            if (p.file_type) params.append('file_type', p.file_type);
+            if (p.date_from) params.append('date_from', p.date_from);
+            if (p.date_to) params.append('date_to', p.date_to);
+            if (!p.category) state.excludedCategories.forEach(c => params.append('exclude_category', c));
+        } else {
+            if (state.browseCategory) params.append('category', state.browseCategory);
+            if (state.browseSubcategory) params.append('subcategory', state.browseSubcategory);
+            if (state.browseFileType) params.append('file_type', state.browseFileType);
+            if (state.browseFilename) params.append('filename', state.browseFilename);
+            if (state.browseKeyword) params.append('keyword', state.browseKeyword);
+            if (!state.browseCategory) state.excludedCategories.forEach(c => params.append('exclude_category', c));
+        }
+        if (includeText) params.append('include_text', 'true');
+
+        const response = await fetch(`${API_BASE}/documents/export?${params}`);
+        if (!response.ok) throw new Error('Export failed');
+
+        const data = await response.json();
+        const prefix = exportType === 'search' ? 'search_export' : 'documents_export';
+        const exported = downloadCSV(data.documents, `${prefix}_${new Date().toISOString().split('T')[0]}.csv`);
+        if (exported) closeExportModal();
+    } catch (error) {
+        console.error('Export error:', error);
+        showToast('Export failed. Please try again.', { type: 'error', actionLabel: 'Try again', onAction: () => performExport(exportType, includeText) });
+    } finally {
+        confirmBtn.textContent = 'Export';
+        confirmBtn.disabled = false;
+    }
+}
+
+/** Duplicate marquee cards stay clickable (they pass under the pointer too) but are hidden from AT and the tab order. */
+function asDuplicateCards(html) {
+    return html.replace(/<(a|button) /g, '<$1 tabindex="-1" ');
+}
+
+/** Ask AI switched off by the server: no nav button, no view, and ?view=ask falls back to search. */
+function hideAskAi() {
+    state.askDisabled = true;
+    setHidden(document.querySelector('.nav-btn[data-view="ask"]'), true);
+    setHidden(document.getElementById('ask-view'), true);
+}
+
+/** Both exclude menus mirror state.excludedCategories immediately (not only after the categories reload succeeds). */
+function syncExcludeCheckboxes() {
+    document.querySelectorAll('#search-exclude-options input[type="checkbox"][data-category], #browse-exclude-options input[type="checkbox"][data-category]')
+        .forEach(cb => { cb.checked = state.excludedCategories.includes(cb.dataset.category); });
+}
+
 // Initialize
 document.addEventListener('DOMContentLoaded', init);
 
 async function init() {
-    // Age verification gate — block everything until user confirms 18+
+    // Age verification gate: blocks everything until the visitor confirms 18+.
+    // Returning visitors never see it: html.age-ok (set by an inline script in <head>) hides it before first paint.
+    // Key/click delegation must exist before the gate is shown: the gate is itself a dialog (Tab trap).
+    if (!state._delegated) {
+        state._delegated = true;
+        setupGlobalDelegation();
+    }
     const ageGate = document.getElementById('age-gate');
-    if (!localStorage.getItem('ageVerified')) {
-        ageGate.classList.remove('hidden');
-        document.getElementById('age-gate-confirm').addEventListener('click', () => {
-            localStorage.setItem('ageVerified', 'true');
-            ageGate.classList.add('hidden');
-            init();
-        });
-        document.getElementById('age-gate-deny').addEventListener('click', () => {
-            window.location.href = 'https://www.google.com/search?q=epsteinfta.com';
-        });
+    let verified = !!state.ageConfirmed;
+    try { verified = verified || !!localStorage.getItem('ageVerified'); } catch (e) { /* storage blocked */ }
+    if (!verified) {
+        document.documentElement.classList.remove('age-ok');
+        if (!state._ageGateBound) {
+            state._ageGateBound = true;
+            document.getElementById('age-gate-confirm').addEventListener('click', () => {
+                state.ageConfirmed = true;
+                try { localStorage.setItem('ageVerified', 'true'); } catch (e) { /* storage blocked */ }
+                document.documentElement.classList.add('age-ok');
+                closeDialog(ageGate, { restoreFocus: false });
+                init();
+            });
+            document.getElementById('age-gate-deny').addEventListener('click', () => {
+                window.location.href = 'https://www.google.com/search?q=epsteinfta.com';
+            });
+        }
+        openDialog(ageGate, { initialFocus: '#age-gate-confirm' });
         return;
     }
-    ageGate.classList.add('hidden');
+    setHidden(ageGate, true);
+    if (state._initialized) return;
+    state._initialized = true;
 
     cacheElements();
     setupEventListeners();
-    
+    syncHeaderHeight();
+    updateSearchTypeHint();
+    setFiltersOpen(!MOBILE_QUERY.matches);
+    updateFiltersCount();
+
     // Single bootstrap request (stats + categories + keywords + settings) for faster load
     try {
         const bootstrapRes = await fetch(`${API_BASE}/bootstrap`);
@@ -72,17 +1461,14 @@ async function init() {
             applyCategoriesToDropdowns();
             applyKeywordsToDropdowns(data.keywords ? data.keywords.keywords : {});
             applyPublicSettings(data.settings || {});
-            // Cache the prefetched first browse page so Browse tab is instant
-            if (data.browse && data.browse.documents) {
+            // Cache the prefetched first browse page so the Browse tab is instant (unfiltered only).
+            if (data.browse && data.browse.documents && !state.excludedCategories.length) {
                 state._prefetchedBrowse = data.browse;
             }
             if (data.settings && data.settings.pinned_documents_enabled !== false) {
                 const pinnedDocs = data.pinned_documents || [];
-                if (pinnedDocs.length > 0) {
-                    renderPinnedDocumentsBar(pinnedDocs);
-                } else {
-                    removePinnedSkeleton();
-                }
+                if (pinnedDocs.length > 0) renderPinnedDocumentsBar(pinnedDocs);
+                else removePinnedSkeleton();
             } else {
                 removePinnedSkeleton();
             }
@@ -94,30 +1480,19 @@ async function init() {
         await loadFallbackInit();
     }
 
-    // Surface the "Altered by DOJ" censored bar (runs on both the bootstrap and
-    // fallback paths; harmless no-op when there are no exposed alterations).
+    // Surface the "Altered by DOJ" censored bar (harmless no-op when there are no exposed alterations).
     loadCensoredBar();
 
     // Set timestamp for spam protection
     const timestampField = document.getElementById('feedback-timestamp');
-    if (timestampField) {
-        timestampField.value = Date.now().toString();
-    }
-    
-    // Check for ?doc= parameter to auto-open a shared document
-    const urlParams = new URLSearchParams(window.location.search);
-    const docId = urlParams.get('doc');
-    if (docId && /^[a-zA-Z0-9_\-]+$/.test(docId)) {
-        setTimeout(() => openDocument(docId), 100);
-    }
-    
-    // Check for ?q= parameter to auto-run a shared search
-    const searchQuery = urlParams.get('q');
-    if (searchQuery && searchQuery.length <= 500) {
-        setTimeout(() => {
-            elements.searchInput.value = searchQuery;
-            performSearch();
-        }, 200);
+    if (timestampField) timestampField.value = Date.now().toString();
+
+    // Restore whatever the URL describes (?q=, ?doc=, ?view=, filters, page...).
+    await applyUrlState();
+
+    // After the age gate, put the cursor in the search box on desktop (not on touch: it would pop the keyboard).
+    if (state.ageConfirmed && !state.lastSearchParams && window.matchMedia && window.matchMedia('(pointer: fine)').matches) {
+        elements.searchInput.focus({ preventScroll: true });
     }
 }
 
@@ -190,12 +1565,7 @@ function applyKeywordsToDropdowns(keywords) {
 }
 
 function applyPublicSettings(settings) {
-    if (settings.ask_ai_enabled === false) {
-        const askNavBtn = document.querySelector('.nav-btn[data-view="ask"]');
-        const askView = document.getElementById('ask-view');
-        if (askNavBtn) askNavBtn.style.display = 'none';
-        if (askView) askView.style.display = 'none';
-    }
+    if (settings.ask_ai_enabled === false) hideAskAi();
     initMonetization({
         adsEnabled: settings.ads_enabled === true,
         affiliateEnabled: settings.affiliate_enabled !== false
@@ -206,7 +1576,7 @@ function cacheElements() {
     // Navigation
     elements.navBtns = document.querySelectorAll('.nav-btn');
     elements.views = document.querySelectorAll('.view');
-    
+
     // Search
     elements.searchInput = document.getElementById('search-input');
     elements.searchBtn = document.getElementById('search-btn');
@@ -218,9 +1588,11 @@ function cacheElements() {
     elements.searchFileType = document.getElementById('search-file-type');
     elements.searchDateFrom = document.getElementById('search-date-from');
     elements.searchDateTo = document.getElementById('search-date-to');
+    elements.filtersToggle = document.getElementById('filters-toggle');
     elements.searchResults = document.getElementById('search-results');
     elements.resultsList = document.getElementById('results-list');
     elements.resultsCount = document.getElementById('results-count');
+    elements.resultsTitle = document.getElementById('results-title');
     elements.searchPagination = document.getElementById('search-pagination');
     elements.searchPrevPage = document.getElementById('search-prev-page');
     elements.searchNextPage = document.getElementById('search-next-page');
@@ -229,7 +1601,7 @@ function cacheElements() {
     elements.searchGoPage = document.getElementById('search-go-page');
     elements.statsGrid = document.getElementById('stats-grid');
     elements.statsDisplay = document.getElementById('stats-display');
-    
+
     // Browse
     elements.browseFilename = document.getElementById('browse-filename');
     elements.browseKeyword = document.getElementById('browse-keyword');
@@ -243,7 +1615,7 @@ function cacheElements() {
     elements.pageInfo = document.getElementById('page-info');
     elements.browsePageInput = document.getElementById('browse-page-input');
     elements.browseGoPage = document.getElementById('browse-go-page');
-    
+
     // Ask AI
     elements.askInput = document.getElementById('ask-input');
     elements.askBtn = document.getElementById('ask-btn');
@@ -252,26 +1624,29 @@ function cacheElements() {
     elements.sourcesList = document.getElementById('sources-list');
     elements.llmStatus = document.getElementById('llm-status');
     elements.exampleBtns = document.querySelectorAll('.example-btn');
-    
-    // Modal
+
+    // Document modal
     elements.modal = document.getElementById('document-modal');
+    elements.modalContent = elements.modal.querySelector('.modal-content');
     elements.modalBackdrop = elements.modal.querySelector('.modal-backdrop');
     elements.modalClose = elements.modal.querySelector('.modal-close');
     elements.modalTitle = document.getElementById('modal-title');
     elements.modalMeta = document.getElementById('modal-meta');
+    elements.modalAlteration = document.getElementById('modal-alteration');
+    elements.modalState = document.getElementById('modal-state');
     elements.modalText = document.getElementById('modal-text');
     elements.modalSummary = document.getElementById('modal-summary');
     elements.pdfIframe = document.getElementById('pdf-iframe');
     elements.pdfFallback = document.getElementById('pdf-fallback');
-    elements.modalTabs = document.querySelectorAll('.modal-tab');
-    
-    // Document Navigation
+    elements.modalTabs = elements.modal.querySelectorAll('[role="tab"]');
+
+    // Document navigation
     elements.docNavigation = document.getElementById('document-navigation');
     elements.docPrevBtn = document.getElementById('doc-prev-btn');
     elements.docNextBtn = document.getElementById('doc-next-btn');
     elements.docNavInfo = document.getElementById('doc-nav-info');
-    
-    // Search Help & Query Feedback
+
+    // Search help & query feedback
     elements.searchHelpToggle = document.getElementById('search-help-toggle');
     elements.searchHelpContent = document.getElementById('search-help-content');
     elements.queryFeedback = document.getElementById('query-feedback');
@@ -281,92 +1656,78 @@ function cacheElements() {
 function setupEventListeners() {
     // Navigation
     elements.navBtns.forEach(btn => {
-        btn.addEventListener('click', () => switchView(btn.dataset.view));
+        btn.addEventListener('click', () => switchView(btn.dataset.view, { userInitiated: true }));
     });
-    
+
+    // Back / Forward re-render from the URL
+    window.addEventListener('popstate', (e) => {
+        state.modalPushed = !!(e.state && e.state.ov);
+        applyUrlState();
+    });
+
     // Search
     elements.searchBtn.addEventListener('click', performSearch);
-    elements.searchInput.addEventListener('keypress', e => {
-        if (e.key === 'Enter') performSearch();
+    elements.searchInput.addEventListener('keydown', e => {
+        if (e.key === 'Enter' && !e.isComposing) performSearch();
     });
-    
-    // Clear search button
-    if (elements.clearSearchBtn) {
-        elements.clearSearchBtn.addEventListener('click', clearSearch);
+    if (elements.clearSearchBtn) elements.clearSearchBtn.addEventListener('click', clearSearch);
+    if (elements.searchHelpToggle) elements.searchHelpToggle.addEventListener('click', toggleSearchHelp);
+    if (elements.filtersToggle) {
+        elements.filtersToggle.addEventListener('click', () => setFiltersOpen(elements.filtersToggle.getAttribute('aria-expanded') !== 'true'));
     }
-    
-    // Search help toggle
-    if (elements.searchHelpToggle) {
-        elements.searchHelpToggle.addEventListener('click', toggleSearchHelp);
-    }
-    
-    // Search category change - load subcategories and re-run search
+    if (elements.searchType) elements.searchType.addEventListener('change', updateSearchTypeHint);
+
+    // Filter changes: re-run the active search (and keep the badge honest)
+    const rerun = () => {
+        updateFiltersCount();
+        if (state.lastSearchParams) {
+            state.searchPage = 0;
+            runSearch({ history: 'push' });
+        }
+    };
+
     if (elements.searchCategory) {
         elements.searchCategory.addEventListener('change', async () => {
             const category = elements.searchCategory.value;
             state.searchSubcategory = '';
-            if (elements.searchSubcategory) {
-                elements.searchSubcategory.value = '';
-            }
+            if (elements.searchSubcategory) elements.searchSubcategory.value = '';
             await loadSubcategories(category, 'search');
-            
-            // Re-run search if there's an active search
+            if (elements.searchCategory.value !== category) return;   // a newer change superseded this one
             if (state.lastSearchParams) {
-                state.searchPage = 0;
                 state.lastSearchParams.category = category || null;
                 state.lastSearchParams.subcategory = null;
-                performSearchWithPagination();
             }
+            rerun();
         });
     }
-    
-    // Search subcategory change - re-run search
     if (elements.searchSubcategory) {
         elements.searchSubcategory.addEventListener('change', () => {
             state.searchSubcategory = elements.searchSubcategory.value;
-            
-            // Re-run search if there's an active search
-            if (state.lastSearchParams) {
-                state.searchPage = 0;
-                state.lastSearchParams.subcategory = state.searchSubcategory || null;
-                performSearchWithPagination();
-            }
+            if (state.lastSearchParams) state.lastSearchParams.subcategory = state.searchSubcategory || null;
+            rerun();
         });
     }
-    
-    // Search file type change - re-run search
     if (elements.searchFileType) {
         elements.searchFileType.addEventListener('change', () => {
-            // Re-run search if there's an active search
-            if (state.lastSearchParams) {
-                state.searchPage = 0;
-                state.lastSearchParams.file_type = elements.searchFileType.value || null;
-                performSearchWithPagination();
-            }
+            if (state.lastSearchParams) state.lastSearchParams.file_type = elements.searchFileType.value || null;
+            rerun();
         });
     }
-    
-    // Search date range change - re-run search
-    if (elements.searchDateFrom) {
-        elements.searchDateFrom.addEventListener('change', () => {
+    ['searchDateFrom', 'searchDateTo'].forEach((name) => {
+        if (!elements[name]) return;
+        elements[name].addEventListener('change', () => {
+            const ok = validateDateRange();
+            updateFiltersCount();
+            if (!ok) return;
+            // Re-read both controls: the other bound may have been changed while the range was invalid.
             if (state.lastSearchParams) {
-                state.searchPage = 0;
                 state.lastSearchParams.date_from = elements.searchDateFrom.value || null;
-                performSearchWithPagination();
-            }
-        });
-    }
-    
-    if (elements.searchDateTo) {
-        elements.searchDateTo.addEventListener('change', () => {
-            if (state.lastSearchParams) {
-                state.searchPage = 0;
                 state.lastSearchParams.date_to = elements.searchDateTo.value || null;
-                performSearchWithPagination();
             }
+            rerun();
         });
-    }
-    
+    });
+
     // Browse
     let filenameSearchTimeout;
     if (elements.browseFilename) {
@@ -375,33 +1736,28 @@ function setupEventListeners() {
             filenameSearchTimeout = setTimeout(() => {
                 state.browseFilename = elements.browseFilename.value.trim();
                 state.browsePage = 0;
-                loadDocuments();
-            }, 300); // Debounce 300ms
+                loadDocuments({ history: 'replace' });   // typing must not spam the history
+            }, 300);
         });
     }
-    
-    // Topic keyword dropdown
     if (elements.browseKeyword) {
         elements.browseKeyword.addEventListener('change', async () => {
             state.browseKeyword = elements.browseKeyword.value;
             state.browsePage = 0;
-            // Reload categories with filtered counts
             await loadCategories(state.browseKeyword || null);
             loadDocuments();
         });
     }
-    
     elements.browseCategory.addEventListener('change', async () => {
         state.browseCategory = elements.browseCategory.value;
         state.browseSubcategory = '';
-        if (elements.browseSubcategory) {
-            elements.browseSubcategory.value = '';
-        }
+        if (elements.browseSubcategory) elements.browseSubcategory.value = '';
         state.browsePage = 0;
-        await loadSubcategories(state.browseCategory, 'browse');
+        const chosen = state.browseCategory;
+        await loadSubcategories(chosen, 'browse');
+        if (elements.browseCategory.value !== chosen) return;       // superseded by a newer change
         loadDocuments();
     });
-    
     if (elements.browseSubcategory) {
         elements.browseSubcategory.addEventListener('change', () => {
             state.browseSubcategory = elements.browseSubcategory.value;
@@ -409,7 +1765,6 @@ function setupEventListeners() {
             loadDocuments();
         });
     }
-    
     if (elements.browseFileType) {
         elements.browseFileType.addEventListener('change', () => {
             state.browseFileType = elements.browseFileType.value;
@@ -417,86 +1772,44 @@ function setupEventListeners() {
             loadDocuments();
         });
     }
-    
-    // Exclude dropdown toggles
-    const searchExcludeToggle = document.getElementById('search-exclude-toggle');
-    const browseExcludeToggle = document.getElementById('browse-exclude-toggle');
-    
-    if (searchExcludeToggle) {
-        searchExcludeToggle.addEventListener('click', (e) => {
-            e.stopPropagation();
-            toggleExcludeMenu('search-exclude-menu');
-            document.getElementById('browse-exclude-menu')?.classList.add('hidden');
-        });
-    }
-    
-    if (browseExcludeToggle) {
-        browseExcludeToggle.addEventListener('click', (e) => {
-            e.stopPropagation();
-            toggleExcludeMenu('browse-exclude-menu');
-            document.getElementById('search-exclude-menu')?.classList.add('hidden');
-        });
-    }
-    
-    // Close exclude menus when clicking outside
-    document.addEventListener('click', (e) => {
-        if (!e.target.closest('.exclude-dropdown-container')) {
-            document.getElementById('search-exclude-menu')?.classList.add('hidden');
-            document.getElementById('browse-exclude-menu')?.classList.add('hidden');
-        }
-    });
-    
+
     elements.prevPage.addEventListener('click', () => {
-        if (state.browsePage > 0) {
-            state.browsePage--;
-            loadDocuments();
-        }
+        if (state.browsePage > 0) { state.browsePage--; loadDocuments(); }
     });
     elements.nextPage.addEventListener('click', () => {
         state.browsePage++;
         loadDocuments();
     });
-
-    // Browse go-to-page
-    if (elements.browseGoPage) {
-        elements.browseGoPage.addEventListener('click', goToBrowsePage);
-    }
+    if (elements.browseGoPage) elements.browseGoPage.addEventListener('click', goToBrowsePage);
     if (elements.browsePageInput) {
         elements.browsePageInput.addEventListener('keydown', e => {
             if (e.key === 'Enter') { e.preventDefault(); goToBrowsePage(); }
         });
     }
-    
+
     // Search pagination
     if (elements.searchPrevPage) {
         elements.searchPrevPage.addEventListener('click', () => {
-            if (state.searchPage > 0) {
-                state.searchPage--;
-                performSearchWithPagination();
-            }
+            if (state.searchPage > 0) { state.searchPage--; runSearch({ history: 'push', focusHeading: true }); }
         });
     }
     if (elements.searchNextPage) {
         elements.searchNextPage.addEventListener('click', () => {
             state.searchPage++;
-            performSearchWithPagination();
+            runSearch({ history: 'push', focusHeading: true });
         });
     }
-
-    // Search go-to-page
-    if (elements.searchGoPage) {
-        elements.searchGoPage.addEventListener('click', goToSearchPage);
-    }
+    if (elements.searchGoPage) elements.searchGoPage.addEventListener('click', goToSearchPage);
     if (elements.searchPageInput) {
         elements.searchPageInput.addEventListener('keydown', e => {
             if (e.key === 'Enter') { e.preventDefault(); goToSearchPage(); }
         });
     }
-    
+
     // Ask AI
     elements.askBtn.addEventListener('click', askQuestion);
-    elements.askInput.addEventListener('keypress', e => {
-        if (e.key === 'Enter' && !e.shiftKey) {
+    elements.askInput.addEventListener('keydown', e => {
+        if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
             e.preventDefault();
             askQuestion();
         }
@@ -507,133 +1820,34 @@ function setupEventListeners() {
             askQuestion();
         });
     });
-    
-    // Modal
-    elements.modalClose.addEventListener('click', closeModal);
-    elements.modalBackdrop.addEventListener('click', closeModal);
+
+    // Document modal
+    elements.modalClose.addEventListener('click', requestCloseDocument);
+    elements.modalBackdrop.addEventListener('click', requestCloseDocument);
     elements.modalTabs.forEach(tab => {
         tab.addEventListener('click', () => switchModalTab(tab.dataset.tab));
     });
-    
-    // Document Navigation
-    if (elements.docPrevBtn) {
-        elements.docPrevBtn.addEventListener('click', () => navigateDocument(-1));
-    }
-    if (elements.docNextBtn) {
-        elements.docNextBtn.addEventListener('click', () => navigateDocument(1));
-    }
-    
-    // PDF Fullscreen toggle
+    if (elements.docPrevBtn) elements.docPrevBtn.addEventListener('click', () => navigateDocument(-1));
+    if (elements.docNextBtn) elements.docNextBtn.addEventListener('click', () => navigateDocument(1));
     const pdfFullscreenBtn = document.getElementById('pdf-fullscreen-btn');
     const pdfViewer = document.getElementById('modal-pdf-viewer');
-    
-    if (pdfFullscreenBtn && pdfViewer) {
-        pdfFullscreenBtn.addEventListener('click', () => {
-            togglePdfFullscreen(pdfViewer);
-        });
-        
-        // Exit fullscreen on Escape key
-        document.addEventListener('keydown', (e) => {
-            if (e.key === 'Escape' && pdfViewer.classList.contains('fullscreen')) {
-                togglePdfFullscreen(pdfViewer);
-            }
-        });
-    }
-    
-    // Share button
-    const shareBtn = document.getElementById('share-btn');
-    const shareMenu = document.getElementById('share-menu');
-    
-    if (shareBtn && shareMenu) {
-        shareBtn.addEventListener('click', (e) => {
-            e.stopPropagation();
-            shareMenu.classList.toggle('hidden');
-        });
-        
-        // Close share menu when clicking outside
-        document.addEventListener('click', (e) => {
-            if (!shareBtn.contains(e.target) && !shareMenu.contains(e.target)) {
-                shareMenu.classList.add('hidden');
-            }
-        });
-        
-        // Share option clicks
-        shareMenu.querySelectorAll('.share-option').forEach(option => {
-            option.addEventListener('click', () => {
-                handleShare(option.dataset.platform);
-                shareMenu.classList.add('hidden');
-            });
-        });
-    }
-    
-    // Search share button
-    const searchShareBtn = document.getElementById('search-share-btn');
-    const searchShareMenu = document.getElementById('search-share-menu');
-    
-    if (searchShareBtn && searchShareMenu) {
-        searchShareBtn.addEventListener('click', (e) => {
-            e.stopPropagation();
-            searchShareMenu.classList.toggle('hidden');
-        });
-        
-        // Close search share menu when clicking outside
-        document.addEventListener('click', (e) => {
-            if (!searchShareBtn.contains(e.target) && !searchShareMenu.contains(e.target)) {
-                searchShareMenu.classList.add('hidden');
-            }
-        });
-        
-        // Search share option clicks
-        searchShareMenu.querySelectorAll('.share-option').forEach(option => {
-            option.addEventListener('click', () => {
-                handleSearchShare(option.dataset.platform);
-                searchShareMenu.classList.add('hidden');
-            });
-        });
-    }
-    
+    if (pdfFullscreenBtn && pdfViewer) pdfFullscreenBtn.addEventListener('click', () => togglePdfFullscreen(pdfViewer));
+
     // Feedback form - use event delegation for reliability
     document.addEventListener('submit', (e) => {
-        if (e.target && e.target.id === 'feedback-form') {
-            handleFeedbackSubmit(e);
-        }
+        if (e.target && e.target.id === 'feedback-form') handleFeedbackSubmit(e);
     });
-    
-    // Keyboard shortcuts
-    document.addEventListener('keydown', e => {
-        if (e.key === 'Escape') {
-            closeModal();
-            closeExportModal();
-        }
-        // Arrow key navigation for documents when modal is open
-        if (!elements.modal.classList.contains('hidden') && state.documentList.length > 1) {
-            if (e.key === 'ArrowLeft') {
-                e.preventDefault();
-                navigateDocument(-1);
-            } else if (e.key === 'ArrowRight') {
-                e.preventDefault();
-                navigateDocument(1);
-            }
-        }
-    });
-    
+
     // Export CSV buttons -> open modal
     const exportSearchBtn = document.getElementById('export-search-results');
-    if (exportSearchBtn) {
-        exportSearchBtn.addEventListener('click', () => openExportModal('search'));
-    }
-    
+    if (exportSearchBtn) exportSearchBtn.addEventListener('click', () => openExportModal('search'));
     const exportBrowseBtn = document.getElementById('export-browse-results');
-    if (exportBrowseBtn) {
-        exportBrowseBtn.addEventListener('click', () => openExportModal('browse'));
-    }
+    if (exportBrowseBtn) exportBrowseBtn.addEventListener('click', () => openExportModal('browse'));
 
-    // Export modal controls
     const exportModalConfirm = document.getElementById('export-modal-confirm');
     const exportModalCancel = document.getElementById('export-modal-cancel');
     const exportModalClose = document.getElementById('export-modal-close');
     const exportModalBackdrop = document.querySelector('#export-modal > .modal-backdrop');
-
     if (exportModalConfirm) exportModalConfirm.addEventListener('click', confirmExport);
     if (exportModalCancel) exportModalCancel.addEventListener('click', closeExportModal);
     if (exportModalClose) exportModalClose.addEventListener('click', closeExportModal);
@@ -646,7 +1860,7 @@ async function handleFeedbackSubmit(e) {
     submitFeedback();
 }
 
-// Global function for onclick handler - exposed to window for inline onclick
+// Submit handler (wired through the form's submit event)
 window.submitFeedback = async function() {
     const form = document.getElementById('feedback-form');
     const btn = document.querySelector('.feedback-btn');
@@ -746,23 +1960,33 @@ function showFeedbackStatus(message, type) {
     }
 }
 
-function switchView(viewName) {
+function switchView(viewName, opts = {}) {
+    const { history: mode = 'push', skipLoad = false, userInitiated = false } = opts;
+    if (!VALID_VIEWS.includes(viewName) || (viewName === 'ask' && state.askDisabled)) viewName = 'search';
     state.currentView = viewName;
-    
+
     elements.navBtns.forEach(btn => {
-        btn.classList.toggle('active', btn.dataset.view === viewName);
+        const on = btn.dataset.view === viewName;
+        btn.classList.toggle('active', on);
+        if (on) btn.setAttribute('aria-current', 'page'); else btn.removeAttribute('aria-current');
     });
-    
-    elements.views.forEach(view => {
-        view.classList.toggle('active', view.id === `${viewName}-view`);
-    });
-    
-    // Load data for specific views
+    elements.views.forEach(view => view.classList.toggle('active', view.id === `${viewName}-view`));
+    closePopovers();
+    if (userInitiated) announce(VIEW_TITLES[viewName]);   // before any content announcement (e.g. the Browse count)
+
     if (viewName === 'browse') {
-        loadDocuments();
+        if (!skipLoad) loadDocuments({ history: mode });
+    } else {
+        state.renderedKey = currentBaseKey();
+        syncUrl(mode);
+    }
+    updateDocumentTitle();
+
+    if (userInitiated) {
+        const heading = document.querySelector(`#${viewName}-view h1`);
+        if (heading) { heading.tabIndex = -1; heading.focus({ preventScroll: true }); }
     }
 }
-window.switchView = switchView;
 
 async function loadStats() {
     try {
@@ -827,90 +2051,73 @@ async function loadCategories(keyword = null) {
 // Category Exclusion Functions (User Preferences)
 // ============================================================================
 
-// Render exclude dropdown checkboxes
+/** Rebuild the exclude checkboxes only when the list of file sets changed; otherwise just sync them (keeps keyboard focus). */
 function renderExcludeDropdowns() {
+    const key = JSON.stringify(state.categories.map(c => c.category));
     const html = state.categories.map(c => `
         <label>
-            <input type="checkbox" 
-                   value="${escapeHtml(c.category)}" 
+            <input type="checkbox"
+                   value="${escapeHtml(c.category)}"
                    data-category="${escapeHtml(c.category)}"
                    ${state.excludedCategories.includes(c.category) ? 'checked' : ''}>
             ${escapeHtml(c.category)}
         </label>
     `).join('');
-    
-    const searchOptions = document.getElementById('search-exclude-options');
-    const browseOptions = document.getElementById('browse-exclude-options');
-    if (searchOptions) searchOptions.innerHTML = html;
-    if (browseOptions) browseOptions.innerHTML = html;
-    
-    // Attach change handlers via data attributes instead of inline onchange
-    [searchOptions, browseOptions].forEach(container => {
+
+    ['search-exclude-options', 'browse-exclude-options'].forEach(id => {
+        const container = document.getElementById(id);
         if (!container) return;
-        container.querySelectorAll('input[type="checkbox"][data-category]').forEach(cb => {
-            cb.addEventListener('change', () => {
-                toggleCategoryExclusion(cb.dataset.category);
+        if (container.dataset.key === key) {
+            container.querySelectorAll('input[type="checkbox"][data-category]').forEach(cb => {
+                cb.checked = state.excludedCategories.includes(cb.dataset.category);
             });
+            return;
+        }
+        container.dataset.key = key;
+        container.innerHTML = html;
+        container.querySelectorAll('input[type="checkbox"][data-category]').forEach(cb => {
+            cb.addEventListener('change', () => toggleCategoryExclusion(cb.dataset.category));
         });
     });
-    
     updateExcludeButtons();
 }
 
-// Toggle a category exclusion
 function toggleCategoryExclusion(category) {
     const index = state.excludedCategories.indexOf(category);
-    if (index === -1) {
-        state.excludedCategories.push(category);
-    } else {
-        state.excludedCategories.splice(index, 1);
-    }
+    if (index === -1) state.excludedCategories.push(category);
+    else state.excludedCategories.splice(index, 1);
     saveExcludedCategories();
-    loadCategories(); // Refresh dropdowns
-    
-    // Refresh current view if needed
-    if (state.currentView === 'browse') {
-        loadDocuments();
-    }
+    refreshAfterExclusionChange();
 }
 
-// Save to localStorage
 function saveExcludedCategories() {
-    localStorage.setItem('excludedCategories', JSON.stringify(state.excludedCategories));
+    try { localStorage.setItem('excludedCategories', JSON.stringify(state.excludedCategories)); } catch (e) { /* storage blocked */ }
+    syncExcludeCheckboxes();
     updateExcludeButtons();
 }
 
-// Clear all exclusions
 function clearExclusions() {
     state.excludedCategories = [];
     saveExcludedCategories();
-    loadCategories();
-    if (state.currentView === 'browse') {
-        loadDocuments();
-    }
+    renderExcludeDropdowns();
+    refreshAfterExclusionChange();
 }
 
-// Update button text to show count
 function updateExcludeButtons() {
     const count = state.excludedCategories.length;
     const searchBtn = document.getElementById('search-exclude-toggle');
     const browseBtn = document.getElementById('browse-exclude-toggle');
-    
+    const arrow = ' <span aria-hidden="true">▼</span>';
     if (searchBtn) {
-        searchBtn.textContent = count > 0 ? `(${count}) ▼` : 'None ▼';
+        searchBtn.innerHTML = (count > 0 ? `(${count})` : 'None') + arrow;
         searchBtn.classList.toggle('active', count > 0);
     }
     if (browseBtn) {
-        browseBtn.textContent = count > 0 ? `Exclude (${count}) ▼` : 'Exclude ▼';
+        browseBtn.innerHTML = (count > 0 ? `Exclude (${count})` : 'Exclude') + arrow;
         browseBtn.classList.toggle('active', count > 0);
     }
 }
 
-// Toggle exclude menu visibility
-function toggleExcludeMenu(menuId) {
-    const menu = document.getElementById(menuId);
-    if (menu) menu.classList.toggle('hidden');
-}
 
 // Load keywords for topic filtering
 async function loadKeywords() {
@@ -983,23 +2190,13 @@ async function loadKeywords() {
     }
 }
 
-// Load public settings (like Ask AI visibility)
+// Fallback path (bootstrap failed): same effect as applyPublicSettings, no inline styles.
 async function loadPublicSettings() {
     try {
         const response = await fetch(`${API_BASE}/settings`);
         if (!response.ok) return;
-        
         const settings = await response.json();
-        
-        // Handle Ask AI visibility
-        if (settings.ask_ai_enabled === false) {
-            // Hide the Ask AI nav button and view
-            const askNavBtn = document.querySelector('.nav-btn[data-view="ask"]');
-            const askView = document.getElementById('ask-view');
-            
-            if (askNavBtn) askNavBtn.style.display = 'none';
-            if (askView) askView.style.display = 'none';
-        }
+        if (settings.ask_ai_enabled === false) hideAskAi();
     } catch (error) {
         console.error('Error loading public settings:', error);
     }
@@ -1047,21 +2244,18 @@ function removePinnedSkeleton() {
 function renderPinnedDocumentsBar(docs) {
     const searchView = document.getElementById('search-view');
     if (!searchView) return;
-    
+
     let pinnedBar = document.getElementById('pinned-documents-bar');
-    if (pinnedBar) {
-        pinnedBar.remove();
-    }
-    
-    const generateCardHTML = (doc) => `
-        <div class="pinned-card" onclick="openDocument('${escapeHtml(doc.document_id)}')">
+    if (pinnedBar) pinnedBar.remove();
+
+    const generateCardHTML = (doc) => {
+        const id = String(doc.document_id);
+        return `
+        <a class="pinned-card" href="${escapeHtml(buildUrl({ doc: id }))}" data-action="open-doc" data-doc-id="${escapeHtml(id)}">
             <div class="pinned-card-thumbnail">
-                <img src="${API_BASE}/documents/${doc.document_id}/thumbnail" 
-                     alt="${escapeHtml(doc.filename)}"
-                     loading="lazy"
-                     onerror="this.style.display='none'; this.nextElementSibling.style.display='flex';">
-                <div class="thumbnail-fallback" style="display: none;">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                <img src="${API_BASE}/documents/${encodeURIComponent(id)}/thumbnail" alt="" loading="lazy">
+                <div class="thumbnail-fallback">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
                         <path d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/>
                     </svg>
                 </div>
@@ -1071,38 +2265,36 @@ function renderPinnedDocumentsBar(docs) {
                 ${doc.reason ? `<div class="pinned-card-reason">"${escapeHtml(doc.reason)}"</div>` : ''}
                 <div class="pinned-card-meta">${escapeHtml(doc.category || 'Document')}</div>
             </div>
-        </div>
-    `;
-    
+        </a>`;
+    };
+
     const cardsHTML = docs.map(generateCardHTML).join('');
-    const duplicatedCardsHTML = cardsHTML + cardsHTML;
-    
+
     pinnedBar = document.createElement('div');
     pinnedBar.id = 'pinned-documents-bar';
     pinnedBar.className = 'pinned-documents-bar pinned-bar-fadein';
-    
     pinnedBar.innerHTML = `
         <div class="pinned-header">
-            <span class="pinned-icon">📌</span>
-            <span class="pinned-title">Featured Documents</span>
+            <span class="pinned-icon" aria-hidden="true">📌</span>
+            <h2 class="pinned-title">Featured Documents</h2>
             <span class="pinned-subtitle">Controversial & Notable Files</span>
+            <button type="button" class="pinned-pause" data-action="toggle-pinned" aria-pressed="false">
+                <span class="pinned-pause-icon" aria-hidden="true">⏸</span><span class="pinned-pause-label">Pause</span>
+            </button>
             <span class="pinned-suggestion-note">Have a document that should be featured? Use the "Send Feedback" form below to submit your suggestion!</span>
         </div>
-        <div class="pinned-scroll-container">
+        <div class="pinned-scroll-container" role="region" aria-label="Featured documents">
             <div class="pinned-scroll" id="pinned-scroll">
-                ${duplicatedCardsHTML}
+                ${cardsHTML}
+                <div class="pinned-dup" aria-hidden="true">${asDuplicateCards(cardsHTML)}</div>
             </div>
         </div>
     `;
-    
+
     removePinnedSkeleton();
-    
     const statsDisplay = document.getElementById('stats-display');
-    if (statsDisplay) {
-        statsDisplay.parentNode.insertBefore(pinnedBar, statsDisplay);
-    } else {
-        searchView.appendChild(pinnedBar);
-    }
+    if (statsDisplay) statsDisplay.parentNode.insertBefore(pinnedBar, statsDisplay);
+    else searchView.appendChild(pinnedBar);
 }
 
 // =============================================================================
@@ -1118,21 +2310,25 @@ function formatAlteredOn(stamp) {
 
 let _alterationCompare = { oldId: null, newId: null, title: '' };
 
-async function loadDocumentAlterationBadge(docId) {
+async function loadDocumentAlterationBadge(docId, seq) {
     try {
-        const resp = await fetch(`${API_BASE}/documents/${docId}/alteration`);
+        const resp = await fetch(`${API_BASE}/documents/${encodeURIComponent(docId)}/alteration`);
         if (!resp.ok) return;
         const a = await resp.json();
-        if (!a.altered || !elements.modalMeta || (state.currentDocument && state.currentDocument.id !== docId)) return;
+        // Ignore a late answer for a document that is no longer the open one.
+        if (seq !== state.docSeq || state.openDocId !== docId) return;
+        if (!a.altered || !elements.modalAlteration) return;
         const removed = a.lines_removed || 0;
         const when = a.altered_on ? formatAlteredOn(a.altered_on) : '';
-        let badge = `<span style="display:inline-flex;align-items:center;gap:6px;color:#ef4444;border:1px solid #ef4444;border-radius:10px;padding:2px 10px;font-weight:600;">⚠ DOJ altered this document${removed ? ` — ${formatNumber(removed)} lines removed` : ''}${when ? ` · ${when}` : ''}</span>`;
+        // Full wording on desktop, a compact one-row version on phones (CSS swaps which span is shown).
+        let html = `<span class="altered-badge"><span aria-hidden="true">⚠</span> <span class="alt-long">DOJ altered this document${removed ? ` — ${formatNumber(removed)} lines removed` : ''}${when ? ` · ${escapeHtml(when)}` : ''}</span><span class="alt-short">Altered by DOJ</span></span>`;
         if (a.exposed && a.old_id) {
             _alterationCompare = { oldId: a.old_id, newId: a.new_id, title: (state.currentDocument && state.currentDocument.filename) || '' };
-            badge += ` <button style="cursor:pointer;border:1px solid #ef4444;background:rgba(239,68,68,0.1);color:#ef4444;border-radius:8px;padding:3px 10px;font-weight:600;font-size:0.8rem;" onclick="openExposedCompare()">See what changed →</button>`;
+            html += '<button type="button" class="altered-compare-btn" data-action="open-exposed-compare"><span class="alt-long">See what changed</span><span class="alt-short">Compare</span> →</button>';
         }
-        elements.modalMeta.insertAdjacentHTML('beforeend', `<span style="flex-basis:100%;height:4px;"></span>${badge}`);
-    } catch (e) {}
+        elements.modalAlteration.innerHTML = html;
+        setHidden(elements.modalAlteration, false);
+    } catch (e) { /* best-effort */ }
 }
 
 function openExposedCompare() {
@@ -1146,22 +2342,23 @@ function openPublicCompare(oldId, newId, title) {
     modal.dataset.newId = newId;
     const titleEl = document.getElementById('public-compare-title');
     if (titleEl) titleEl.textContent = title ? `What changed: ${title}` : 'What changed';
-    modal.classList.remove('hidden');
+    openDialog(modal, { trigger: document.activeElement, onRequestClose: closePublicCompare });
     switchPublicCompareTab('visual');
 }
 
 function closePublicCompare() {
     const modal = document.getElementById('public-compare-modal');
-    if (modal) modal.classList.add('hidden');
     const body = document.getElementById('public-compare-body');
     if (body) body.innerHTML = '';
+    closeDialog(modal);
 }
 
 function switchPublicCompareTab(tab) {
     const vb = document.getElementById('public-compare-tab-visual');
     const tb = document.getElementById('public-compare-tab-text');
-    if (vb) vb.classList.toggle('active', tab === 'visual');
-    if (tb) tb.classList.toggle('active', tab === 'text');
+    const body = document.getElementById('public-compare-body');
+    syncTabs(vb && vb.closest('[role="tablist"]'), tab === 'visual' ? vb : tb);
+    if (body) body.setAttribute('aria-labelledby', tab === 'visual' ? 'public-compare-tab-visual' : 'public-compare-tab-text');
     if (tab === 'visual') renderPublicCompareVisual(); else renderPublicCompareText();
 }
 
@@ -1169,17 +2366,17 @@ function renderPublicCompareVisual() {
     const modal = document.getElementById('public-compare-modal');
     const body = document.getElementById('public-compare-body');
     if (!modal || !body) return;
-    const oldUrl = `${API_BASE}/documents/${modal.dataset.oldId}/file`;
-    const newUrl = `${API_BASE}/documents/${modal.dataset.newId}/file`;
+    const oldUrl = `${API_BASE}/documents/${encodeURIComponent(modal.dataset.oldId)}/file`;
+    const newUrl = `${API_BASE}/documents/${encodeURIComponent(modal.dataset.newId)}/file`;
     body.innerHTML = `
-        <div style="display:flex;gap:8px;width:100%;height:100%;">
-            <div style="flex:1;display:flex;flex-direction:column;min-width:0;">
-                <div style="padding:6px 10px;background:rgba(239,68,68,0.12);color:#ef4444;font-size:0.8rem;font-weight:600;">Original — before DOJ's change</div>
-                <iframe src="${oldUrl}#view=FitH" style="flex:1;width:100%;border:0;background:#fff;"></iframe>
+        <div class="compare-panes">
+            <div class="compare-pane">
+                <div class="compare-pane-label old">Original — before DOJ's change</div>
+                <iframe title="Original document, before DOJ's change" src="${escapeHtml(oldUrl)}#view=FitH"></iframe>
             </div>
-            <div style="flex:1;display:flex;flex-direction:column;min-width:0;">
-                <div style="padding:6px 10px;background:rgba(34,197,94,0.12);color:#16a34a;font-size:0.8rem;font-weight:600;">Current — after DOJ's change</div>
-                <iframe src="${newUrl}#view=FitH" style="flex:1;width:100%;border:0;background:#fff;"></iframe>
+            <div class="compare-pane">
+                <div class="compare-pane-label new">Current — after DOJ's change</div>
+                <iframe title="Current document, after DOJ's change" src="${escapeHtml(newUrl)}#view=FitH"></iframe>
             </div>
         </div>`;
 }
@@ -1188,26 +2385,27 @@ async function renderPublicCompareText() {
     const modal = document.getElementById('public-compare-modal');
     const body = document.getElementById('public-compare-body');
     if (!modal || !body) return;
-    body.innerHTML = '<div style="padding:24px;color:#888;">Loading diff…</div>';
+    const note = (cls, text) => { body.innerHTML = `<div class="compare-state ${cls}">${text}</div>`; };
+    note('', 'Loading diff…');
     try {
         const resp = await fetch(`${API_BASE}/version-diff?old=${encodeURIComponent(modal.dataset.oldId)}&new=${encodeURIComponent(modal.dataset.newId)}`);
         if (!resp.ok) throw new Error('HTTP ' + resp.status);
         const data = await resp.json();
-        if (!data.has_text) { body.innerHTML = '<div style="padding:24px;color:#888;">No extracted text to diff — use the Side-by-side view.</div>'; return; }
-        if (data.identical) { body.innerHTML = '<div style="padding:24px;color:#16a34a;">The transcribed text is identical — the change was visual (e.g. a redaction box). Use Side-by-side.</div>'; return; }
+        if (!data.has_text) { note('', 'No extracted text to diff — use the Side-by-side view.'); return; }
+        if (data.identical) { note('ok', 'The transcribed text is identical — the change was visual (e.g. a redaction box). Use Side-by-side.'); return; }
         let rows = '';
         for (const ln of (data.lines || [])) {
-            let bg = 'transparent', color = 'inherit', prefix = ' ';
-            if (ln.type === 'add') { bg = 'rgba(34,197,94,0.12)'; color = '#16a34a'; prefix = '+'; }
-            else if (ln.type === 'del') { bg = 'rgba(239,68,68,0.14)'; color = '#dc2626'; prefix = '−'; }
-            else if (ln.type === 'hunk') { bg = 'rgba(127,127,127,0.12)'; color = '#888'; prefix = ''; }
-            rows += `<div style="background:${bg};color:${color};white-space:pre-wrap;word-break:break-word;padding:0 8px;">${escapeHtml(prefix + (ln.text || ''))}</div>`;
+            let cls = '', prefix = ' ';
+            if (ln.type === 'add') { cls = 'add'; prefix = '+'; }
+            else if (ln.type === 'del') { cls = 'del'; prefix = '−'; }
+            else if (ln.type === 'hunk') { cls = 'hunk'; prefix = ''; }
+            rows += `<div class="diff-row ${cls}">${escapeHtml(prefix + (ln.text || ''))}</div>`;
         }
-        body.innerHTML = `<div style="width:100%;height:100%;display:flex;flex-direction:column;">
-            <div style="padding:8px 12px;font-size:0.85rem;border-bottom:1px solid var(--border,#333);"><strong style="color:#dc2626;">−${data.removed} removed</strong> · <strong style="color:#16a34a;">+${data.added} added</strong> <span style="color:#888;">(original → current)</span></div>
-            <div style="flex:1;overflow:auto;font-family:monospace;font-size:0.8rem;line-height:1.5;">${rows}</div></div>`;
+        body.innerHTML = `<div class="diff-wrap">
+            <div class="diff-summary"><strong class="removed">−${Number(data.removed) || 0} removed</strong> · <strong class="added">+${Number(data.added) || 0} added</strong> <span>(original → current)</span></div>
+            <div class="diff-rows" tabindex="0" role="region" aria-label="Text differences">${rows}</div></div>`;
     } catch (e) {
-        body.innerHTML = '<div style="padding:24px;color:#dc2626;">Couldn\'t load the diff.</div>';
+        note('error', 'Couldn\'t load the diff.');
     }
 }
 
@@ -1227,30 +2425,32 @@ function renderCensoredBar(items, total) {
     const existing = document.getElementById('censored-documents-bar');
     if (existing) existing.remove();
     const card = (d) => `
-        <div class="pinned-card" onclick="openPublicCompare('${d.old_id}','${d.new_id}','${escapeHtml(d.filename || '')}')">
+        <button type="button" class="pinned-card" data-action="open-compare" data-old="${escapeHtml(d.old_id)}" data-new="${escapeHtml(d.new_id)}" data-title="${escapeHtml(d.filename || '')}">
             <div class="pinned-card-thumbnail">
-                <img src="${API_BASE}/documents/${d.new_id}/thumbnail" alt="${escapeHtml(d.filename || '')}" loading="lazy"
-                     onerror="this.style.display='none';this.nextElementSibling.style.display='flex';">
-                <div class="thumbnail-fallback" style="display:none;"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/></svg></div>
+                <img src="${API_BASE}/documents/${encodeURIComponent(d.new_id)}/thumbnail" alt="" loading="lazy">
+                <div class="thumbnail-fallback"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/></svg></div>
             </div>
             <div class="pinned-card-content">
                 <div class="pinned-card-filename">${escapeHtml(d.filename || '')}</div>
-                <div class="pinned-card-reason" style="color:#ef4444;">−${formatNumber(d.lines_removed || 0)} lines removed by DOJ</div>
-                <div class="pinned-card-meta">Set ${d.dataset_num} · click to compare</div>
+                <div class="pinned-card-reason removed">−${formatNumber(d.lines_removed || 0)} lines removed by DOJ</div>
+                <div class="pinned-card-meta">Set ${escapeHtml(d.dataset_num)} · click to compare</div>
             </div>
-        </div>`;
+        </button>`;
     const cards = items.map(card).join('');
     const bar = document.createElement('div');
     bar.id = 'censored-documents-bar';
     bar.className = 'pinned-documents-bar pinned-bar-fadein';
     bar.innerHTML = `
         <div class="pinned-header">
-            <span class="pinned-icon">🚩</span>
-            <span class="pinned-title">Altered by DOJ</span>
+            <span class="pinned-icon" aria-hidden="true">🚩</span>
+            <h2 class="pinned-title">Altered by DOJ</h2>
             <span class="pinned-subtitle">Documents changed after release — see what was removed</span>
-            <span class="pinned-suggestion-note"><a href="#" onclick="openAlteredGallery();return false;" style="color:inherit;text-decoration:underline;">View all ${formatNumber(total)} →</a></span>
+            <button type="button" class="pinned-pause" data-action="toggle-pinned" aria-pressed="false">
+                <span class="pinned-pause-icon" aria-hidden="true">⏸</span><span class="pinned-pause-label">Pause</span>
+            </button>
+            <span class="pinned-suggestion-note"><button type="button" class="inline-link link-subtle" data-action="open-gallery">View all ${formatNumber(total)} →</button></span>
         </div>
-        <div class="pinned-scroll-container"><div class="pinned-scroll">${cards}${cards}</div></div>`;
+        <div class="pinned-scroll-container" role="region" aria-label="Documents altered by DOJ"><div class="pinned-scroll">${cards}<div class="pinned-dup" aria-hidden="true">${asDuplicateCards(cards)}</div></div></div>`;
     const pinnedBar = document.getElementById('pinned-documents-bar');
     const statsDisplay = document.getElementById('stats-display');
     if (pinnedBar) pinnedBar.parentNode.insertBefore(bar, pinnedBar.nextSibling);
@@ -1262,78 +2462,65 @@ async function openAlteredGallery() {
     const modal = document.getElementById('altered-gallery-modal');
     const body = document.getElementById('altered-gallery-body');
     if (!modal || !body) return;
-    modal.classList.remove('hidden');
-    body.innerHTML = '<div style="padding:24px;color:#888;">Loading…</div>';
+    openDialog(modal, { trigger: document.activeElement, onRequestClose: closeAlteredGallery });
+    body.innerHTML = '<div class="compare-state">Loading…</div>';
     try {
         const resp = await fetch(`${API_BASE}/altered-documents?limit=200`);
         const data = await resp.json();
         const items = data.altered_documents || [];
-        if (!items.length) { body.innerHTML = '<div style="padding:24px;color:#888;">No exposed alterations yet.</div>'; return; }
-        body.innerHTML = '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:12px;padding:12px;">' +
-            items.map(d => `
-                <div onclick="openPublicCompare('${d.old_id}','${d.new_id}','${escapeHtml(d.filename || '')}')" style="cursor:pointer;border:1px solid var(--border,#333);border-radius:8px;padding:10px;">
-                    <div style="font-family:monospace;font-size:0.85rem;margin-bottom:4px;">${escapeHtml(d.filename || '')}</div>
-                    <div style="color:#ef4444;font-weight:600;font-size:0.8rem;">−${formatNumber(d.lines_removed || 0)} lines removed</div>
-                    <div style="color:#888;font-size:0.75rem;">Set ${d.dataset_num}${d.altered_on ? ' · ' + formatAlteredOn(d.altered_on) : ''}</div>
-                </div>`).join('') + '</div>';
+        if (!items.length) { body.innerHTML = '<div class="compare-state">No exposed alterations yet.</div>'; return; }
+        body.innerHTML = '<div class="gallery-grid">' + items.map(d => `
+            <button type="button" class="gallery-card" data-action="open-compare" data-old="${escapeHtml(d.old_id)}" data-new="${escapeHtml(d.new_id)}" data-title="${escapeHtml(d.filename || '')}">
+                <div class="g-name">${escapeHtml(d.filename || '')}</div>
+                <div class="g-removed">−${formatNumber(d.lines_removed || 0)} lines removed</div>
+                <div class="g-meta">Set ${escapeHtml(d.dataset_num)}${d.altered_on ? ' · ' + escapeHtml(formatAlteredOn(d.altered_on)) : ''}</div>
+            </button>`).join('') + '</div>';
     } catch (e) {
-        body.innerHTML = '<div style="padding:24px;color:#dc2626;">Couldn\'t load.</div>';
+        body.innerHTML = '<div class="compare-state error">Couldn\'t load.</div>';
     }
 }
 
 function closeAlteredGallery() {
-    const modal = document.getElementById('altered-gallery-modal');
-    if (modal) modal.classList.add('hidden');
+    closeDialog(document.getElementById('altered-gallery-modal'));
 }
 
 async function loadSubcategories(category, target = 'search') {
     const subcategoryEl = target === 'search' ? elements.searchSubcategory : elements.browseSubcategory;
     const groupEl = target === 'search' ? elements.searchSubcategoryGroup : null;
-    
     if (!subcategoryEl) return;
-    
-    // Hide if no category selected
+    // The browse select hides itself; the search select hides its labelled group.
+    const toggle = (show) => setHidden(groupEl || subcategoryEl, !show);
+
+    const seq = (state._subSeq[target] = (state._subSeq[target] || 0) + 1);
     if (!category) {
-        if (groupEl) groupEl.style.display = 'none';
-        subcategoryEl.style.display = 'none';
+        toggle(false);
         subcategoryEl.innerHTML = '<option value="">All Sections</option>';
         return;
     }
-    
     try {
         const response = await fetch(`${API_BASE}/subcategories?category=${encodeURIComponent(category)}`);
         if (!response.ok) throw new Error('Failed to load subcategories');
-        
         const data = await response.json();
+        if (seq !== state._subSeq[target]) return;                 // a newer request owns the dropdown now
         const subcategories = data.subcategories || [];
-        
-        // Only show if there are multiple subcategories
         if (subcategories.length > 1) {
-            const options = subcategories.map(s => 
-                `<option value="${escapeHtml(s.subcategory)}">${escapeHtml(s.subcategory)} (${s.count})</option>`
-            ).join('');
-            
+            const options = subcategories.map(s =>
+                `<option value="${escapeHtml(s.subcategory)}">${escapeHtml(s.subcategory)} (${s.count})</option>`).join('');
             subcategoryEl.innerHTML = '<option value="">All Sections</option>' + options;
-            if (groupEl) groupEl.style.display = 'block';
-            subcategoryEl.style.display = 'block';
+            toggle(true);
         } else {
-            if (groupEl) groupEl.style.display = 'none';
-            subcategoryEl.style.display = 'none';
+            toggle(false);
             subcategoryEl.innerHTML = '<option value="">All Sections</option>';
         }
     } catch (error) {
         console.error('Error loading subcategories:', error);
-        if (groupEl) groupEl.style.display = 'none';
-        subcategoryEl.style.display = 'none';
+        toggle(false);
     }
 }
 
 function renderStats() {
     if (!state.stats) return;
-    
     const stats = state.stats;
-    
-    // Get file type counts
     const fileTypes = stats.by_file_type || [];
     const pdfCount = fileTypes.find(f => f.file_type === 'pdf')?.count || 0;
     const documentCount = fileTypes.find(f => f.file_type === 'document')?.count || 0;
@@ -1341,88 +2528,61 @@ function renderStats() {
     const audioCount = fileTypes.find(f => f.file_type === 'audio')?.count || 0;
     const videoCount = fileTypes.find(f => f.file_type === 'video')?.count || 0;
     const imageCount = fileTypes.find(f => f.file_type === 'image')?.count || 0;
-    
+
+    const card = (browse, icon, value, label, title, action) => `
+        <button type="button" class="stat-card file-type-card clickable" data-browse="${browse}" title="${title}">
+            <span class="stat-value"><span aria-hidden="true">${icon}</span> ${formatNumber(value)}</span>
+            <span class="stat-label">${label}</span>
+            <span class="stat-action">${action}</span>
+        </button>`;
+
     elements.statsGrid.innerHTML = `
-        <div class="stat-card clickable" data-browse="all" title="Browse all files">
-            <div class="stat-value">${formatNumber(stats.total_documents)}</div>
-            <div class="stat-label">Total Files</div>
-            <div class="stat-action">Browse All →</div>
-        </div>
+        <button type="button" class="stat-card clickable" data-browse="all" title="Browse all files">
+            <span class="stat-value">${formatNumber(stats.total_documents)}</span>
+            <span class="stat-label">Total Files</span>
+            <span class="stat-action">Browse All →</span>
+        </button>
         <div class="stat-card">
             <div class="stat-value">${formatNumber(stats.total_pages)}</div>
             <div class="stat-label">Total Pages</div>
         </div>
-        <div class="stat-card file-type-card clickable" data-browse="documents" title="Browse all documents">
-            <div class="stat-value">📄 ${formatNumber(totalDocCount)}</div>
-            <div class="stat-label">Documents</div>
-            <div class="stat-action">Browse →</div>
-        </div>
-        <div class="stat-card file-type-card clickable" data-browse="audio" title="Browse audio files">
-            <div class="stat-value">🎵 ${formatNumber(audioCount)}</div>
-            <div class="stat-label">Audio Files</div>
-            <div class="stat-action">Browse →</div>
-        </div>
-        ${imageCount > 0 ? `
-        <div class="stat-card file-type-card clickable" data-browse="image" title="Browse image files">
-            <div class="stat-value">🖼️ ${formatNumber(imageCount)}</div>
-            <div class="stat-label">Image Files</div>
-            <div class="stat-action">Browse →</div>
-        </div>
-        ` : ''}
-        <div class="stat-card file-type-card clickable" data-browse="video" title="Browse video files">
-            <div class="stat-value">🎬 ${formatNumber(videoCount)}</div>
-            <div class="stat-label">Video Files</div>
-            <div class="stat-action">Browse →</div>
-        </div>
+        ${card('documents', '📄', totalDocCount, 'Documents', 'Browse all documents', 'Browse →')}
+        ${card('audio', '🎵', audioCount, 'Audio Files', 'Browse audio files', 'Browse →')}
+        ${imageCount > 0 ? card('image', '🖼️', imageCount, 'Image Files', 'Browse image files', 'Browse →') : ''}
+        ${card('video', '🎬', videoCount, 'Video Files', 'Browse video files', 'Browse →')}
     `;
-    
-    // Add click handlers for browsable stat cards
-    elements.statsGrid.querySelectorAll('.stat-card.clickable').forEach(card => {
-        card.addEventListener('click', async () => {
-            const browseType = card.dataset.browse;
-            if (browseType === 'all' || browseType === 'documents') {
-                state.browseFileType = '';
-            } else {
-                state.browseFileType = browseType;
-            }
+
+    elements.statsGrid.querySelectorAll('.stat-card.clickable').forEach(btn => {
+        btn.addEventListener('click', async () => {
+            const browseType = btn.dataset.browse;
+            state.browseFileType = (browseType === 'all' || browseType === 'documents') ? '' : browseType;
             state.browseCategory = '';
+            state.browseSubcategory = '';
             state.browseKeyword = '';
+            state.browseFilename = '';
             state.browsePage = 0;
-            
-            // Update the browse filter dropdown
-            if (elements.browseFileType) {
-                elements.browseFileType.value = state.browseFileType;
-            }
-            if (elements.browseCategory) {
-                elements.browseCategory.value = '';
-            }
-            if (elements.browseKeyword) {
-                elements.browseKeyword.value = '';
-            }
-            
-            // Reload categories with full counts (no keyword filter)
+            if (elements.browseFileType) elements.browseFileType.value = state.browseFileType;
+            if (elements.browseCategory) elements.browseCategory.value = '';
+            if (elements.browseKeyword) elements.browseKeyword.value = '';
+            if (elements.browseFilename) elements.browseFilename.value = '';
             await loadCategories();
-            
-            // Switch to browse view
-            switchView('browse');
+            await loadSubcategories('', 'browse');
+            switchView('browse', { userInitiated: true });
         });
     });
-    
+
     // Also update the file type filter with counts
     if (elements.searchFileType) {
-        let searchFileTypeHtml = `
+        const current = elements.searchFileType.value;
+        let html = `
             <option value="">All Files (${formatNumber(stats.total_documents)})</option>
             <option value="pdf">📄 PDF Documents (${formatNumber(pdfCount)})</option>
             <option value="document">📄 Scanned Documents (${formatNumber(documentCount)})</option>
             <option value="audio">🎵 Audio (${formatNumber(audioCount)})</option>`;
-        if (imageCount > 0) {
-            searchFileTypeHtml += `
-            <option value="image">🖼️ Images (${formatNumber(imageCount)})</option>`;
-        }
-        searchFileTypeHtml += `
-            <option value="video">🎬 Video (${formatNumber(videoCount)})</option>
-        `;
-        elements.searchFileType.innerHTML = searchFileTypeHtml;
+        if (imageCount > 0) html += `<option value="image">🖼️ Images (${formatNumber(imageCount)})</option>`;
+        html += `<option value="video">🎬 Video (${formatNumber(videoCount)})</option>`;
+        elements.searchFileType.innerHTML = html;
+        if (current && [...elements.searchFileType.options].some(o => o.value === current)) elements.searchFileType.value = current;
     }
 }
 
@@ -1442,141 +2602,26 @@ function updateLLMStatus() {
 
 async function performSearch() {
     const query = elements.searchInput.value.trim();
-    if (!query) return;
-    
-    // Reset to first page on new search
+    if (query.length < 2) {
+        announce('Type at least two characters to search.');
+        elements.searchInput.focus();
+        return;
+    }
+    if (!validateDateRange()) {
+        if (elements.searchDateFrom) elements.searchDateFrom.focus();
+        return;
+    }
     state.searchPage = 0;
-    
-    // Store search params for pagination
-    state.lastSearchParams = {
-        query: query,
-        search_type: elements.searchType.value,
-        category: elements.searchCategory.value || null,
-        subcategory: elements.searchSubcategory?.value || null,
-        file_type: elements.searchFileType?.value || null,
-        date_from: elements.searchDateFrom?.value || null,
-        date_to: elements.searchDateTo?.value || null
-    };
-    
-    await performSearchWithPagination();
+    state.lastSearchParams = readSearchControls();
+    await runSearch({ history: 'push' });
 }
 
-async function performSearchWithPagination() {
-    if (!state.lastSearchParams) return;
-    
-    elements.searchBtn.disabled = true;
-    elements.searchBtn.innerHTML = '<span class="loading-spinner"></span> Searching...';
-    
-    const offset = state.searchPage * state.searchLimit;
-    
-    try {
-        const response = await fetch(`${API_BASE}/search`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                ...state.lastSearchParams,
-                limit: state.searchLimit,
-                offset: offset
-            })
-        });
-        
-        if (!response.ok) throw new Error('Search failed');
-        
-        const data = await response.json();
-        state.searchTotal = data.total;
-        renderSearchResults(data);
-        
-        // Display query interpretation feedback if Boolean operators were used
-        if (data.parsed_query) {
-            displayQueryFeedback(data.parsed_query);
-        }
-        
-        // Hide stats, show results
-        elements.statsDisplay.classList.add('hidden');
-        elements.searchResults.classList.remove('hidden');
-        
-        // Scroll to top of results
-        elements.searchResults.scrollIntoView({ behavior: 'smooth', block: 'start' });
-        
-    } catch (error) {
-        console.error('Search error:', error);
-        elements.resultsList.innerHTML = '<p class="error">Search failed. Please try again.</p>';
-        elements.searchResults.classList.remove('hidden');
-        // Hide query feedback on error
-        if (elements.queryFeedback) {
-            elements.queryFeedback.classList.add('hidden');
-        }
-    } finally {
-        elements.searchBtn.disabled = false;
-        elements.searchBtn.innerHTML = '<span>Search</span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12h14m-7-7l7 7-7 7"/></svg>';
-        
-        // Show clear button after search
-        if (elements.clearSearchBtn) {
-            elements.clearSearchBtn.classList.remove('hidden');
-        }
-    }
-}
 
 async function clearSearch() {
-    // Clear the search input
-    elements.searchInput.value = '';
-    
-    // Reset search state
-    state.lastSearchParams = null;
-    state.searchPage = 0;
-    state.searchTotal = 0;
-    
-    // Reset filter dropdowns to "All" 
-    if (elements.searchCategory) {
-        elements.searchCategory.value = '';
-    }
-    if (elements.searchSubcategory) {
-        elements.searchSubcategory.value = '';
-    }
-    if (elements.searchFileType) {
-        elements.searchFileType.value = '';
-    }
-    
-    // Reset date range inputs
-    if (elements.searchDateFrom) {
-        elements.searchDateFrom.value = '';
-    }
-    if (elements.searchDateTo) {
-        elements.searchDateTo.value = '';
-    }
-    
-    // Hide subcategory group
-    if (elements.searchSubcategoryGroup) {
-        elements.searchSubcategoryGroup.style.display = 'none';
-    }
-    
-    // Hide search results and show stats
-    elements.searchResults.classList.add('hidden');
-    elements.statsDisplay.classList.remove('hidden');
-    
-    // Hide pagination
-    if (elements.searchPagination) {
-        elements.searchPagination.classList.add('hidden');
-    }
-    
-    // Hide clear button
-    if (elements.clearSearchBtn) {
-        elements.clearSearchBtn.classList.add('hidden');
-    }
-    
-    // Hide query feedback
-    if (elements.queryFeedback) {
-        elements.queryFeedback.classList.add('hidden');
-    }
-    
-    // Reload original categories with full counts
-    await loadCategories();
-    
-    // Reset file type dropdown to original counts
-    await loadStats();
-    
-    // Scroll to top
-    window.scrollTo({ top: 0, behavior: 'smooth' });
+    showSearchHome();
+    syncUrl('push');
+    window.scrollTo({ top: 0, behavior: scrollBehavior() });
+    elements.searchInput.focus({ preventScroll: true });
 }
 
 /**
@@ -1663,248 +2708,147 @@ function displayQueryFeedback(parsedQuery) {
     elements.queryFeedback.classList.remove('hidden');
 }
 
-function renderSearchResults(data) {
-    // Filter out results from user-excluded categories (client-side filtering)
-    let filteredResults = data.results || [];
-    if (state.excludedCategories.length > 0 && !state.lastSearchParams?.category) {
-        // Only filter if searching "All File Sets" (no specific category selected)
-        filteredResults = filteredResults.filter(r => !state.excludedCategories.includes(r.category));
-    }
-    
+function renderSearchResults(data, { focusHeading = false } = {}) {
+    const results = data.results || [];
+    const params = state.lastSearchParams || {};
     const totalPages = Math.ceil(data.total / state.searchLimit);
     const startResult = state.searchPage * state.searchLimit + 1;
-    const endResult = Math.min((state.searchPage + 1) * state.searchLimit, data.total);
-    
-    // Build filter context string
+    const endResult = startResult + results.length - 1;
+
     let filterContext = '';
-    if (state.lastSearchParams) {
-        const filters = [];
-        if (state.lastSearchParams.category) {
-            filters.push(state.lastSearchParams.category);
-        }
-        if (state.lastSearchParams.subcategory) {
-            filters.push(state.lastSearchParams.subcategory);
-        }
-        if (state.lastSearchParams.file_type) {
-            const typeLabels = { pdf: 'PDF Documents', document: 'Scanned Documents', audio: 'Audio', image: 'Images', video: 'Video' };
-            filters.push(typeLabels[state.lastSearchParams.file_type] || state.lastSearchParams.file_type);
-        }
-        if (filters.length > 0) {
-            filterContext = ` in ${filters.join(' › ')}`;
-        }
-    }
-    
-    // Add exclusion note if categories are being filtered
+    const ctx = [];
+    if (params.category) ctx.push(params.category);
+    if (params.subcategory) ctx.push(params.subcategory);
+    if (params.file_type) ctx.push(FILE_TYPE_LABELS[params.file_type] || params.file_type);
+    if (ctx.length) filterContext = ` in ${ctx.join(' › ')}`;
+
     let exclusionNote = '';
-    if (state.excludedCategories.length > 0 && !state.lastSearchParams?.category) {
-        exclusionNote = ` (excluding ${state.excludedCategories.length} file set${state.excludedCategories.length > 1 ? 's' : ''})`;
+    if (!params.category && state.excludedCategories.length) {
+        const n = state.excludedCategories.length;
+        exclusionNote = ` (excluding ${n} file set${n > 1 ? 's' : ''})`;
     }
-    
-    // Update results count with range and filter context
-    if (data.total > state.searchLimit) {
-        elements.resultsCount.textContent = `Showing ${startResult}-${endResult} of ${formatNumber(data.total)} results for "${data.query}"${filterContext}${exclusionNote}`;
-    } else {
-        elements.resultsCount.textContent = `${formatNumber(data.total)} results for "${data.query}"${filterContext}${exclusionNote}`;
-    }
-    
-    // Update pagination controls
+
+    const summary = data.total > state.searchLimit && results.length
+        ? `Showing ${startResult}-${endResult} of ${formatNumber(data.total)} results for "${data.query}"${filterContext}${exclusionNote}`
+        : `${formatNumber(data.total)} results for "${data.query}"${filterContext}${exclusionNote}`;
+    elements.resultsCount.textContent = summary;
+    announce(data.total ? summary : `No results for "${data.query}"`);
+
     if (elements.searchPagination) {
         if (data.total > state.searchLimit) {
-            elements.searchPagination.classList.remove('hidden');
+            setHidden(elements.searchPagination, false);
             elements.searchPrevPage.disabled = state.searchPage === 0;
-            // Disable next button if there are no more results to show
-            const hasMoreResults = (state.searchPage + 1) * state.searchLimit < data.total;
-            elements.searchNextPage.disabled = !hasMoreResults;
-            
-            // Generate page number buttons
+            elements.searchNextPage.disabled = !((state.searchPage + 1) * state.searchLimit < data.total);
             renderSearchPageNumbers(totalPages);
-
             if (elements.searchPageInput) {
                 elements.searchPageInput.max = Math.max(1, totalPages);
                 elements.searchPageInput.value = state.searchPage + 1;
             }
         } else {
-            elements.searchPagination.classList.add('hidden');
+            setHidden(elements.searchPagination, true);
         }
     }
-    
-    if (!filteredResults || filteredResults.length === 0) {
-        elements.resultsList.innerHTML = '<p class="no-results">No documents found matching your query.</p>';
+
+    if (data.facets) updateSearchFilterCounts(data.facets);
+    updateRefineBar();
+    updateFiltersCount();
+
+    if (!results.length) {
+        state.documentList = [];
+        if (data.total > 0 && state.searchPage > 0) {
+            elements.resultsList.innerHTML = `
+                <div class="state-panel state-empty">
+                    <h3>There are no results on this page</h3>
+                    <p>This search has ${formatNumber(data.total)} results, but not this many pages.</p>
+                    <div class="state-actions"><button type="button" class="state-btn primary" data-action="search-first-page">Go to the first page</button></div>
+                </div>`;
+        } else {
+            renderSearchEmpty();
+        }
         return;
     }
-    
-    // Store document list for navigation (using filtered results)
-    state.documentList = filteredResults.map(r => ({ id: r.id, filename: r.filename }));
-    
-    elements.resultsList.innerHTML = filteredResults.map((result, index) => `
-        <div class="result-item" data-id="${result.id}" data-index="${index}">
-            <div class="result-thumbnail" data-file-type="${result.file_type || 'pdf'}">
-                <img src="${API_BASE}/documents/${result.id}/thumbnail" 
-                     alt="${escapeHtml(result.filename)}" 
-                     loading="lazy" />
-                <div class="thumbnail-fallback">${getDocumentIcon(result.file_type)}</div>
-            </div>
-            <div class="result-content">
-                <div class="result-header">
-                    <span class="result-filename">${escapeHtml(result.filename)}</span>
-                    ${result.score ? `<span class="result-score">${formatRelevanceScore(result.score, result.search_type)}</span>` : ''}
-                </div>
-                <div class="result-meta">
-                    <span class="result-category">${escapeHtml(result.category)}</span>
-                    ${result.document_date ? `<span class="result-date">${formatDocumentDate(result.document_date)}</span>` : ''}
-                    ${result.subcategory ? `<span>${escapeHtml(result.subcategory)}</span>` : ''}
-                    <span>${getSearchResultMeta(result)}</span>
-                </div>
-                ${result.snippet ? `<div class="result-snippet">${sanitizeSnippet(result.snippet)}</div>` : ''}
-            </div>
-        </div>
-    `).join('');
-    
-    // Add error handlers for thumbnail images
-    elements.resultsList.querySelectorAll('.result-thumbnail img').forEach(img => {
-        img.addEventListener('error', function() {
-            this.style.display = 'none';
-            this.parentElement.querySelector('.thumbnail-fallback').style.display = 'flex';
-        });
-        img.addEventListener('load', function() {
-            this.parentElement.querySelector('.thumbnail-fallback').style.display = 'none';
-        });
-    });
-    
-    // Add click handlers
-    elements.resultsList.querySelectorAll('.result-item').forEach(item => {
-        item.addEventListener('click', () => {
-            const index = parseInt(item.dataset.index);
-            openDocument(item.dataset.id, index);
-        });
-    });
-    
-    // Update filter dropdowns with faceted counts
-    if (data.facets) {
-        updateSearchFilterCounts(data.facets);
-    }
+
+    state.documentList = results.map(r => ({ id: r.id, filename: r.filename }));
+    elements.resultsList.innerHTML = results.map(resultCardHtml).join('');
+    if (focusHeading && elements.resultsTitle) elements.resultsTitle.focus({ preventScroll: true });
 }
 
 function updateSearchFilterCounts(facets) {
-    // Update category dropdown with search-specific counts
-    if (facets.categories && elements.searchCategory) {
-        const currentCategory = elements.searchCategory.value;
-        const totalResults = facets.categories.reduce((sum, c) => sum + c.count, 0);
-        
-        let categoryOptions = `<option value="">All File Sets (${formatNumber(totalResults)})</option>`;
-        categoryOptions += facets.categories.map(c => 
-            `<option value="${escapeHtml(c.category)}"${c.category === currentCategory ? ' selected' : ''}>${escapeHtml(c.category)} (${formatNumber(c.count)})</option>`
-        ).join('');
-        
-        elements.searchCategory.innerHTML = categoryOptions;
-    }
-    
-    // Update subcategory dropdown with search-specific counts
-    if (facets.subcategories && elements.searchSubcategory) {
-        const currentSubcategory = elements.searchSubcategory.value;
-        const totalSubResults = facets.subcategories.reduce((sum, s) => sum + s.count, 0);
-        
-        let subcategoryOptions = `<option value="">All Sections (${formatNumber(totalSubResults)})</option>`;
-        subcategoryOptions += facets.subcategories.map(s => 
-            `<option value="${s.subcategory}"${s.subcategory === currentSubcategory ? ' selected' : ''}>${s.subcategory} (${formatNumber(s.count)})</option>`
-        ).join('');
-        
-        elements.searchSubcategory.innerHTML = subcategoryOptions;
-        
-        // Show/hide subcategory group based on whether there are subcategories
-        if (elements.searchSubcategoryGroup) {
-            elements.searchSubcategoryGroup.style.display = facets.subcategories.length > 0 ? '' : 'none';
+    // Facet counts are search-specific. Keep the user's current choice selectable even when it has zero hits,
+    // otherwise the dropdown would silently snap back to "All" while the filter is still applied.
+    // A search with no hits has empty facets; rebuilding from them would collapse the dropdowns to "All" and make
+    // it impossible to pick a filter until some later search succeeds. Keep the previous options instead.
+    if (facets.categories && facets.categories.length && elements.searchCategory) {
+        const current = elements.searchCategory.value;
+        const total = facets.categories.reduce((sum, c) => sum + c.count, 0);
+        let html = `<option value="">All File Sets (${formatNumber(total)})</option>`;
+        html += facets.categories.map(c =>
+            `<option value="${escapeHtml(c.category)}"${c.category === current ? ' selected' : ''}>${escapeHtml(c.category)} (${formatNumber(c.count)})</option>`).join('');
+        if (current && !facets.categories.some(c => c.category === current)) {
+            html += `<option value="${escapeHtml(current)}" selected>${escapeHtml(current)} (0)</option>`;
         }
+        elements.searchCategory.innerHTML = html;
     }
-    
-    // Update file type dropdown with search-specific counts
-    if (facets.file_types && elements.searchFileType) {
-        const currentFileType = elements.searchFileType.value;
-        const totalFileResults = facets.file_types.reduce((sum, f) => sum + f.count, 0);
-        
-        const typeLabels = {
-            'pdf': '📄 PDF Documents',
-            'document': '📄 Scanned Documents',
-            'audio': '🎵 Audio',
-            'image': '🖼️ Images',
-            'video': '🎬 Video'
-        };
-        
-        let fileTypeOptions = `<option value="">All Files (${formatNumber(totalFileResults)})</option>`;
-        fileTypeOptions += facets.file_types.map(f => {
-            const label = typeLabels[f.file_type] || f.file_type;
-            return `<option value="${f.file_type}"${f.file_type === currentFileType ? ' selected' : ''}>${label} (${formatNumber(f.count)})</option>`;
+
+    if (facets.subcategories && elements.searchSubcategory) {
+        const current = elements.searchSubcategory.value;
+        const total = facets.subcategories.reduce((sum, s) => sum + s.count, 0);
+        let html = `<option value="">All Sections (${formatNumber(total)})</option>`;
+        html += facets.subcategories.map(s =>
+            `<option value="${escapeHtml(s.subcategory)}"${s.subcategory === current ? ' selected' : ''}>${escapeHtml(s.subcategory)} (${formatNumber(s.count)})</option>`).join('');
+        if (current && !facets.subcategories.some(s => s.subcategory === current)) {
+            html += `<option value="${escapeHtml(current)}" selected>${escapeHtml(current)} (0)</option>`;
+        }
+        elements.searchSubcategory.innerHTML = html;
+        setHidden(elements.searchSubcategoryGroup, facets.subcategories.length === 0 && !current);
+    }
+
+    if (facets.file_types && facets.file_types.length && elements.searchFileType) {
+        const current = elements.searchFileType.value;
+        const total = facets.file_types.reduce((sum, f) => sum + f.count, 0);
+        let html = `<option value="">All Files (${formatNumber(total)})</option>`;
+        html += facets.file_types.map(f => {
+            const label = { pdf: '📄 PDF Documents', document: '📄 Scanned Documents', audio: '🎵 Audio', image: '🖼️ Images', video: '🎬 Video' }[f.file_type] || escapeHtml(f.file_type);
+            return `<option value="${escapeHtml(f.file_type)}"${f.file_type === current ? ' selected' : ''}>${label} (${formatNumber(f.count)})</option>`;
         }).join('');
-        
-        elements.searchFileType.innerHTML = fileTypeOptions;
+        if (current && !facets.file_types.some(f => f.file_type === current)) {
+            html += `<option value="${escapeHtml(current)}" selected>${escapeHtml(FILE_TYPE_LABELS[current] || current)} (0)</option>`;
+        }
+        elements.searchFileType.innerHTML = html;
     }
 }
 
 function renderSearchPageNumbers(totalPages) {
     if (!elements.searchPageNumbers) return;
-    
     const currentPage = state.searchPage;
-    const maxVisible = 7; // Maximum number of page buttons to show
+    const maxVisible = 7;
     let pages = [];
-    
     if (totalPages <= maxVisible) {
-        // Show all pages if total is small
-        for (let i = 0; i < totalPages; i++) {
-            pages.push(i);
-        }
+        for (let i = 0; i < totalPages; i++) pages.push(i);
     } else {
-        // Always show first page
         pages.push(0);
-        
-        // Calculate range around current page
         let start = Math.max(1, currentPage - 2);
         let end = Math.min(totalPages - 2, currentPage + 2);
-        
-        // Adjust if near the beginning
-        if (currentPage < 3) {
-            end = Math.min(totalPages - 2, 4);
-        }
-        
-        // Adjust if near the end
-        if (currentPage > totalPages - 4) {
-            start = Math.max(1, totalPages - 5);
-        }
-        
-        // Add ellipsis before middle section if needed
-        if (start > 1) {
-            pages.push('...');
-        }
-        
-        // Add middle pages
-        for (let i = start; i <= end; i++) {
-            pages.push(i);
-        }
-        
-        // Add ellipsis after middle section if needed
-        if (end < totalPages - 2) {
-            pages.push('...');
-        }
-        
-        // Always show last page
+        if (currentPage < 3) end = Math.min(totalPages - 2, 4);
+        if (currentPage > totalPages - 4) start = Math.max(1, totalPages - 5);
+        if (start > 1) pages.push('...');
+        for (let i = start; i <= end; i++) pages.push(i);
+        if (end < totalPages - 2) pages.push('...');
         pages.push(totalPages - 1);
     }
-    
-    // Generate HTML
+
     elements.searchPageNumbers.innerHTML = pages.map(page => {
-        if (page === '...') {
-            return '<span class="page-ellipsis">…</span>';
-        }
+        if (page === '...') return '<span class="page-ellipsis" aria-hidden="true">…</span>';
         const isActive = page === currentPage;
-        return `<button class="page-num ${isActive ? 'active' : ''}" data-page="${page}">${page + 1}</button>`;
+        return `<button type="button" class="page-num ${isActive ? 'active' : ''}" data-page="${page}" aria-label="Page ${page + 1}"${isActive ? ' aria-current="page"' : ''}>${page + 1}</button>`;
     }).join('');
-    
-    // Add click handlers
+
     elements.searchPageNumbers.querySelectorAll('.page-num').forEach(btn => {
         btn.addEventListener('click', () => {
-            const page = parseInt(btn.dataset.page);
+            const page = parseInt(btn.dataset.page, 10);
             if (page !== state.searchPage) {
                 state.searchPage = page;
-                performSearchWithPagination();
+                runSearch({ history: 'push', focusHeading: true });
             }
         });
     });
@@ -1917,7 +2861,7 @@ function goToSearchPage() {
     const clamped = Math.max(1, Math.min(val, totalPages));
     if (clamped - 1 === state.searchPage) return;
     state.searchPage = clamped - 1;
-    performSearchWithPagination();
+    runSearch({ history: 'push', focusHeading: true });
 }
 
 function goToBrowsePage() {
@@ -1930,185 +2874,167 @@ function goToBrowsePage() {
     loadDocuments();
 }
 
-async function loadDocuments() {
+async function loadDocuments({ history: mode = 'push', focusHeading = false } = {}) {
+    const seq = ++state.browseSeq;
+    syncUrl(mode);
+    updateBrowseClearButton();
+    updateDocumentTitle();
+
     const offset = state.browsePage * state.browseLimit;
-    const noFilters = !state.browseCategory && !state.browseSubcategory &&
-                      !state.browseFileType && !state.browseFilename && !state.browseKeyword;
-    
-    // Fast path: use prefetched first page from bootstrap (no network round-trip)
-    if (state._prefetchedBrowse && offset === 0 && noFilters) {
+    const noFilters = !state.browseCategory && !state.browseSubcategory && !state.browseFileType &&
+        !state.browseFilename && !state.browseKeyword;
+    // Exclusions are applied by the server; picking a specific file set overrides them.
+    const excluded = state.browseCategory ? [] : state.excludedCategories;
+
+    // Fast path: the first browse page prefetched by /api/bootstrap, only valid when nothing narrows it.
+    if (state._prefetchedBrowse && offset === 0 && noFilters && !excluded.length) {
         const data = state._prefetchedBrowse;
-        state._prefetchedBrowse = null;  // Consume once
+        state._prefetchedBrowse = null;
         renderDocuments(data);
+        state.renderedKey = currentBaseKey();
+        elements.documentsGrid.setAttribute('aria-busy', 'false');   // an earlier slower load may have left these set
+        elements.documentsGrid.classList.remove('is-loading');
+        announce(`${formatNumber(data.total)} documents, page 1`);
+        if (focusHeading) focusBrowseHeading();
         return;
     }
-    
-    // Instant visual feedback: dim the grid and block interaction while loading
-    if (elements.documentsGrid) {
-        elements.documentsGrid.style.opacity = '0.5';
-        elements.documentsGrid.style.pointerEvents = 'none';
-        elements.documentsGrid.style.transition = 'opacity 0.15s ease';
+
+    state.renderedKey = null;            // nothing is rendered for this URL until the response lands
+    const grid = elements.documentsGrid;
+    grid.setAttribute('aria-busy', 'true');
+    if (!grid.querySelector('[data-doc-card]')) {
+        grid.innerHTML = Array.from({ length: 12 }, () => '<div class="skeleton document-skeleton" aria-hidden="true"></div>').join('');
+    } else {
+        grid.classList.add('is-loading');
     }
-    
+
     try {
-        const params = new URLSearchParams({
-            limit: state.browseLimit,
-            offset: offset
-        });
-        
-        if (state.browseCategory) {
-            params.append('category', state.browseCategory);
-        }
-        
-        if (state.browseSubcategory) {
-            params.append('subcategory', state.browseSubcategory);
-        }
-        
-        if (state.browseFileType) {
-            params.append('file_type', state.browseFileType);
-        }
-        
-        if (state.browseFilename) {
-            params.append('filename', state.browseFilename);
-        }
-        
-        if (state.browseKeyword) {
-            params.append('keyword', state.browseKeyword);
-        }
-        
+        const params = new URLSearchParams({ limit: state.browseLimit, offset });
+        if (state.browseCategory) params.append('category', state.browseCategory);
+        if (state.browseSubcategory) params.append('subcategory', state.browseSubcategory);
+        if (state.browseFileType) params.append('file_type', state.browseFileType);
+        if (state.browseFilename) params.append('filename', state.browseFilename);
+        if (state.browseKeyword) params.append('keyword', state.browseKeyword);
+        excluded.forEach(c => params.append('exclude_category', c));
+
         const response = await fetch(`${API_BASE}/documents?${params}`);
         if (!response.ok) throw new Error('Failed to load documents');
-        
         const data = await response.json();
+        if (seq !== state.browseSeq) return;
         renderDocuments(data);
-        
+        state.renderedKey = currentBaseKey();
+        announce(`${formatNumber(data.total)} documents, page ${state.browsePage + 1}`);
+        if (focusHeading) focusBrowseHeading();
     } catch (error) {
+        if (seq !== state.browseSeq) return;
         console.error('Error loading documents:', error);
-        elements.documentsGrid.innerHTML = '<p class="error">Failed to load documents.</p>';
+        renderBrowseError();
+        if (focusHeading) focusBrowseHeading();
     } finally {
-        // Restore grid visibility whether fetch succeeded or failed
-        if (elements.documentsGrid) {
-            elements.documentsGrid.style.opacity = '1';
-            elements.documentsGrid.style.pointerEvents = '';
+        if (seq === state.browseSeq) {
+            grid.setAttribute('aria-busy', 'false');
+            grid.classList.remove('is-loading');
         }
     }
 }
 
 function renderDocuments(data) {
-    // Filter out documents from user-excluded categories (client-side filtering)
-    let filteredDocuments = data.documents || [];
-    if (state.excludedCategories.length > 0 && !state.browseCategory) {
-        // Only filter if browsing "All File Sets" (no specific category selected)
-        filteredDocuments = filteredDocuments.filter(d => !state.excludedCategories.includes(d.category));
-    }
-    
-    // Update count with exclusion note if applicable
+    const docs = data.documents || [];
+    const excludedApplied = !state.browseCategory && state.excludedCategories.length;
     let countText = `${formatNumber(data.total)} documents`;
-    if (state.excludedCategories.length > 0 && !state.browseCategory) {
-        countText += ` (excluding ${state.excludedCategories.length} file set${state.excludedCategories.length > 1 ? 's' : ''})`;
+    if (excludedApplied) {
+        const n = state.excludedCategories.length;
+        countText += ` (excluding ${n} file set${n > 1 ? 's' : ''})`;
     }
     elements.browseCount.textContent = countText;
-    
+
     state.browseTotal = data.total;
     const totalPages = Math.ceil(data.total / state.browseLimit);
     elements.pageInfo.textContent = `Page ${state.browsePage + 1} of ${Math.max(1, totalPages)}`;
-    
     if (elements.browsePageInput) {
         elements.browsePageInput.max = Math.max(1, totalPages);
         elements.browsePageInput.value = state.browsePage + 1;
     }
-    
     elements.prevPage.disabled = state.browsePage === 0;
-    // Disable next button if there are no more results to show
-    const hasMoreResults = (state.browsePage + 1) * state.browseLimit < data.total;
-    elements.nextPage.disabled = !hasMoreResults || totalPages <= 1;
-    
-    if (!filteredDocuments || filteredDocuments.length === 0) {
-        elements.documentsGrid.innerHTML = '<p class="no-results">No documents found.</p>';
+    elements.nextPage.disabled = !((state.browsePage + 1) * state.browseLimit < data.total) || totalPages <= 1;
+
+    if (!docs.length) {
         state.documentList = [];
+        if (data.total > 0 && state.browsePage > 0) {
+            elements.documentsGrid.innerHTML = `
+                <div class="state-panel state-empty">
+                    <h3>There are no documents on this page</h3>
+                    <p>These filters match ${formatNumber(data.total)} documents, but not this many pages.</p>
+                </div>`;
+        } else {
+            elements.documentsGrid.innerHTML = `
+                <div class="state-panel state-empty">
+                    <h3>No documents match these filters</h3>
+                    <p>Try a different file set or file type, or a shorter filename.</p>
+                    ${browseHasFilters() ? '<div class="state-actions"><button type="button" class="state-btn primary" data-action="clear-browse-filters">Clear filters</button></div>' : ''}
+                </div>`;
+        }
         return;
     }
-    
-    // Store document list for navigation (using filtered results)
-    state.documentList = filteredDocuments.map(d => ({ id: d.id, filename: d.filename }));
-    
-    elements.documentsGrid.innerHTML = filteredDocuments.map((doc, index) => `
-        <div class="document-card" data-id="${doc.id}" data-index="${index}">
-            <div class="document-thumbnail" data-file-type="${doc.file_type || 'pdf'}">
-                <img src="${API_BASE}/documents/${doc.id}/thumbnail" 
-                     alt="${escapeHtml(doc.filename)}" 
-                     loading="lazy" />
-                <div class="thumbnail-fallback">${getDocumentIcon(doc.file_type)}</div>
-            </div>
-            <div class="document-title">${escapeHtml(doc.filename)}</div>
-            <div class="document-meta">
-                ${getDocumentTileLabel(doc)} • ${getDocumentMeta(doc)}
-            </div>
-        </div>
-    `).join('');
-    
-    // Add error handlers for thumbnail images
-    elements.documentsGrid.querySelectorAll('.document-thumbnail img').forEach(img => {
-        img.addEventListener('error', function() {
-            this.style.display = 'none';
-            this.parentElement.querySelector('.thumbnail-fallback').style.display = 'flex';
-        });
-        img.addEventListener('load', function() {
-            this.parentElement.querySelector('.thumbnail-fallback').style.display = 'none';
-        });
-    });
-    
-    // Add click handlers
-    elements.documentsGrid.querySelectorAll('.document-card').forEach(card => {
-        card.addEventListener('click', () => {
-            const index = parseInt(card.dataset.index);
-            openDocument(card.dataset.id, index);
-        });
-    });
+
+    state.documentList = docs.map(d => ({ id: d.id, filename: d.filename }));
+    elements.documentsGrid.innerHTML = docs.map(documentCardHtml).join('');
 }
 
-async function openDocument(docId, index = -1) {
-    try {
-        // Request metadata only for faster modal open (full_text loaded on demand when user opens Text tab)
-        const response = await fetch(`${API_BASE}/documents/${docId}?include_text=false`);
-        if (!response.ok) throw new Error('Document not found');
-        
-        const doc = await response.json();
-        doc._fullTextLoaded = !!(doc.full_text); // If server sent full_text (e.g. include_text=true), mark loaded
-        state.currentDocument = doc;
-        
-        // Track document index for navigation
-        if (index >= 0) {
-            state.documentIndex = index;
+async function openDocument(docId, index = -1, opts = {}) {
+    const { history: mode = 'push', trigger = null } = opts;
+    if (!docId) return;
+    const seq = ++state.docSeq;
+    const wasOpen = isDocumentOpen();
+
+    if (mode === 'push') {
+        if (!wasOpen) {
+            syncUrl('push', { doc: docId, overlay: true });
+            state.modalPushed = true;
         } else {
-            // Try to find the document in the current list
-            state.documentIndex = state.documentList.findIndex(d => d.id === docId);
+            syncUrl('replace', { doc: docId, overlay: state.modalPushed });
         }
-        
-        // Update navigation UI
+    }
+    state.openDocId = docId;
+    showModalLoading({ trigger });
+
+    try {
+        // Metadata only for a faster open; the full text loads when the Text Content tab is first used.
+        const response = await fetch(`${API_BASE}/documents/${encodeURIComponent(docId)}?include_text=false`);
+        if (seq !== state.docSeq) return;
+        if (!response.ok) {
+            const err = new Error('Document not found');
+            err.status = response.status;
+            throw err;
+        }
+        const doc = await response.json();
+        if (seq !== state.docSeq) return;
+        doc._fullTextLoaded = !!(doc.full_text);
+        state.currentDocument = doc;
+
+        state.documentIndex = index >= 0 ? index : state.documentList.findIndex(d => d.id === docId);
         updateDocumentNavigation();
-        
-        // Determine file type icon
+
         const fileType = doc.file_type || 'pdf';
         const fileIcon = fileType === 'audio' ? '🎵' : fileType === 'video' ? '🎬' : (fileType === 'image') ? '🖼️' : '📄';
-        
-        // Populate modal
+
         elements.modalTitle.textContent = doc.filename;
         elements.modalMeta.innerHTML = `
-            <span>📁 ${escapeHtml(doc.category)}</span>
-            ${doc.subcategory ? `<span>📂 ${escapeHtml(doc.subcategory)}</span>` : ''}
-            <span>${fileIcon} ${fileType.toUpperCase()}</span>
-            ${doc.page_count ? `<span>📄 ${doc.page_count} pages</span>` : ''}
-            <span>📝 ${formatNumber(doc.char_count || 0)} characters</span>
+            <span><span aria-hidden="true">📁</span> ${escapeHtml(doc.category)}</span>
+            ${doc.subcategory ? `<span><span aria-hidden="true">📂</span> ${escapeHtml(doc.subcategory)}</span>` : ''}
+            <span><span aria-hidden="true">${fileIcon}</span> ${escapeHtml(fileType.toUpperCase())}</span>
+            ${doc.page_count ? `<span><span aria-hidden="true">📄</span> ${escapeHtml(doc.page_count)} pages</span>` : ''}
+            <span><span aria-hidden="true">📝</span> ${formatNumber(doc.char_count || 0)} characters</span>
         `;
 
-        // Flag documents DOJ re-issued/redacted after release (non-blocking).
-        loadDocumentAlterationBadge(docId);
+        // Flag documents DOJ re-issued/redacted after release (non-blocking). Clear the previous document's notice first.
+        elements.modalAlteration.innerHTML = '';
+        setHidden(elements.modalAlteration, true);
+        loadDocumentAlterationBadge(docId, seq);
 
-        elements.modalText.textContent = ''; // Full text loaded on demand when user opens Text Content tab
-        elements.modalSummary.innerHTML = '<p class="loading">Click to load AI summary...</p>';
-        
-        // Show/hide DOJ original document link
+        elements.modalText.textContent = '';
+        elements.modalSummary.innerHTML = '<p class="loading">Open this tab to generate an AI summary.</p>';
+
         const dojLink = document.getElementById('doj-original-link');
         if (dojLink) {
             const dojMatch = doc.category === 'DOJ Disclosures' && doc.subcategory
@@ -2116,37 +3042,31 @@ async function openDocument(docId, index = -1) {
                 : null;
             if (dojMatch) {
                 dojLink.href = `https://www.justice.gov/epstein/files/DataSet%20${dojMatch[1]}/${encodeURIComponent(doc.filename)}`;
-                dojLink.style.display = '';
+                setHidden(dojLink, false);
             } else {
-                dojLink.style.display = 'none';
+                setHidden(dojLink, true);
             }
         }
-        
-        // Get file URL for viewer
-        const fileUrl = `${API_BASE}/documents/${docId}/file`;
-        
-        // Load appropriate media viewer
+
+        const fileUrl = `${API_BASE}/documents/${encodeURIComponent(docId)}/file`;
         const mediaViewer = document.getElementById('media-viewer');
-        
+        const hideIframe = () => { loadPdfFrame(''); setHidden(elements.pdfIframe, true); };
+
         if (fileType === 'pdf') {
-            const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent);
-            
-            if (isIOS) {
-                // iOS Safari has issues with PDF scrolling in iframes
-                // Show a preview with button to open PDF directly
-                elements.pdfIframe.src = '';
-                elements.pdfIframe.style.display = 'none';
-                elements.pdfFallback.classList.add('hidden');
+            if (isIOS()) {
+                // iOS Safari has issues with PDF scrolling in iframes: offer a direct link instead.
+                hideIframe();
+                setHidden(elements.pdfFallback, true);
                 if (mediaViewer) {
-                    mediaViewer.classList.remove('hidden');
+                    setHidden(mediaViewer, false);
                     mediaViewer.innerHTML = `
                         <div class="ios-pdf-fallback">
-                            <div class="pdf-icon">📄</div>
+                            <div class="pdf-icon" aria-hidden="true">📄</div>
                             <h3>${escapeHtml(doc.filename)}</h3>
                             <p class="pdf-info">${doc.page_count || ''} ${doc.page_count ? 'pages' : ''}</p>
                             <p class="ios-pdf-message">For the best experience, open the PDF directly with the link below.</p>
-                            <a href="${fileUrl}" target="_blank" class="ios-pdf-open-btn">
-                                <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2">
+                            <a href="${fileUrl}" target="_blank" rel="noopener noreferrer" class="ios-pdf-open-btn">
+                                <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
                                     <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path>
                                     <polyline points="15 3 21 3 21 9"></polyline>
                                     <line x1="10" y1="14" x2="21" y2="3"></line>
@@ -2158,28 +3078,25 @@ async function openDocument(docId, index = -1) {
                     `;
                 }
             } else {
-                // Non-iOS: Load PDF in iframe normally
-                elements.pdfIframe.src = `${fileUrl}#toolbar=0&navpanes=0&view=FitH`;
-                elements.pdfIframe.style.display = 'block';
-                elements.pdfFallback.classList.add('hidden');
-                if (mediaViewer) mediaViewer.classList.add('hidden');
+                loadPdfFrame(`${fileUrl}#toolbar=0&navpanes=0&view=FitH`);
+                setHidden(elements.pdfIframe, false);
+                setHidden(elements.pdfFallback, true);
+                if (mediaViewer) { setHidden(mediaViewer, true); mediaViewer.innerHTML = ''; }
             }
         } else if (fileType === 'audio') {
-            // Show audio player
-            elements.pdfIframe.src = '';
-            elements.pdfIframe.style.display = 'none';
-            elements.pdfFallback.classList.add('hidden');
+            hideIframe();
+            setHidden(elements.pdfFallback, true);
             if (mediaViewer) {
-                mediaViewer.classList.remove('hidden');
+                setHidden(mediaViewer, false);
                 mediaViewer.innerHTML = `
                     <div class="media-player-container audio-player">
-                        <div class="media-icon">🎵</div>
+                        <div class="media-icon" aria-hidden="true">🎵</div>
                         <h3>Audio Recording</h3>
                         <div class="media-notice">
-                            <span class="notice-icon">⏳</span>
+                            <span class="notice-icon" aria-hidden="true">⏳</span>
                             <span>Large files may take time to buffer. Please click play only once and allow time for loading.</span>
                         </div>
-                        <audio controls controlsList="nodownload noplaybackrate" preload="metadata" class="audio-element" oncontextmenu="return false;">
+                        <audio controls controlsList="nodownload noplaybackrate" preload="metadata" class="audio-element" aria-label="Audio recording: ${escapeHtml(doc.filename)}">
                             <source src="${fileUrl}" type="audio/mpeg">
                             <source src="${fileUrl}" type="audio/wav">
                             Your browser does not support the audio element.
@@ -2189,19 +3106,17 @@ async function openDocument(docId, index = -1) {
                 `;
             }
         } else if (fileType === 'video') {
-            // Show video player
-            elements.pdfIframe.src = '';
-            elements.pdfIframe.style.display = 'none';
-            elements.pdfFallback.classList.add('hidden');
+            hideIframe();
+            setHidden(elements.pdfFallback, true);
             if (mediaViewer) {
-                mediaViewer.classList.remove('hidden');
+                setHidden(mediaViewer, false);
                 mediaViewer.innerHTML = `
                     <div class="media-player-container video-player">
                         <div class="media-notice">
-                            <span class="notice-icon">⏳</span>
+                            <span class="notice-icon" aria-hidden="true">⏳</span>
                             <span>Large files may take time to buffer. Please click play only once and allow time for loading.</span>
                         </div>
-                        <video controls controlsList="nodownload" preload="metadata" class="video-element" oncontextmenu="return false;">
+                        <video controls controlsList="nodownload" preload="metadata" class="video-element" aria-label="Video recording: ${escapeHtml(doc.filename)}">
                             <source src="${fileUrl}" type="video/mp4">
                             <source src="${fileUrl}" type="video/webm">
                             Your browser does not support the video element.
@@ -2211,25 +3126,19 @@ async function openDocument(docId, index = -1) {
                 `;
             }
         } else if (fileType === 'image' || fileType === 'document') {
-            // Show image viewer (both true images and scanned documents are image files)
-            elements.pdfIframe.src = '';
-            elements.pdfIframe.style.display = 'none';
-            elements.pdfFallback.classList.add('hidden');
-            
-            // Check if it's a TIF/TIFF file - browsers don't support these natively
+            hideIframe();
+            setHidden(elements.pdfFallback, true);
             const isTiff = doc.filename && /\.(tif|tiff)$/i.test(doc.filename);
-            
             if (mediaViewer) {
-                mediaViewer.classList.remove('hidden');
+                setHidden(mediaViewer, false);
                 if (isTiff) {
-                    // TIF files need special handling - show download option
                     mediaViewer.innerHTML = `
                         <div class="media-player-container image-viewer tiff-fallback">
-                            <div class="media-icon">🖼️</div>
+                            <div class="media-icon" aria-hidden="true">🖼️</div>
                             <h3>TIFF Image</h3>
                             <p class="tiff-notice">TIFF files cannot be displayed directly in the browser.</p>
                             <a href="${fileUrl}" download="${escapeHtml(doc.filename)}" class="tiff-download-btn">
-                                <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2">
+                                <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
                                     <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
                                     <polyline points="7 10 12 15 17 10"></polyline>
                                     <line x1="12" y1="15" x2="12" y2="3"></line>
@@ -2249,67 +3158,53 @@ async function openDocument(docId, index = -1) {
                 }
             }
         } else {
-            // Generic fallback
-            elements.pdfIframe.src = '';
-            elements.pdfIframe.style.display = 'none';
-            if (mediaViewer) mediaViewer.classList.add('hidden');
-            elements.pdfFallback.classList.remove('hidden');
+            hideIframe();
+            if (mediaViewer) setHidden(mediaViewer, true);
+            setHidden(elements.pdfFallback, false);
             elements.pdfFallback.innerHTML = `
-                <p>${fileIcon}</p>
+                <p aria-hidden="true">${fileIcon}</p>
                 <p>File Preview Not Available</p>
                 <p class="pdf-fallback-hint">View the text content tab to see the extracted content.</p>
             `;
         }
-        
-        // Reset to document tab (default)
+
         switchModalTab('document');
-        
-        // Show modal
-        elements.modal.classList.remove('hidden');
-        document.body.style.overflow = 'hidden';
-        document.body.classList.add('modal-open');
 
+        elements.modalContent.classList.remove('is-loading', 'is-error', 'is-refreshing');
+        elements.modalContent.removeAttribute('aria-busy');
+        elements.modalState.textContent = '';
+        // Whatever had focus (e.g. a retry button) may be gone: keep keyboard users inside the dialog.
+        if (!elements.modalContent.contains(document.activeElement)) elements.modalContent.focus({ preventScroll: true });
+        updateDocumentTitle();
+        announce(`Opened ${doc.filename}`);
         try { onDocumentModalOpened(); } catch (e) { /* monetization is best-effort */ }
-
     } catch (error) {
+        if (seq !== state.docSeq) return;
         console.error('Error loading document:', error);
-        alert('Failed to load document.');
+        showModalError(docId, error);
     }
 }
 
-function closeModal() {
-    elements.modal.classList.add('hidden');
-    document.body.style.overflow = '';
-    document.body.classList.remove('modal-open');
-    state.currentDocument = null;
-    // Clear PDF iframe to stop loading
-    if (elements.pdfIframe) {
-        elements.pdfIframe.src = '';
-    }
-    // Exit PDF fullscreen if active
-    const pdfViewer = document.getElementById('modal-pdf-viewer');
-    if (pdfViewer && pdfViewer.classList.contains('fullscreen')) {
-        pdfViewer.classList.remove('fullscreen');
-        document.body.style.overflow = '';
-    }
-}
 
 function updateDocumentNavigation() {
     if (!elements.docNavigation) return;
-    
     const hasMultipleDocs = state.documentList.length > 1;
     const currentIndex = state.documentIndex;
-    
-    // Show/hide navigation
     if (hasMultipleDocs && currentIndex >= 0) {
         elements.docNavigation.classList.remove('hidden');
-        
-        // Update info text
         elements.docNavInfo.textContent = `${currentIndex + 1} of ${state.documentList.length}`;
-        
-        // Update button states
         elements.docPrevBtn.disabled = currentIndex <= 0;
         elements.docNextBtn.disabled = currentIndex >= state.documentList.length - 1;
+        // A focused button that just became disabled (end of the list) loses focus at the next rendering update
+        // (the browser's "focus fixup"), so hand focus to the other direction now.
+        const active = document.activeElement;
+        const lost = isDocumentOpen() && (!elements.modalContent.contains(active)
+            || ((active === elements.docNextBtn || active === elements.docPrevBtn) && active.disabled));
+        if (lost) {
+            const target = !elements.docNextBtn.disabled ? elements.docNextBtn
+                : !elements.docPrevBtn.disabled ? elements.docPrevBtn : elements.modalContent;
+            target.focus({ preventScroll: true });
+        }
     } else {
         elements.docNavigation.classList.add('hidden');
     }
@@ -2330,34 +3225,23 @@ async function navigateDocument(direction) {
 }
 
 function togglePdfFullscreen(pdfViewer) {
-    const isFullscreen = pdfViewer.classList.contains('fullscreen');
-    
-    if (isFullscreen) {
-        // Exit fullscreen
-        pdfViewer.classList.remove('fullscreen');
-        document.body.style.overflow = '';
-    } else {
-        // Enter fullscreen
-        pdfViewer.classList.add('fullscreen');
-        document.body.style.overflow = 'hidden';
-    }
+    const isFullscreen = pdfViewer.classList.toggle('fullscreen');
+    const btn = document.getElementById('pdf-fullscreen-btn');
+    if (btn) btn.setAttribute('aria-pressed', isFullscreen ? 'true' : 'false');
 }
 
 async function switchModalTab(tabName) {
-    elements.modalTabs.forEach(tab => {
-        tab.classList.toggle('active', tab.dataset.tab === tabName);
-    });
-    
-    document.querySelectorAll('.tab-content').forEach(content => {
+    const tablist = elements.modal.querySelector('[role="tablist"]');
+    const selected = [...elements.modalTabs].find(t => t.dataset.tab === tabName);
+    syncTabs(tablist, selected);
+    elements.modal.querySelectorAll('.tab-content').forEach(content => {
         content.classList.toggle('active', content.id === `modal-${tabName}-tab`);
     });
-    
-    // Load full text on demand when user opens Text Content tab
-    if (tabName === 'document' && state.currentDocument && !state.currentDocument._fullTextLoaded) {
+
+    // Full text is loaded on demand when the Text Content tab is first opened.
+    if (tabName === 'content' && state.currentDocument && !state.currentDocument._fullTextLoaded) {
         await loadDocumentFullText(state.currentDocument.id);
     }
-    
-    // Load summary if switching to summary tab
     if (tabName === 'summary' && state.currentDocument) {
         const summaryEl = elements.modalSummary;
         if (summaryEl.querySelector('.loading')) {
@@ -2385,11 +3269,14 @@ async function loadDocumentFullText(docId) {
 }
 
 async function loadDocumentSummary(docId) {
+    // A slow summary for document A must never land in document B's pane (openDocId changes immediately).
+    const stale = () => state.openDocId !== docId;
     try {
         elements.modalSummary.innerHTML = '<p class="loading">Generating AI summary...</p>';
-        
-        const response = await fetch(`${API_BASE}/documents/${docId}/summary`);
-        
+
+        const response = await fetch(`${API_BASE}/documents/${encodeURIComponent(docId)}/summary`);
+        if (stale()) return;
+
         if (!response.ok) {
             if (response.status === 503) {
                 elements.modalSummary.innerHTML = '<p class="error">AI summarization not available. Set OPENAI_API_KEY to enable this feature.</p>';
@@ -2398,11 +3285,12 @@ async function loadDocumentSummary(docId) {
             }
             return;
         }
-        
+
         const data = await response.json();
-        
+        if (stale()) return;
+
         // Show cached indicator if summary was retrieved from cache
-        const cacheIndicator = data.cached 
+        const cacheIndicator = data.cached
             ? `<div class="summary-meta">
                 <span class="cache-badge cached">📦 Cached Summary</span>
                 ${data.generated_at ? `<span class="generated-date">Generated: ${new Date(data.generated_at).toLocaleDateString()}</span>` : ''}
@@ -2410,13 +3298,13 @@ async function loadDocumentSummary(docId) {
             : `<div class="summary-meta">
                 <span class="cache-badge fresh">✨ Freshly Generated</span>
                </div>`;
-        
+
         elements.modalSummary.innerHTML = `
             ${cacheIndicator}
             <div class="summary-text">${renderMarkdown(data.summary)}</div>
         `;
-        
     } catch (error) {
+        if (stale()) return;
         console.error('Error loading summary:', error);
         elements.modalSummary.innerHTML = '<p class="error">Failed to generate summary.</p>';
     }
@@ -2424,24 +3312,26 @@ async function loadDocumentSummary(docId) {
 
 async function askQuestion() {
     const question = elements.askInput.value.trim();
-    if (!question) return;
-    
+    if (!question) {
+        announce('Type a question first.');
+        elements.askInput.focus();
+        return;
+    }
+
     elements.askBtn.disabled = true;
-    elements.askBtn.innerHTML = '<span class="loading-spinner"></span> Thinking...';
-    elements.askResponse.classList.remove('hidden');
+    elements.askBtn.innerHTML = '<span class="loading-spinner" aria-hidden="true"></span> Thinking...';
+    setHidden(elements.askResponse, false);
+    elements.askResponse.setAttribute('aria-busy', 'true');
     elements.answerText.textContent = 'Analyzing documents...';
     elements.sourcesList.innerHTML = '';
-    
+
     try {
         const response = await fetch(`${API_BASE}/ask`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                question: question,
-                num_context_docs: 5
-            })
+            body: JSON.stringify({ question, num_context_docs: 5 })
         });
-        
+
         if (!response.ok) {
             if (response.status === 503) {
                 elements.answerText.textContent = 'AI assistant not available. Please set OPENAI_API_KEY to enable this feature.';
@@ -2449,31 +3339,23 @@ async function askQuestion() {
             }
             throw new Error('Failed to get answer');
         }
-        
+
         const data = await response.json();
-        
         elements.answerText.innerHTML = renderMarkdown(data.answer);
-        
+
         if (data.sources && data.sources.length > 0) {
-            elements.sourcesList.innerHTML = data.sources.map(source => 
-                `<li><a href="#" class="source-link" data-id="${source.id}">📄 ${escapeHtml(source.filename)} (${source.category}) - ${formatRelevanceScore(source.score, 'semantic')}</a></li>`
-            ).join('');
-            
-            // Add click handlers to source links
-            elements.sourcesList.querySelectorAll('.source-link').forEach(link => {
-                link.addEventListener('click', (e) => {
-                    e.preventDefault();
-                    openDocument(link.dataset.id);
-                });
-            });
+            elements.sourcesList.innerHTML = data.sources.map(source => {
+                const id = String(source.id);
+                return `<li><a href="${escapeHtml(buildUrl({ doc: id }))}" class="source-link" data-action="open-doc" data-doc-id="${escapeHtml(id)}"><span aria-hidden="true">📄</span> ${escapeHtml(source.filename)} (${escapeHtml(source.category)}) - ${formatRelevanceScore(source.score, 'semantic')}</a></li>`;
+            }).join('');
         }
-        
     } catch (error) {
         console.error('Ask error:', error);
         elements.answerText.textContent = 'Failed to get answer. Please try again.';
     } finally {
         elements.askBtn.disabled = false;
-        elements.askBtn.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z"/></svg> Ask Question';
+        elements.askBtn.innerHTML = ASK_BTN_HTML;
+        elements.askResponse.setAttribute('aria-busy', 'false');
     }
 }
 
@@ -2539,12 +3421,6 @@ function getDocumentIcon(fileType) {
     </svg>`;
 }
 
-/**
- * Get document icon as escaped string for use in onerror handlers
- */
-function getDocumentIconEscaped(fileType) {
-    return getDocumentIcon(fileType).replace(/'/g, "\\'").replace(/"/g, '\\"').replace(/\n/g, '');
-}
 
 function getDocumentMeta(doc) {
     if (doc.file_type === 'audio' || doc.file_type === 'video') {
@@ -2633,11 +3509,10 @@ function isAndroid() {
     return /Android/i.test(navigator.userAgent);
 }
 
-/**
- * Detect if user is on iOS
- */
+/** iPadOS 13+ reports itself as a Mac, so detect it by touch support as well. */
 function isIOS() {
-    return /iPhone|iPad|iPod/i.test(navigator.userAgent);
+    return /iPhone|iPad|iPod/i.test(navigator.userAgent) ||
+        (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
 }
 
 /**
@@ -2685,186 +3560,32 @@ function openNativeAppOrFallback(appUrl, webUrl, intentUrl) {
     }, 1500);
 }
 
-/**
- * Handle sharing document to social platforms
- */
-function handleShare(platform) {
+/** Share the open document. */
+function handleShare(platform, el) {
     if (!state.currentDocument) return;
-    
     const doc = state.currentDocument;
-    const siteUrl = 'https://epsteinfta.com';
-    const shareUrl = `${siteUrl}/?doc=${doc.id}`;
-    
-    // Build context string with category and subcategory
-    let contextParts = [];
-    if (doc.category) contextParts.push(doc.category);
-    if (doc.subcategory) contextParts.push(doc.subcategory);
-    const context = contextParts.length > 0 ? ` (${contextParts.join(' - ')})` : '';
-    
-    const shareText = `Check out this document from the Epstein Files Public Archive: "${doc.filename}"${context}`;
-    
-    const isMobile = isMobileDevice();
-    let webUrl = '';
-    let appUrl = '';
-    let intentUrl = '';
-    
-    switch (platform) {
-        case 'facebook':
-            // Web URL for desktop/fallback
-            webUrl = `https://www.facebook.com/sharer/sharer.php?u=${encodeURIComponent(shareUrl)}&quote=${encodeURIComponent(shareText)}`;
-            // iOS deep link - opens share dialog
-            appUrl = `fb://share/?link=${encodeURIComponent(shareUrl)}`;
-            // Android Intent - more reliable for triggering share dialog
-            intentUrl = `intent://share/?link=${encodeURIComponent(shareUrl)}#Intent;package=com.facebook.katana;scheme=fb;end`;
-            break;
-        case 'twitter':
-            webUrl = `https://twitter.com/intent/tweet?url=${encodeURIComponent(shareUrl)}&text=${encodeURIComponent(shareText)}`;
-            // Twitter/X doesn't have a reliable share deep link, use web
-            appUrl = null;
-            intentUrl = null;
-            break;
-        case 'linkedin':
-            // Web URL for desktop/fallback
-            webUrl = `https://www.linkedin.com/sharing/share-offsite/?url=${encodeURIComponent(shareUrl)}`;
-            // LinkedIn deep link for share
-            appUrl = `linkedin://shareArticle?url=${encodeURIComponent(shareUrl)}&title=${encodeURIComponent(shareText)}`;
-            // Android Intent for LinkedIn
-            intentUrl = `intent://shareArticle?url=${encodeURIComponent(shareUrl)}#Intent;package=com.linkedin.android;scheme=linkedin;end`;
-            break;
-        case 'threads':
-            // Threads Web Intent URL (combines text and URL in single text param)
-            webUrl = `https://www.threads.net/intent/post?text=${encodeURIComponent(shareText + ' ' + shareUrl)}`;
-            // iOS: use Universal Link (https URL that iOS intercepts to open the app)
-            appUrl = `https://www.threads.net/intent/post?text=${encodeURIComponent(shareText + ' ' + shareUrl)}`;
-            // Android Intent (Threads package: com.instagram.barcelona)
-            intentUrl = `intent://post?text=${encodeURIComponent(shareText + ' ' + shareUrl)}#Intent;package=com.instagram.barcelona;scheme=threads;end`;
-            break;
-        case 'email':
-            const emailSubject = `Epstein Files: ${doc.filename}`;
-            const emailBody = `${shareText}\n\nView the document here: ${shareUrl}`;
-            window.location.href = `mailto:?subject=${encodeURIComponent(emailSubject)}&body=${encodeURIComponent(emailBody)}`;
-            return;
-        case 'copy':
-            copyToClipboard(shareUrl).then(success => {
-                if (success) {
-                    // Show temporary feedback
-                    const copyBtn = document.querySelector('.share-option[data-platform="copy"]');
-                    if (copyBtn) {
-                        const originalText = copyBtn.innerHTML;
-                        copyBtn.innerHTML = `
-                            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2">
-                                <path d="M20 6L9 17l-5-5"/>
-                            </svg>
-                            Copied!
-                        `;
-                        setTimeout(() => {
-                            copyBtn.innerHTML = originalText;
-                        }, 2000);
-                    }
-                }
-            });
-            return;
-        default:
-            return;
-    }
-    
-    // On mobile, try to launch the native app
-    if (isMobile && (appUrl || intentUrl)) {
-        if (isIOS()) {
-            // On iOS, navigate directly to the Universal Link URL
-            // iOS will open the Threads app if installed, otherwise loads the web page
-            window.location.href = appUrl;
-        } else if (isAndroid() && intentUrl) {
-            // Android Intent is the most reliable way to launch apps
-            window.location.href = intentUrl;
-        } else {
-            openNativeAppOrFallback(appUrl, webUrl, intentUrl);
-        }
-    } else {
-        // Desktop or no app URL - open web version
-        window.open(webUrl, '_blank', 'width=600,height=400,menubar=no,toolbar=no');
-    }
+    const shareUrl = `${SITE_URL}/?doc=${encodeURIComponent(doc.id)}`;
+    const context = [doc.category, doc.subcategory].filter(Boolean).join(' - ');
+    const shareText = `Check out this document from the Epstein Files Public Archive: "${doc.filename}"${context ? ` (${context})` : ''}`;
+    shareTo(platform, {
+        shareUrl, shareText,
+        emailSubject: `Epstein Files: ${doc.filename}`,
+        emailBody: `${shareText}\n\nView the document here: ${shareUrl}`
+    }, el);
 }
 
-/**
- * Handle sharing search results to social platforms
- */
-function handleSearchShare(platform) {
+/** Share the current search, including its filters and page (the URL carries all of it). */
+function handleSearchShare(platform, el) {
     if (!state.lastSearchParams || !state.lastSearchParams.query) return;
-    
     const query = state.lastSearchParams.query;
-    const totalResults = state.searchTotal || 0;
-    const siteUrl = 'https://epsteinfta.com';
-    const shareUrl = `${siteUrl}/?q=${encodeURIComponent(query)}`;
-    
-    const shareText = `I found ${totalResults} results for "${query}" on the Epstein Files Public Archive`;
-    
-    const isMobile = isMobileDevice();
-    let webUrl = '';
-    let appUrl = '';
-    let intentUrl = '';
-    
-    switch (platform) {
-        case 'facebook':
-            webUrl = `https://www.facebook.com/sharer/sharer.php?u=${encodeURIComponent(shareUrl)}&quote=${encodeURIComponent(shareText)}`;
-            appUrl = `fb://share/?link=${encodeURIComponent(shareUrl)}`;
-            intentUrl = `intent://share/?link=${encodeURIComponent(shareUrl)}#Intent;package=com.facebook.katana;scheme=fb;end`;
-            break;
-        case 'twitter':
-            webUrl = `https://twitter.com/intent/tweet?url=${encodeURIComponent(shareUrl)}&text=${encodeURIComponent(shareText)}`;
-            appUrl = null;
-            intentUrl = null;
-            break;
-        case 'linkedin':
-            webUrl = `https://www.linkedin.com/shareArticle?mini=true&url=${encodeURIComponent(shareUrl)}&title=${encodeURIComponent('Epstein Files: Search Results')}&summary=${encodeURIComponent(shareText)}&source=${encodeURIComponent('Epstein Files Public Archive')}`;
-            appUrl = `linkedin://shareArticle?url=${encodeURIComponent(shareUrl)}&title=${encodeURIComponent(shareText)}`;
-            intentUrl = `intent://shareArticle?url=${encodeURIComponent(shareUrl)}&title=${encodeURIComponent(shareText)}#Intent;package=com.linkedin.android;scheme=linkedin;end`;
-            break;
-        case 'threads':
-            webUrl = `https://www.threads.net/intent/post?text=${encodeURIComponent(shareText + ' ' + shareUrl)}`;
-            appUrl = `https://www.threads.net/intent/post?text=${encodeURIComponent(shareText + ' ' + shareUrl)}`;
-            intentUrl = `intent://post?text=${encodeURIComponent(shareText + ' ' + shareUrl)}#Intent;package=com.instagram.barcelona;scheme=threads;end`;
-            break;
-        case 'email':
-            const emailSubject = `Epstein Files: Search results for "${query}"`;
-            const emailBody = `${shareText}\n\nView the results here: ${shareUrl}`;
-            window.location.href = `mailto:?subject=${encodeURIComponent(emailSubject)}&body=${encodeURIComponent(emailBody)}`;
-            return;
-        case 'copy':
-            copyToClipboard(shareUrl).then(success => {
-                if (success) {
-                    const copyBtn = document.querySelector('#search-share-menu .share-option[data-platform="copy"]');
-                    if (copyBtn) {
-                        const originalText = copyBtn.innerHTML;
-                        copyBtn.innerHTML = `
-                            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2">
-                                <path d="M20 6L9 17l-5-5"/>
-                            </svg>
-                            Copied!
-                        `;
-                        setTimeout(() => {
-                            copyBtn.innerHTML = originalText;
-                        }, 2000);
-                    }
-                }
-            });
-            return;
-        default:
-            return;
-    }
-    
-    // On mobile, try to launch the native app
-    if (isMobile && (appUrl || intentUrl)) {
-        if (isIOS()) {
-            window.location.href = appUrl;
-        } else if (isAndroid() && intentUrl) {
-            window.location.href = intentUrl;
-        } else {
-            openNativeAppOrFallback(appUrl, webUrl, intentUrl);
-        }
-    } else {
-        window.open(webUrl, '_blank', 'width=600,height=400,menubar=no,toolbar=no');
-    }
+    const shareUrl = `${SITE_URL}${buildUrl()}`;
+    const shareText = `I found ${state.searchTotal || 0} results for "${query}" on the Epstein Files Public Archive`;
+    shareTo(platform, {
+        shareUrl, shareText,
+        linkedinWeb: `https://www.linkedin.com/shareArticle?mini=true&url=${encodeURIComponent(shareUrl)}&title=${encodeURIComponent('Epstein Files: Search Results')}&summary=${encodeURIComponent(shareText)}&source=${encodeURIComponent('Epstein Files Public Archive')}`,
+        emailSubject: `Epstein Files: Search results for "${query}"`,
+        emailBody: `${shareText}\n\nView the results here: ${shareUrl}`
+    }, el);
 }
 
 /**
@@ -3011,23 +3732,18 @@ function renderMarkdown(text) {
 }
 
 /**
- * Sanitize HTML snippet - only allow <mark> tags for search highlighting
- * Prevents XSS from malicious content in database
+ * Keep only <mark> from a search snippet. The snippet is raw document text, so it is parsed with DOMParser
+ * (an inert document: nothing is fetched or executed) and every node is re-emitted as escaped text.
  */
 function sanitizeSnippet(html) {
     if (!html) return '';
-    const div = document.createElement('div');
-    div.innerHTML = html;
-    
-    // Remove all elements except <mark> tags
-    div.querySelectorAll('*').forEach(el => {
-        if (el.tagName !== 'MARK') {
-            // Replace element with its text content
-            el.replaceWith(document.createTextNode(el.textContent));
-        }
-    });
-    
-    return div.innerHTML;
+    const doc = new DOMParser().parseFromString(String(html), 'text/html');
+    let out = '';
+    for (const node of doc.body.childNodes) {
+        if (node.nodeType === Node.ELEMENT_NODE && node.tagName === 'MARK') out += `<mark>${escapeHtml(node.textContent)}</mark>`;
+        else out += escapeHtml(node.textContent);
+    }
+    return out;
 }
 
 // =============================================================================
@@ -3042,78 +3758,39 @@ let pendingExportType = null;
 
 function openExportModal(type) {
     if (type === 'search' && !state.lastSearchParams) {
-        alert('Please perform a search first.');
+        showToast('Run a search first, then export its results.');
         return;
     }
     pendingExportType = type;
     const checkbox = document.getElementById('export-include-text');
     if (checkbox) checkbox.checked = false;
-    document.getElementById('export-modal').classList.remove('hidden');
+    openDialog(document.getElementById('export-modal'), {
+        trigger: document.activeElement, onRequestClose: closeExportModal, initialFocus: '#export-include-text'
+    });
 }
 
 function closeExportModal() {
-    document.getElementById('export-modal').classList.add('hidden');
+    closeDialog(document.getElementById('export-modal'));
     pendingExportType = null;
 }
 
 async function confirmExport() {
-    const includeText = document.getElementById('export-include-text')?.checked;
-    const confirmBtn = document.getElementById('export-modal-confirm');
-    confirmBtn.textContent = 'Exporting...';
-    confirmBtn.disabled = true;
-
-    try {
-        const params = new URLSearchParams();
-
-        if (pendingExportType === 'search') {
-            if (state.lastSearchParams.query) params.append('search_query', state.lastSearchParams.query);
-            if (state.lastSearchParams.search_type) params.append('search_type', state.lastSearchParams.search_type);
-            if (state.lastSearchParams.category) params.append('category', state.lastSearchParams.category);
-            if (state.lastSearchParams.subcategory) params.append('subcategory', state.lastSearchParams.subcategory);
-            if (state.lastSearchParams.file_type) params.append('file_type', state.lastSearchParams.file_type);
-        } else {
-            if (state.browseCategory) params.append('category', state.browseCategory);
-            if (state.browseSubcategory) params.append('subcategory', state.browseSubcategory);
-            if (state.browseFileType) params.append('file_type', state.browseFileType);
-            if (state.browseFilename) params.append('filename', state.browseFilename);
-            if (state.browseKeyword) params.append('keyword', state.browseKeyword);
-        }
-
-        if (includeText) params.append('include_text', 'true');
-
-        const response = await fetch(`${API_BASE}/documents/export?${params}`);
-        if (!response.ok) throw new Error('Export failed');
-
-        const data = await response.json();
-        const prefix = pendingExportType === 'search' ? 'search_export' : 'documents_export';
-        downloadCSV(data.documents, `${prefix}_${new Date().toISOString().split('T')[0]}.csv`);
-        closeExportModal();
-    } catch (error) {
-        console.error('Export error:', error);
-        alert('Failed to export. Please try again.');
-    } finally {
-        confirmBtn.textContent = 'Export';
-        confirmBtn.disabled = false;
-    }
+    const includeText = !!document.getElementById('export-include-text')?.checked;
+    return performExport(pendingExportType, includeText);
 }
 
-/**
- * Generate and download CSV from documents array
- * @param {Array} documents - Array of document objects from the export API
- * @param {string} filename - Name for downloaded file
- */
+/** Returns true when a file was produced. */
 function downloadCSV(documents, filename) {
     if (!documents || documents.length === 0) {
-        alert('No documents to export.');
-        return;
+        showToast('There are no documents to export for this search.');
+        return false;
     }
-    
-    const hasText = documents[0] && 'full_text' in documents[0];
 
+    const hasText = documents[0] && 'full_text' in documents[0];
     let header = 'Filename,Category,Subcategory,File Type,Page Count,Character Count,Document Date,DOJ URL';
     if (hasText) header += ',Text Content';
     let csv = header + '\n';
-    
+
     for (const doc of documents) {
         const row = [
             escapeCSVField(doc.filename || ''),
@@ -3128,16 +3805,18 @@ function downloadCSV(documents, filename) {
         if (hasText) row.push(escapeCSVField((doc.full_text || '').replace(/[\r\n]+/g, ' ')));
         csv += row.join(',') + '\n';
     }
-    
+
     const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
     a.download = filename;
+    a.classList.add('hidden');
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
+    return true;
 }
 
 /**
@@ -3239,7 +3918,6 @@ const AFFILIATE_ITEMS = [
     }
 ];
 
-// ---- Donate panel: tab switching, init from config --------------------------
 function initDonatePanel(root) {
     if (!root) return;
     const tabs = root.querySelectorAll('.donate-tab');
@@ -3250,12 +3928,8 @@ function initDonatePanel(root) {
         if (tab.__donateBound) return;
         tab.__donateBound = true;
         tab.addEventListener('click', () => {
-            const name = tab.dataset.donateTab;
-            tabs.forEach(t => {
-                t.classList.toggle('active', t === tab);
-                t.setAttribute('aria-selected', t === tab ? 'true' : 'false');
-            });
-            panels.forEach(p => p.classList.toggle('active', p.dataset.donatePanel === name));
+            syncTabs(tab.closest('[role="tablist"]'), tab);
+            panels.forEach(p => p.classList.toggle('active', p.dataset.donatePanel === tab.dataset.donateTab));
         });
     });
 
@@ -3265,7 +3939,7 @@ function initDonatePanel(root) {
     if (grid) {
         grid.innerHTML = '';
         const presets = [
-            { key: 'amount5',  label: '$5'  },
+            { key: 'amount5', label: '$5' },
             { key: 'amount10', label: '$10' },
             { key: 'amount25', label: '$25' },
             { key: 'amount50', label: '$50' }
@@ -3293,19 +3967,16 @@ function initDonatePanel(root) {
             a.textContent = 'Choose amount';
             grid.appendChild(a);
         }
-        if (fineprint) fineprint.style.display = anyConfigured ? 'none' : '';
+        setHidden(fineprint, anyConfigured);
     }
 
-    // Crypto.com Pay link
-    const cryptoLink = root.querySelector('#crypto-pay-link');
-    if (cryptoLink) {
-        if (DONATE_CONFIG.crypto.cryptoComPayUrl) {
-            cryptoLink.href = DONATE_CONFIG.crypto.cryptoComPayUrl;
-            cryptoLink.style.display = '';
-        } else {
-            cryptoLink.style.display = 'none';
-        }
-    }
+    const bindLink = (selector, url) => {
+        const link = root.querySelector(selector);
+        if (!link) return;
+        if (url) link.href = url;
+        setHidden(link, !url);
+    };
+    bindLink('#crypto-pay-link', DONATE_CONFIG.crypto.cryptoComPayUrl);
 
     // Crypto wallet addresses + copy buttons
     const addrContainer = root.querySelector('#crypto-addresses');
@@ -3318,7 +3989,7 @@ function initDonatePanel(root) {
             row.innerHTML = `
                 <span class="crypto-address-coin">${escapeHtml(w.coin || '')}</span>
                 <span class="crypto-address-value" title="${escapeHtml(w.address)}">${escapeHtml(w.address)}</span>
-                <button type="button" class="crypto-address-copy">Copy</button>
+                <button type="button" class="crypto-address-copy" aria-label="Copy ${escapeHtml(w.coin || '')} address">Copy</button>
             `;
             const btn = row.querySelector('.crypto-address-copy');
             btn.addEventListener('click', () => copyToClipboard(w.address, btn));
@@ -3326,27 +3997,8 @@ function initDonatePanel(root) {
         });
     }
 
-    // GitHub Sponsors
-    const ghLink = root.querySelector('#github-sponsors-link');
-    if (ghLink) {
-        if (DONATE_CONFIG.github.sponsorsUrl) {
-            ghLink.href = DONATE_CONFIG.github.sponsorsUrl;
-            ghLink.style.display = '';
-        } else {
-            ghLink.style.display = 'none';
-        }
-    }
-
-    // Ko-fi
-    const kofiLink = root.querySelector('#kofi-link');
-    if (kofiLink) {
-        if (DONATE_CONFIG.kofi.url) {
-            kofiLink.href = DONATE_CONFIG.kofi.url;
-            kofiLink.style.display = '';
-        } else {
-            kofiLink.style.display = 'none';
-        }
-    }
+    bindLink('#github-sponsors-link', DONATE_CONFIG.github.sponsorsUrl);
+    bindLink('#kofi-link', DONATE_CONFIG.kofi.url);
 }
 
 /**
@@ -3391,16 +4043,13 @@ function openDonateModal(source) {
     if (!modal || !body) return;
 
     // Move the footer panel into the modal (preserves any state) and re-init.
-    if (footerPanel && !body.contains(footerPanel)) {
-        body.appendChild(footerPanel);
-    }
+    if (footerPanel && !body.contains(footerPanel)) body.appendChild(footerPanel);
     initDonatePanel(body.querySelector('.donate-panel'));
-    modal.classList.remove('hidden');
-    document.body.classList.add('modal-open');
+    openDialog(modal, { trigger: document.activeElement, onRequestClose: closeDonateModal });
     if (source === 'auto') {
         // Snooze auto-prompts for 30 days regardless of action.
         const ms = DONATE_CONFIG.modalTrigger.snoozeDays * 24 * 60 * 60 * 1000;
-        localStorage.setItem('donatePromptSnoozedUntil', String(Date.now() + ms));
+        try { localStorage.setItem('donatePromptSnoozedUntil', String(Date.now() + ms)); } catch (e) { /* storage blocked */ }
     }
 }
 
@@ -3412,19 +4061,12 @@ function closeDonateModal() {
     // Move the panel back to the footer so the page still has its persistent donate UI.
     if (footerSection && panel) {
         const note = footerSection.querySelector('.donate-note');
-        if (note) {
-            footerSection.insertBefore(panel, note);
-        } else {
-            footerSection.appendChild(panel);
-        }
+        if (note) footerSection.insertBefore(panel, note);
+        else footerSection.appendChild(panel);
     }
-    if (modal) modal.classList.add('hidden');
-    document.body.classList.remove('modal-open');
+    closeDialog(modal);
 }
 
-// Make modal helpers globally reachable (called from inline onclick attrs).
-window.openDonateModal = openDonateModal;
-window.closeDonateModal = closeDonateModal;
 
 // ---- Banner dismiss ---------------------------------------------------------
 function dismissDonationBanner() {
@@ -3435,7 +4077,6 @@ function dismissDonationBanner() {
         localStorage.setItem('donationBannerDismissedUntil', String(Date.now() + ms));
     } catch (e) {}
 }
-window.dismissDonationBanner = dismissDonationBanner;
 
 function maybeHideBannerFromCookie() {
     try {
@@ -3447,16 +4088,15 @@ function maybeHideBannerFromCookie() {
     } catch (e) {}
 }
 
-// ---- Affiliate strip --------------------------------------------------------
 function renderAffiliateStrip(enabled) {
     const section = document.getElementById('affiliate-section');
     const strip = document.getElementById('affiliate-strip');
     if (!section || !strip) return;
     if (!enabled || !AFFILIATE_TAG || !AFFILIATE_ITEMS.length) {
-        section.style.display = 'none';
+        setHidden(section, true);
         return;
     }
-    section.style.display = '';
+    setHidden(section, false);
     strip.innerHTML = '';
     AFFILIATE_ITEMS.forEach(item => {
         const a = document.createElement('a');
@@ -3477,7 +4117,7 @@ function renderAffiliateStrip(enabled) {
 // Renders ads into the slots only when an ad-network client id is configured.
 let _adsLoaded = false;
 function hideAllAdSlots() {
-    document.querySelectorAll('.ad-slot').forEach(s => { s.style.display = 'none'; });
+    document.querySelectorAll('.ad-slot').forEach(s => setHidden(s, true));
 }
 function loadAdNetwork(enabled) {
     if (!enabled || _adsLoaded) {

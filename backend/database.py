@@ -54,6 +54,30 @@ _PUBLIC_EXCLUDE_ARCHIVED = " AND NOT (d.filename LIKE 'EFTA%' AND SUBSTR(d.filen
 _PUBLIC_EXCLUDE_ARCHIVED_COND = "NOT (d.filename LIKE 'EFTA%' AND SUBSTR(d.filename, 13, 1) = '_')"
 
 
+def _category_exclusion(exclude_categories, column: str = "d.category"):
+    """Build a parameterized "exclude these categories" SQL condition.
+
+    Returns (condition_sql, params). The condition has NO leading AND/WHERE so the
+    caller can add it to a conditions list or prefix it with " AND ". Values are only
+    ever bound as ? parameters, never interpolated. None / empty / all-invalid input
+    is a no-op and returns ("", []). Non-str and empty-string items are ignored and
+    duplicates are collapsed. Rows with a NULL category are kept (a bare NOT IN would
+    silently drop them).
+    """
+    if not exclude_categories:
+        return "", []
+    if isinstance(exclude_categories, str):
+        exclude_categories = [exclude_categories]
+    cleaned = []
+    for c in exclude_categories:
+        if isinstance(c, str) and c and c not in cleaned:
+            cleaned.append(c)
+    if not cleaned:
+        return "", []
+    placeholders = ",".join("?" for _ in cleaned)
+    return f"({column} IS NULL OR {column} NOT IN ({placeholders}))", cleaned
+
+
 class Database:
     """SQLite database for document metadata and search"""
     
@@ -766,11 +790,13 @@ class Database:
                         file_type: Optional[str] = None,
                         date_from: Optional[str] = None,
                         date_to: Optional[str] = None,
-                        include_hidden: bool = False) -> List[Dict[str, Any]]:
+                        include_hidden: bool = False,
+                        exclude_categories: Optional[List[str]] = None) -> List[Dict[str, Any]]:
         """Full-text search across documents
         
         Args:
             include_hidden: If False (default), excludes hidden documents and hidden categories
+            exclude_categories: Optional list of category names to leave out of the results
         """
         with self.get_read_connection(timeout_seconds=15) as conn:
             # Build query with optional filters
@@ -813,6 +839,11 @@ class Database:
                 sql += " AND d.document_date <= ?"
                 params.append(date_to)
             
+            exclude_sql, exclude_params = _category_exclusion(exclude_categories)
+            if exclude_sql:
+                sql += " AND " + exclude_sql
+                params.extend(exclude_params)
+            
             sql += " ORDER BY score LIMIT ? OFFSET ?"
             params.extend([limit, offset])
             
@@ -828,11 +859,13 @@ class Database:
                                file_type: Optional[str] = None,
                                date_from: Optional[str] = None,
                                date_to: Optional[str] = None,
-                               include_hidden: bool = False) -> int:
+                               include_hidden: bool = False,
+                               exclude_categories: Optional[List[str]] = None) -> int:
         """Count total full-text search results (for pagination)
         
         Args:
             include_hidden: If False (default), excludes hidden documents and hidden categories
+            exclude_categories: Optional list of category names to leave out of the count
         """
         with self.get_read_connection(timeout_seconds=10) as conn:
             sql = """
@@ -870,6 +903,11 @@ class Database:
                 sql += " AND d.document_date <= ?"
                 params.append(date_to)
             
+            exclude_sql, exclude_params = _category_exclusion(exclude_categories)
+            if exclude_sql:
+                sql += " AND " + exclude_sql
+                params.extend(exclude_params)
+            
             cursor = conn.execute(sql, params)
             return cursor.fetchone()[0]
     
@@ -879,11 +917,13 @@ class Database:
                           file_type: Optional[str] = None,
                           date_from: Optional[str] = None,
                           date_to: Optional[str] = None,
-                          include_hidden: bool = False) -> Dict[str, Any]:
+                          include_hidden: bool = False,
+                          exclude_categories: Optional[List[str]] = None) -> Dict[str, Any]:
         """Get faceted counts for search results (category, subcategory, file_type breakdowns)
         
         Args:
             include_hidden: If False (default), excludes hidden documents and hidden categories
+            exclude_categories: Optional list of category names to leave out of every facet
         """
         with self.get_read_connection(timeout_seconds=10) as conn:
             # Base match condition
@@ -894,6 +934,15 @@ class Database:
             visibility_filter = ""
             if not include_hidden:
                 visibility_filter = " AND (d.is_hidden IS NULL OR d.is_hidden = 0) AND hc.category IS NULL AND d.subcategory != 'thumbnails'" + _PUBLIC_EXCLUDE_ARCHIVED
+            
+            # Category exclusion is part of the shared filter reused by all three facet
+            # queries (independent of include_hidden). Its ? placeholders sit directly
+            # after the MATCH placeholder in every query, so its params are spliced in
+            # right after base_params (see vis_params below).
+            exclude_sql, exclude_params = _category_exclusion(exclude_categories)
+            if exclude_sql:
+                visibility_filter += " AND " + exclude_sql
+            vis_params = list(exclude_params)
             
             # Build date filter conditions
             date_filter = ""
@@ -913,7 +962,7 @@ class Database:
                 LEFT JOIN hidden_categories hc ON d.category = hc.category
                 WHERE {base_match}{visibility_filter}
             """
-            category_params = list(base_params)
+            category_params = list(base_params) + vis_params
             if file_type:
                 category_sql += " AND d.file_type = ?"
                 category_params.append(file_type)
@@ -934,7 +983,7 @@ class Database:
                     LEFT JOIN hidden_categories hc ON d.category = hc.category
                     WHERE {base_match}{visibility_filter} AND d.category = ?
                 """
-                subcategory_params = list(base_params) + [category]
+                subcategory_params = list(base_params) + vis_params + [category]
                 if file_type:
                     subcategory_sql += " AND d.file_type = ?"
                     subcategory_params.append(file_type)
@@ -953,7 +1002,7 @@ class Database:
                 LEFT JOIN hidden_categories hc ON d.category = hc.category
                 WHERE {base_match}{visibility_filter}
             """
-            file_type_params = list(base_params)
+            file_type_params = list(base_params) + vis_params
             if category:
                 file_type_sql += " AND d.category = ?"
                 file_type_params.append(category)
@@ -1165,12 +1214,14 @@ class Database:
                           filename: Optional[str] = None,
                           keyword: Optional[str] = None,
                           search: Optional[str] = None,
-                          include_hidden: bool = False) -> List[Dict[str, Any]]:
+                          include_hidden: bool = False,
+                          exclude_categories: Optional[List[str]] = None) -> List[Dict[str, Any]]:
         """Get all documents with pagination and filtering
         
         Args:
             search: Searches both filename AND subcategory (for admin document search)
             include_hidden: If False (default), excludes hidden documents and hidden categories
+            exclude_categories: Optional list of category names to leave out of the results
         """
         with self.get_read_connection() as conn:
             params = []
@@ -1205,6 +1256,11 @@ class Database:
             if category:
                 conditions.append("d.category = ?")
                 params.append(category)
+            
+            exclude_sql, exclude_params = _category_exclusion(exclude_categories)
+            if exclude_sql:
+                conditions.append(exclude_sql)
+                params.extend(exclude_params)
             
             if subcategory:
                 conditions.append("d.subcategory = ?")
@@ -1246,6 +1302,7 @@ class Database:
         file_type: Optional[str] = None,
         filename: Optional[str] = None,
         include_hidden: bool = False,
+        exclude_categories: Optional[List[str]] = None,
     ) -> tuple:
         """Get one page of documents and total count via two queries.
         
@@ -1263,6 +1320,10 @@ class Database:
             if category:
                 conditions.append("d.category = ?")
                 params.append(category)
+            exclude_sql, exclude_params = _category_exclusion(exclude_categories)
+            if exclude_sql:
+                conditions.append(exclude_sql)
+                params.extend(exclude_params)
             if subcategory:
                 conditions.append("d.subcategory = ?")
                 params.append(subcategory)
@@ -1295,11 +1356,13 @@ class Database:
                         file_type: Optional[str] = None,
                         filename: Optional[str] = None,
                         keyword: Optional[str] = None,
-                        include_hidden: bool = False) -> int:
+                        include_hidden: bool = False,
+                        exclude_categories: Optional[List[str]] = None) -> int:
         """Count documents with optional filters
         
         Args:
             include_hidden: If False (default), excludes hidden documents and hidden categories
+            exclude_categories: Optional list of category names to leave out of the count
         """
         with self.get_read_connection() as conn:
             params = []
@@ -1335,6 +1398,11 @@ class Database:
             if category:
                 conditions.append("d.category = ?")
                 params.append(category)
+            
+            exclude_sql, exclude_params = _category_exclusion(exclude_categories)
+            if exclude_sql:
+                conditions.append(exclude_sql)
+                params.extend(exclude_params)
             
             if subcategory:
                 conditions.append("d.subcategory = ?")
@@ -2779,7 +2847,10 @@ class Database:
                                   keyword: Optional[str] = None,
                                   search_query: Optional[str] = None,
                                   include_text: bool = False,
-                                  max_results: int = 50000) -> List[Dict[str, Any]]:
+                                  max_results: int = 50000,
+                                  exclude_categories: Optional[List[str]] = None,
+                                  date_from: Optional[str] = None,
+                                  date_to: Optional[str] = None) -> List[Dict[str, Any]]:
         """Get documents with DOJ manifest URLs for CSV export
         
         Args:
@@ -2791,6 +2862,11 @@ class Database:
             search_query: Full-text search query
             include_text: Include full_text in results (capped at 5,000 rows)
             max_results: Maximum number of results (default 50,000)
+            exclude_categories: Optional list of category names to leave out
+            date_from: Only documents with document_date >= this YYYY-MM-DD string
+            date_to: Only documents with document_date <= this YYYY-MM-DD string
+                (documents with a NULL document_date are dropped when a bound is set,
+                matching search_fulltext)
         
         Returns:
             List of dicts with: filename, category, subcategory, file_type,
@@ -2864,6 +2940,11 @@ class Database:
                 conditions.append("d.category = ?")
                 params.append(category)
             
+            exclude_sql, exclude_params = _category_exclusion(exclude_categories)
+            if exclude_sql:
+                conditions.append(exclude_sql)
+                params.extend(exclude_params)
+            
             if subcategory:
                 conditions.append("d.subcategory = ?")
                 params.append(subcategory)
@@ -2875,6 +2956,14 @@ class Database:
             if filename:
                 conditions.append("LOWER(d.filename) LIKE LOWER(?)")
                 params.append(f"%{filename}%")
+            
+            if date_from:
+                conditions.append("d.document_date >= ?")
+                params.append(date_from)
+            
+            if date_to:
+                conditions.append("d.document_date <= ?")
+                params.append(date_to)
             
             # Add conditions to query
             if conditions:
