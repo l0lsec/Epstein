@@ -1935,6 +1935,35 @@ class Database:
                 conn.commit()
             return changed
 
+    def merge_doj_media_subcategories(self) -> Dict[str, int]:
+        """Fold DOJ media still carrying the generic "Audio Recording"/"Video Recording"
+        labels (indexed before the extractor named them) into the named sections:
+        the Maxwell interview audio ("Day 1"/"Day 2"/"Tallahassee") -> "Maxwell Proffer",
+        and DOJ video, all of it the MCC surveillance footage -> "BOP Video Footage".
+        Returns {new_subcategory: rows_changed}.
+        """
+        with self.get_connection() as conn:
+            rows = conn.execute("""
+                SELECT id, filename, subcategory FROM documents
+                WHERE category = 'DOJ Disclosures'
+                  AND subcategory IN ('Audio Recording', 'Video Recording')
+            """).fetchall()
+            updates, changed = [], {}
+            for doc_id, filename, subcategory in rows:
+                name = filename or ""
+                if subcategory == "Video Recording":
+                    label = "BOP Video Footage"
+                elif "Day 1" in name or "Day 2" in name or "Tallahassee" in name:
+                    label = "Maxwell Proffer"
+                else:
+                    continue
+                updates.append((label, doc_id))
+                changed[label] = changed.get(label, 0) + 1
+            if updates:
+                conn.executemany("UPDATE documents SET subcategory = ? WHERE id = ?", updates)
+                conn.commit()
+            return changed
+
     # =========================================================================
     # Settings Methods
     # =========================================================================

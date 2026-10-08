@@ -62,6 +62,30 @@ class RelabelEftaSubcategories(unittest.TestCase):
         self.assertEqual(self.db.relabel_efta_subcategories(), {})  # idempotent
 
 
+class MergeDojMediaSubcategories(unittest.TestCase):
+    def test_merge(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Database(os.path.join(tmp, "epstein.db"))
+            db.insert_documents_batch([
+                _doc("a1", "Day 1 - Part 1 - 7_24_25_Tallahassee.003.wav", "Audio Recording"),
+                _doc("a2", "Day 2 - Test - xxx7_25.001.wav", "Audio Recording"),
+                _doc("a-other", "press call.wav", "Audio Recording"),        # no rule: kept
+                _doc("v1", "2019.08.09 - 6 p.m. (18.00.09 - 19.00.33).mp4", "Video Recording"),
+                _doc("v2", "video1.mp4", "Video Recording"),
+                _doc("bop", "2019.08.10 - 3 a.m. (03.00.11 - 04.00.36).mp4", "BOP Video Footage"),
+                _doc("foia-v", "clip.mp4", "Video Recording", category="FOIA"),  # other category
+            ])
+            self.assertEqual(db.merge_doj_media_subcategories(),
+                             {"Maxwell Proffer": 2, "BOP Video Footage": 2})
+            sub = lambda i: db.get_document(i, include_full_text=False)["subcategory"]
+            for doc_id, want in [("a1", "Maxwell Proffer"), ("a2", "Maxwell Proffer"),
+                                 ("a-other", "Audio Recording"), ("v1", "BOP Video Footage"),
+                                 ("v2", "BOP Video Footage"), ("bop", "BOP Video Footage"),
+                                 ("foia-v", "Video Recording")]:
+                self.assertEqual(sub(doc_id), want, doc_id)
+            self.assertEqual(db.merge_doj_media_subcategories(), {})  # idempotent
+
+
 @unittest.skipIf(TestClient is None, "FastAPI/httpx not installed")
 class NginxCacheOptOut(unittest.TestCase):
     """Query-dependent /api GETs carry X-Accel-Expires: 0 so nginx (whose cache key drops the

@@ -397,18 +397,21 @@ async def lifespan(app: FastAPI):
             security_logger.log_system_event(
                 "non_documents_purge_failed", f"Non-document purge failed: {e}", severity="warning"
             )
-        # Put DOJ EFTA files filed under a non-data-set label back in their Data Set.
+        # Put DOJ EFTA files filed under a non-data-set label back in their Data Set, and
+        # fold generic DOJ audio/video labels into their named sections.
         try:
             relabelled = await asyncio.to_thread(db.relabel_efta_subcategories)
+            for label, n in (await asyncio.to_thread(db.merge_doj_media_subcategories)).items():
+                relabelled[label] = relabelled.get(label, 0) + n
             if relabelled:
                 security_logger.log_system_event(
                     "efta_subcategories_relabelled",
-                    f"Relabelled {sum(relabelled.values())} EFTA document(s) to their data set",
+                    f"Relabelled {sum(relabelled.values())} DOJ document(s) into their section",
                     by_subcategory=relabelled,
                 )
         except Exception as e:
             security_logger.log_system_event(
-                "efta_relabel_failed", f"EFTA subcategory relabel failed: {e}", severity="warning"
+                "efta_relabel_failed", f"DOJ subcategory relabel failed: {e}", severity="warning"
             )
 
     # Pre-warm the bootstrap cache so the first user request is instant.
