@@ -78,6 +78,39 @@ def _category_exclusion(exclude_categories, column: str = "d.category"):
     return f"({column} IS NULL OR {column} NOT IN ({placeholders}))", cleaned
 
 
+# The extractor's own bookkeeping files in extracted_text/ (index + failure logs). Their
+# stems are not document ids; indexing one creates a bogus "unknown" doc in "Unknown".
+_INDEX_FILE_STEMS = frozenset({
+    "index", "image_index", "media_index", "failed_pdf_files", "failed_media_files",
+})
+
+# Top-level app/system directories that never hold archive documents (mirrors the
+# extractor's IGNORED_DIRS; kept here so database.py doesn't import the PDF stack).
+# A file under one of these (e.g. frontend/og-image.png) would otherwise be indexed
+# with its folder name as the category.
+_NON_DOCUMENT_DIRS = frozenset({
+    "venv", ".venv", "env", ".env", "node_modules", ".git", ".svn", ".hg",
+    "__pycache__", ".pytest_cache", "extracted_text", "transcripts", "thumbnails",
+    "vector_store", "frontend", "backend", "scripts", "logs", "temp", "tmp",
+    ".cursor", ".vscode", ".idea", ".claude", "tests",
+})
+
+
+def is_non_document_entry(doc_id: Optional[str], path: Optional[str],
+                          category: Optional[str] = None) -> bool:
+    """True if an index entry is app/extractor bookkeeping rather than an archive document.
+
+    A file under an app directory only counts when its category came from that folder
+    (or defaulted to Unknown), so a real document that once landed there under a curated
+    category (e.g. an EFTA file, always "DOJ Disclosures") is left alone.
+    """
+    if doc_id and (doc_id in _INDEX_FILE_STEMS or doc_id.startswith("index.")):
+        return True
+    parts = (path or "").replace("\\", "/").split("/")
+    return (len(parts) > 1 and parts[0] in _NON_DOCUMENT_DIRS
+            and category in (None, "", "Unknown", parts[0]))
+
+
 class Database:
     """SQLite database for document metadata and search"""
     
@@ -1844,7 +1877,31 @@ class Database:
         with self.get_connection() as conn:
             cursor = conn.execute("SELECT path FROM documents")
             return {row[0] for row in cursor.fetchall()}
-    
+
+    def purge_non_documents(self) -> List[Dict[str, Any]]:
+        """Delete rows that were indexed from app/extractor files instead of the archive
+        (see is_non_document_entry), e.g. frontend/og-image.png or failed_media_files.json.
+
+        Returns the removed rows (id, filename, path, category). The FTS index is kept in
+        sync by the documents_ad trigger.
+        """
+        ids = sorted(_INDEX_FILE_STEMS)
+        dirs = sorted(_NON_DOCUMENT_DIRS)
+        top = "substr(replace(path, '\\', '/'), 1, instr(replace(path, '\\', '/'), '/') - 1)"
+        # Cheap SQL prefilter; is_non_document_entry makes the final call.
+        sql = (
+            "SELECT id, filename, path, category FROM documents"
+            f" WHERE id IN ({','.join('?' for _ in ids)}) OR id LIKE 'index.%'"
+            f" OR (instr(replace(path, '\\', '/'), '/') > 1 AND {top} IN ({','.join('?' for _ in dirs)}))"
+        )
+        with self.get_connection() as conn:
+            rows = [dict(r) for r in conn.execute(sql, ids + dirs)]
+            rows = [r for r in rows if is_non_document_entry(r["id"], r["path"], r["category"])]
+            if rows:
+                conn.executemany("DELETE FROM documents WHERE id = ?", [(r["id"],) for r in rows])
+                conn.commit()
+            return rows
+
     # =========================================================================
     # Settings Methods
     # =========================================================================
@@ -3760,6 +3817,19 @@ def build_index(base_path: str, force: bool = False,
     if not all_files:
         print("No documents to index.")
         return
+
+    # Drop app/extractor files that slipped into older index files (they surface as
+    # bogus public categories like "frontend" or "Unknown"), and purge any already indexed.
+    skipped = [fid for fid, info in all_files.items()
+               if is_non_document_entry(fid, info.get("path"), info.get("category"))]
+    for fid in skipped:
+        del all_files[fid]
+    if skipped:
+        print(f"  Skipped {len(skipped)} non-document index entr{'y' if len(skipped) == 1 else 'ies'}")
+    purged = db.purge_non_documents()
+    if purged:
+        print(f"  Purged {len(purged)} non-document row(s) from the database: "
+              + ", ".join(r["path"] or r["id"] for r in purged))
     
     # Deduplicate by path: same logical file can appear under old (absolute-path) and new (relative-path) hash
     def _canonical_doc_hash(path: str, base: Path) -> Optional[str]:
