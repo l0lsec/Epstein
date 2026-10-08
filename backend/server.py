@@ -26,7 +26,7 @@ from pydantic import BaseModel
 from io import BytesIO
 from sse_starlette.sse import EventSourceResponse
 
-from database import Database, VectorStore, build_index
+from database import Database, VectorStore, build_index, is_archived_filename
 from llm import LLMAssistant, fetch_provider_balance
 from extractor import extract_email_date
 from alterations import analyze_versions
@@ -205,9 +205,20 @@ def _altered_docs_public() -> bool:
     return enabled
 
 
+def _public_version(doc_id: str) -> tuple:
+    """(servable, archived): db.public_version_status, with archived versions withheld
+    entirely while the toggle is off."""
+    return db.public_version_status(doc_id, allow_exposed=_altered_docs_public())
+
+
 def _is_public_servable(doc_id: str) -> bool:
-    """db.is_public_servable, with archived versions withheld entirely while the toggle is off."""
-    return db.is_public_servable(doc_id, allow_exposed=_altered_docs_public())
+    return _public_version(doc_id)[0]
+
+
+# Public responses for an archived version must never be stored by Cloudflare or the browser:
+# an admin can un-expose it or switch the altered-documents toggle off at any moment, and a cached
+# copy would keep serving pre-redaction content. The cache middleware leaves a route-set value alone.
+NO_STORE = "private, no-store"
 
 
 def _public_settings(settings: Dict[str, str]) -> Dict[str, bool]:
@@ -498,13 +509,16 @@ async def add_security_headers(request: Request, call_next):
         else:
             response.headers["Cache-Control"] = "public, max-age=86400"  # 24 hours
     
-    # Aggressive caching for thumbnails (they never change once generated)
+    # Aggressive caching for thumbnails (they never change once generated).
+    # A route-set Cache-Control wins (archived versions send NO_STORE).
     elif "/thumbnail" in path and response.status_code == 200:
-        response.headers["Cache-Control"] = "public, max-age=2592000, immutable"  # 30 days
-    
-    # Document files are immutable — let Cloudflare cache to cut origin egress
+        if "Cache-Control" not in response.headers:
+            response.headers["Cache-Control"] = "public, max-age=2592000, immutable"  # 30 days
+
+    # Document files are immutable — let Cloudflare cache to cut origin egress (route-set value wins)
     elif path.endswith("/file") and "/api/documents/" in path and response.status_code == 200:
-        response.headers["Cache-Control"] = "public, max-age=604800"  # 7 days
+        if "Cache-Control" not in response.headers:
+            response.headers["Cache-Control"] = "public, max-age=604800"  # 7 days
     
     # Short CDN cache for homepage (s-maxage for CF, shorter max-age for browsers)
     elif path == "/" and response.status_code == 200:
@@ -1928,6 +1942,7 @@ async def export_documents(
 async def get_document(
     doc_id: str,
     request: Request,
+    response: Response,
     include_text: bool = Query(True, description="Include full_text in response (set false for faster modal open)"),
 ):
     """Get a specific document by ID
@@ -1966,12 +1981,14 @@ async def get_document(
         request_id=request_id,
         filename=doc.get("filename", "")
     )
-    
+    if is_archived_filename(doc.get("filename", "")):
+        response.headers["Cache-Control"] = NO_STORE
+
     return doc
 
 
 @app.get("/api/documents/{doc_id}/text")
-async def get_document_text(doc_id: str, request: Request):
+async def get_document_text(doc_id: str, request: Request, response: Response):
     """Get only the full text of a document (for lazy loading in modal).
     
     Note: Returns 404 for hidden documents or documents in hidden categories.
@@ -1979,11 +1996,14 @@ async def get_document_text(doc_id: str, request: Request):
     if not db:
         raise HTTPException(status_code=503, detail="Database not initialized")
     
-    if not await asyncio.to_thread(_is_public_servable, doc_id):
+    servable, archived = await asyncio.to_thread(_public_version, doc_id)
+    if not servable:
         raise HTTPException(status_code=404, detail="Document not found")
     full_text = await asyncio.to_thread(db.get_document_full_text, doc_id, include_hidden=False)
     if full_text is None:
         raise HTTPException(status_code=404, detail="Document not found")
+    if archived:
+        response.headers["Cache-Control"] = NO_STORE
 
     return {"full_text": full_text}
 
@@ -2056,14 +2076,18 @@ def _serve_document_file(doc: dict, doc_id: str, client_ip: str, request_id: str
         file_size_bytes=file_size
     )
 
+    headers = {
+        'Content-Disposition': 'inline',  # Forces inline display, not download
+        'Accept-Ranges': 'bytes',  # Explicitly indicate we support range requests
+    }
+    if is_archived_filename(doc.get("filename", "")):
+        headers['Cache-Control'] = NO_STORE
+
     # FileResponse supports HTTP Range requests required for video/audio seeking
     return FileResponse(
         path=file_path,
         media_type=media_type,
-        headers={
-            'Content-Disposition': 'inline',  # Forces inline display, not download
-            'Accept-Ranges': 'bytes',  # Explicitly indicate we support range requests
-        }
+        headers=headers
     )
 
 
@@ -2121,7 +2145,7 @@ async def _resolve_findable_pdf(doc_id: str, request: Request) -> tuple:
 
 
 @app.get("/api/documents/{doc_id}/pdf-find")
-async def pdf_find_pages(doc_id: str, request: Request, t: List[str] = Query(default=[])):
+async def pdf_find_pages(doc_id: str, request: Request, response: Response, t: List[str] = Query(default=[])):
     """Pages of a PDF that contain the given terms (`t`, repeatable; trailing * = prefix).
 
     `searchable` is false when the PDF has no text layer (scanned images); the client
@@ -2132,6 +2156,8 @@ async def pdf_find_pages(doc_id: str, request: Request, t: List[str] = Query(def
     if not terms:
         raise HTTPException(status_code=400, detail="No valid search terms")
     doc, file_path, client_ip, request_id = await _resolve_findable_pdf(doc_id, request)
+    if is_archived_filename(doc.get("filename", "")):
+        response.headers["Cache-Control"] = NO_STORE
     if file_path.stat().st_size > PDF_FIND_MAX_BYTES:
         return {"searchable": False, "page_count": doc.get("page_count", 0), "pages": []}
 
@@ -2181,7 +2207,8 @@ async def get_highlighted_pdf(doc_id: str, request: Request, t: List[str] = Quer
     return Response(
         content=data,
         media_type="application/pdf",
-        headers={"Content-Disposition": "inline", "Cache-Control": "private, max-age=300"},
+        headers={"Content-Disposition": "inline",
+                 "Cache-Control": NO_STORE if is_archived_filename(doc.get("filename", "")) else "private, max-age=300"},
     )
 
 
@@ -2413,8 +2440,10 @@ async def get_document_thumbnail(doc_id: str, request: Request):
     # Gate archived (older) EFTA versions BEFORE the fast path: their thumbnails
     # are generated at ingest, so the on-disk fast path would otherwise leak a
     # pre-redaction preview image. One indexed PK lookup; cheap for normal docs.
-    if not await asyncio.to_thread(_is_public_servable, doc_id):
+    servable, archived = await asyncio.to_thread(_public_version, doc_id)
+    if not servable:
         raise HTTPException(status_code=404, detail="Document not found")
+    headers = {"Cache-Control": NO_STORE} if archived else None
 
     # Ensure thumbnails directory exists
     THUMBNAILS_PATH.mkdir(exist_ok=True)
@@ -2428,6 +2457,7 @@ async def get_document_thumbnail(doc_id: str, request: Request):
         return FileResponse(
             path=thumbnail_path,
             media_type="image/jpeg",
+            headers=headers,
         )
     
     doc = await asyncio.to_thread(db.get_document, doc_id, include_hidden=False, include_full_text=False)
@@ -2455,6 +2485,7 @@ async def get_document_thumbnail(doc_id: str, request: Request):
         return FileResponse(
             path=thumbnail_path,
             media_type="image/jpeg",
+            headers=headers,
         )
     
     raise HTTPException(status_code=404, detail="Could not generate thumbnail")
@@ -2599,7 +2630,7 @@ async def ask_question_stream(ask_request: AskRequest, request: Request):
 
 
 @app.get("/api/documents/{doc_id}/summary")
-async def get_document_summary(doc_id: str, request: Request, regenerate: bool = False):
+async def get_document_summary(doc_id: str, request: Request, response: Response, regenerate: bool = False):
     """Get an AI-generated summary of a document (cached if available)
     
     Note: Returns 404 for hidden documents or documents in hidden categories.
@@ -2623,6 +2654,8 @@ async def get_document_summary(doc_id: str, request: Request, regenerate: bool =
             document_id=doc_id
         )
         raise HTTPException(status_code=404, detail="Document not found")
+    if is_archived_filename(doc.get("filename", "")):
+        response.headers["Cache-Control"] = NO_STORE
     
     if not regenerate:
         cached = await asyncio.to_thread(db.get_summary, doc_id)
@@ -4233,7 +4266,7 @@ async def public_document_alteration(doc_id: str):
 
 
 @app.get("/api/version-diff")
-async def public_version_diff(old: str = None, new: str = None):
+async def public_version_diff(response: Response, old: str = None, new: str = None):
     """Public before/after text diff — allowed ONLY when the older version's group
     is admin-exposed and the altered-documents toggle is on (gated via
     _is_public_servable so pre-redaction PII can't leak)."""
@@ -4243,12 +4276,16 @@ async def public_version_diff(old: str = None, new: str = None):
         raise HTTPException(status_code=400, detail="old and new doc ids are required")
 
     def _gate():
-        if not _is_public_servable(old):          # old must be an exposed archived version
-            return False
-        return db.get_document(new, include_hidden=False, include_full_text=False) is not None
+        servable, archived = _public_version(old)  # old must be an exposed archived version
+        if not servable:
+            return False, archived
+        return db.get_document(new, include_hidden=False, include_full_text=False) is not None, archived
 
-    if not await asyncio.to_thread(_gate):
+    allowed, old_archived = await asyncio.to_thread(_gate)
+    if not allowed:
         raise HTTPException(status_code=404, detail="Not found")
+    if old_archived:
+        response.headers["Cache-Control"] = NO_STORE
 
     def _texts():
         return (db.get_document_full_text(old, include_hidden=True),

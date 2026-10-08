@@ -13,6 +13,10 @@ try:
     from fastapi.testclient import TestClient
 except ImportError:  # the server's own dependencies aren't installed (e.g. plain system Python)
     TestClient = None
+try:
+    import fitz  # PyMuPDF: real fixture PDFs so in-PDF find/highlight run for real
+except ImportError:
+    fitz = None
 
 ADMIN_KEY = "test-admin-key"
 SETTING = "altered_documents_enabled"
@@ -56,8 +60,14 @@ class AlteredDocsToggle(unittest.TestCase):
                     "page_count, char_count, full_text) VALUES (?,?,?,?,?,?,?,?,?)",
                     (doc_id, filename, filename, "DOJ", "ds1", "pdf", 1, len(text), text),
                 )
-                with open(os.path.join(base, filename), "wb") as f:
-                    f.write(b"%PDF-1.4 " + doc_id.encode())
+                if fitz:
+                    pdf = fitz.open()
+                    pdf.new_page().insert_text((72, 72), text)
+                    pdf.save(os.path.join(base, filename))
+                    pdf.close()
+                else:
+                    with open(os.path.join(base, filename), "wb") as f:
+                        f.write(b"%PDF-1.4 " + doc_id.encode())
 
             def alt(efta, canon, old, old_filename, status, removed):
                 conn.execute(
@@ -190,6 +200,40 @@ class AlteredDocsToggle(unittest.TestCase):
         self.assertEqual(self.set_toggle(True, key="wrong").status_code, 401)
         self.assertEqual(self.db.get_setting(SETTING), "false")
         self.assertEqual(self.get("/api/altered-documents").json()["total"], 0)
+
+    def test_archived_versions_are_never_edge_cached(self):
+        # A cached copy would outlive the admin hiding it again, so nothing archived may be stored.
+        self.assertEqual(self.set_toggle(True).status_code, 200)
+        self.db.save_summary(OLD, "Cached summary of the pre-change version.")
+        routes = self.archived_routes(OLD) + [
+            f"/api/version-diff?old={OLD}&new={CANON}",
+            f"/api/documents/{OLD}/summary",
+        ]
+        if fitz:
+            routes += [f"/api/documents/{OLD}/pdf-find?t=Smith", f"/api/documents/{OLD}/highlighted?t=Smith"]
+        for route in routes:
+            r = self.get(route)
+            self.assertEqual(r.status_code, 200, route)
+            self.assertEqual(r.headers.get("cache-control"), "private, no-store", route)
+        if fitz:
+            # Find/highlight really parsed the PDF (the highlighted copy, not the plain-file fallback).
+            pages = self.get(f"/api/documents/{OLD}/pdf-find?t=Smith").json()["pages"]
+            self.assertEqual([p["page"] for p in pages], [1])
+            self.assertNotEqual(self.get(f"/api/documents/{OLD}/highlighted?t=Smith").content,
+                                self.get(f"/api/documents/{OLD}/file").content)
+
+    def test_normal_documents_keep_edge_caching(self):
+        for enabled in (False, True):
+            self.assertEqual(self.set_toggle(enabled).status_code, 200)
+            for doc_id in (PLAIN, CANON):
+                r = self.get(f"/api/documents/{doc_id}/file")
+                self.assertEqual(r.headers.get("cache-control"), "public, max-age=604800", (enabled, doc_id))
+                for route in (f"/api/documents/{doc_id}", f"/api/documents/{doc_id}/text"):
+                    r = self.get(route)
+                    self.assertEqual(r.status_code, 200, route)
+                    self.assertNotIn("no-store", r.headers.get("cache-control", ""), route)
+            r = self.get(f"/api/documents/{PLAIN}/thumbnail")
+            self.assertEqual(r.headers.get("cache-control"), "public, max-age=2592000, immutable", enabled)
 
 
 if __name__ == "__main__":

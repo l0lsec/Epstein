@@ -13,7 +13,7 @@ import threading
 import queue
 import time
 from pathlib import Path
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 from contextlib import contextmanager
 import numpy as np
 
@@ -52,6 +52,11 @@ def dataset_for_efta(efta_num: int) -> int:
 # EFTA filenames so a non-EFTA name that happens to have '_' at pos 13 is unaffected.
 _PUBLIC_EXCLUDE_ARCHIVED = " AND NOT (d.filename LIKE 'EFTA%' AND SUBSTR(d.filename, 13, 1) = '_')"
 _PUBLIC_EXCLUDE_ARCHIVED_COND = "NOT (d.filename LIKE 'EFTA%' AND SUBSTR(d.filename, 13, 1) = '_')"
+
+
+def is_archived_filename(filename: str) -> bool:
+    """Python twin of _PUBLIC_EXCLUDE_ARCHIVED: True for an archived (older) EFTA version."""
+    return filename.startswith("EFTA") and len(filename) > 12 and filename[12] == "_"
 
 
 def _category_exclusion(exclude_categories, column: str = "d.category"):
@@ -2570,26 +2575,32 @@ class Database:
         victim PII) is never served until an admin exposes that document.
         allow_exposed=False (public altered-documents features switched off) hides
         every archived version, exposed or not."""
+        return self.public_version_status(doc_id, allow_exposed)[0]
+
+    def public_version_status(self, doc_id: str, allow_exposed: bool = True) -> Tuple[bool, bool]:
+        """(servable, archived) in one lookup. `servable` is is_public_servable;
+        `archived` marks an older EFTA version, whose public responses must never be
+        edge-cached (an admin can hide it again at any time)."""
         with self.get_read_connection() as conn:
             row = conn.execute(
                 "SELECT filename, file_type FROM documents WHERE id = ?", (doc_id,)
             ).fetchone()
             if not row:
-                return False
+                return False, False
             fn = row["filename"]
-            if not (fn.startswith("EFTA") and len(fn) > 12 and fn[12] == "_"):
-                return True  # not an archived version — normal visibility rules apply
+            if not is_archived_filename(fn):
+                return True, False  # not an archived version — normal visibility rules apply
             try:
                 efta_num = int(fn[4:12])
             except ValueError:
-                return True
+                return True, True
             if not allow_exposed:
-                return False
+                return False, True
             st = conn.execute(
                 "SELECT review_status FROM document_alterations WHERE efta_num = ? AND file_type = ?",
                 (efta_num, row["file_type"]),
             ).fetchone()
-            return bool(st and st["review_status"] == "exposed")
+            return bool(st and st["review_status"] == "exposed"), True
 
     def get_alteration_for_doc(self, canonical_id: str) -> Optional[Dict[str, Any]]:
         """Public viewer-badge data for a canonical doc, or None if it has no
