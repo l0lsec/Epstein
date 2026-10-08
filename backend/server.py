@@ -397,6 +397,19 @@ async def lifespan(app: FastAPI):
             security_logger.log_system_event(
                 "non_documents_purge_failed", f"Non-document purge failed: {e}", severity="warning"
             )
+        # Put DOJ EFTA files filed under a non-data-set label back in their Data Set.
+        try:
+            relabelled = await asyncio.to_thread(db.relabel_efta_subcategories)
+            if relabelled:
+                security_logger.log_system_event(
+                    "efta_subcategories_relabelled",
+                    f"Relabelled {sum(relabelled.values())} EFTA document(s) to their data set",
+                    by_subcategory=relabelled,
+                )
+        except Exception as e:
+            security_logger.log_system_event(
+                "efta_relabel_failed", f"EFTA subcategory relabel failed: {e}", severity="warning"
+            )
 
     # Pre-warm the bootstrap cache so the first user request is instant.
     if db:
@@ -541,8 +554,25 @@ async def add_security_headers(request: Request, call_next):
     elif path == "/" and response.status_code == 200:
         if "Cache-Control" not in response.headers:
             response.headers["Cache-Control"] = "public, s-maxage=300, max-age=60"
-    
+
+    # The production nginx proxy cache keys /api responses WITHOUT the query string, so it
+    # served one category's /api/subcategories (or a keyword-filtered /api/categories) for
+    # every other request to that path. Opt query-dependent API responses out of the nginx
+    # cache; X-Accel-Expires is consumed by nginx, so browser/CDN Cache-Control is unchanged.
+    if path.startswith("/api/") and _response_depends_on_query(request):
+        response.headers["X-Accel-Expires"] = "0"
+
     return response
+
+
+def _response_depends_on_query(request: Request) -> bool:
+    """True if this request's response can vary with its query string: it has one, or its
+    route declares query parameters (so the bare URL and ?x=y variants differ). Unknown
+    routes count as query-dependent, since caching one wrongly is worse than a cache miss."""
+    if request.url.query:
+        return True
+    dependant = getattr(request.scope.get("route"), "dependant", None)
+    return dependant is None or bool(dependant.query_params)
 
 
 # Admin API key for protected endpoints

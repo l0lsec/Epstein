@@ -1907,6 +1907,34 @@ class Database:
                 conn.commit()
             return rows
 
+    def relabel_efta_subcategories(self) -> Dict[str, int]:
+        """Give DOJ EFTA files that carry a non-data-set subcategory (e.g. "Evidence Files",
+        which held 14k Data Set 1-8 files and left those data sets nearly empty in the
+        dropdown) the "Data Set N" their EFTA number falls in.
+
+        Files already labelled "Data Set N" are left alone (folder-based labels win, as in
+        the extractor), as are numbers outside every known range. Returns
+        {new_subcategory: rows_changed}. The FTS triggers don't fire on subcategory updates.
+        """
+        with self.get_connection() as conn:
+            rows = conn.execute("""
+                SELECT id, filename FROM documents
+                WHERE category = 'DOJ Disclosures' AND filename LIKE 'EFTA%'
+                  AND (subcategory IS NULL OR subcategory NOT LIKE 'Data Set %')
+            """).fetchall()
+            updates, changed = [], {}
+            for doc_id, filename in rows:
+                m = re.match(r"EFTA(\d{8})", filename or "")
+                ds = dataset_for_efta(int(m.group(1))) if m else 0
+                if ds:
+                    label = f"Data Set {ds}"
+                    updates.append((label, doc_id))
+                    changed[label] = changed.get(label, 0) + 1
+            if updates:
+                conn.executemany("UPDATE documents SET subcategory = ? WHERE id = ?", updates)
+                conn.commit()
+            return changed
+
     # =========================================================================
     # Settings Methods
     # =========================================================================
