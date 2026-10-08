@@ -2564,10 +2564,12 @@ class Database:
     # Document alteration review (DOJ re-issued / redacted files)
     # =========================================================================
 
-    def is_public_servable(self, doc_id: str) -> bool:
+    def is_public_servable(self, doc_id: str, allow_exposed: bool = True) -> bool:
         """False if doc_id is an archived (older) EFTA version whose group is not
         'exposed'. Gates public file/text/meta so pre-redaction content (possible
-        victim PII) is never served until an admin exposes that document."""
+        victim PII) is never served until an admin exposes that document.
+        allow_exposed=False (public altered-documents features switched off) hides
+        every archived version, exposed or not."""
         with self.get_read_connection() as conn:
             row = conn.execute(
                 "SELECT filename, file_type FROM documents WHERE id = ?", (doc_id,)
@@ -2581,6 +2583,8 @@ class Database:
                 efta_num = int(fn[4:12])
             except ValueError:
                 return True
+            if not allow_exposed:
+                return False
             st = conn.execute(
                 "SELECT review_status FROM document_alterations WHERE efta_num = ? AND file_type = ?",
                 (efta_num, row["file_type"]),

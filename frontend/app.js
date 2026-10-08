@@ -43,6 +43,7 @@ let state = {
     _initialized: false,
     _delegated: false,
     askDisabled: false,
+    alteredDocsEnabled: false,  // admin toggle for the public "Altered by DOJ" features (default off)
     _subSeq: {},
     _refocusSearchBtn: false,
     _ageGateBound: false
@@ -1503,7 +1504,7 @@ async function init() {
     }
 
     // Surface the "Altered by DOJ" censored bar (harmless no-op when there are no exposed alterations).
-    loadCensoredBar();
+    if (state.alteredDocsEnabled) loadCensoredBar();
 
     // Set timestamp for spam protection
     const timestampField = document.getElementById('feedback-timestamp');
@@ -1588,6 +1589,7 @@ function applyKeywordsToDropdowns(keywords) {
 
 function applyPublicSettings(settings) {
     if (settings.ask_ai_enabled === false) hideAskAi();
+    state.alteredDocsEnabled = settings.altered_documents_enabled === true;
     initMonetization({
         adsEnabled: settings.ads_enabled === true,
         affiliateEnabled: settings.affiliate_enabled !== false
@@ -2228,6 +2230,7 @@ async function loadPublicSettings() {
         if (!response.ok) return;
         const settings = await response.json();
         if (settings.ask_ai_enabled === false) hideAskAi();
+        state.alteredDocsEnabled = settings.altered_documents_enabled === true;
     } catch (error) {
         console.error('Error loading public settings:', error);
     }
@@ -2368,7 +2371,7 @@ function openExposedCompare() {
 
 function openPublicCompare(oldId, newId, title) {
     const modal = document.getElementById('public-compare-modal');
-    if (!modal || !oldId || !newId) return;
+    if (!state.alteredDocsEnabled || !modal || !oldId || !newId) return;
     modal.dataset.oldId = oldId;
     modal.dataset.newId = newId;
     const titleEl = document.getElementById('public-compare-title');
@@ -2492,7 +2495,7 @@ function renderCensoredBar(items, total) {
 async function openAlteredGallery() {
     const modal = document.getElementById('altered-gallery-modal');
     const body = document.getElementById('altered-gallery-body');
-    if (!modal || !body) return;
+    if (!state.alteredDocsEnabled || !modal || !body) return;
     openDialog(modal, { trigger: document.activeElement, onRequestClose: closeAlteredGallery });
     body.innerHTML = '<div class="compare-state">Loading…</div>';
     try {
@@ -3072,7 +3075,7 @@ async function openDocument(docId, index = -1, opts = {}) {
         // Flag documents DOJ re-issued/redacted after release (non-blocking). Clear the previous document's notice first.
         elements.modalAlteration.innerHTML = '';
         setHidden(elements.modalAlteration, true);
-        loadDocumentAlterationBadge(docId, seq);
+        if (state.alteredDocsEnabled) loadDocumentAlterationBadge(docId, seq);
 
         elements.modalText.textContent = '';   // the full text loads on demand (Text Content tab or find-in-document)
         elements.modalSummary.innerHTML = '<p class="loading">Open this tab to generate an AI summary.</p>';

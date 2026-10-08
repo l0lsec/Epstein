@@ -2213,6 +2213,30 @@
                 </div>
             </div>
 
+            <!-- Altered Documents Toggle -->
+            <div class="card" id="altered-docs-toggle-card" style="margin-bottom: var(--space-lg);">
+                <div class="card-header">
+                    <span class="card-title">🚩 Altered by DOJ — Public Display</span>
+                </div>
+                <div class="card-body">
+                    <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: var(--space-md);">
+                        <div>
+                            <p style="margin-bottom: var(--space-xs); font-weight: 500;">Show "Altered by DOJ" on the public site</p>
+                            <p style="font-size: 0.85rem; color: var(--text-muted);">
+                                Controls every public alteration feature: the homepage "Altered by DOJ" bar and full list, the "DOJ altered this document" badge in the viewer, the before/after compare, and serving the pre-change versions of exposed documents. Keep OFF until the findings are vetted. The review queue below keeps working either way.
+                            </p>
+                        </div>
+                        <label class="toggle-switch">
+                            <input type="checkbox" id="altered-docs-toggle" onchange="toggleAlteredDocs(this.checked)">
+                            <span class="toggle-slider"></span>
+                        </label>
+                    </div>
+                    <div id="altered-docs-status" style="padding: var(--space-sm) var(--space-md); background: var(--bg-tertiary); border-radius: 6px; font-size: 0.85rem;">
+                        Loading status...
+                    </div>
+                </div>
+            </div>
+
             <!-- Pinned Documents Management -->
             <div class="card" style="margin-bottom: var(--space-lg);">
                 <div class="card-header">
@@ -2584,6 +2608,7 @@
                     <p style="margin-bottom: var(--space-md); font-size: 0.9rem; color: var(--text-muted);">
                         Documents DOJ re-issued after release. Compare before/after (the actual PDF and the transcribed text), then decide: <strong style="color:var(--success);">Clear</strong> if it's a legitimate redaction protecting a victim (older version stays hidden), or <strong style="color:var(--danger);">Expose</strong> if it appears to hide a perpetrator (publishes the before/after to the public). Built by <code>recheck_versions.py</code> + <code>compute_alterations.py</code>, then scored by <code>python backend/alterations.py --apply</code> (ignores line-break/OCR noise, flags added redaction marks, ranks by priority).
                     </p>
+                    <div id="altered-docs-queue-note" style="display: flex; align-items: center; justify-content: space-between; gap: var(--space-sm); flex-wrap: wrap; margin-bottom: var(--space-md); padding: var(--space-sm) var(--space-md); background: var(--bg-tertiary); border-radius: 6px; font-size: 0.85rem;"></div>
                     <div style="margin-bottom: var(--space-md); display:flex; gap:var(--space-sm); align-items:center;">
                         <span style="color:var(--text-secondary);">🔎 Search original text:</span>
                         <input id="alt-search" type="search" placeholder="keyword that may have been redacted…" class="login-input" style="flex:1; min-width:240px; display:inline-block;" onkeydown="if(event.key==='Enter')filterUpdatedData()" onchange="filterUpdatedData()" title="Finds altered documents whose ORIGINAL (pre-redaction) text contained this keyword — so you can check whether it was removed. Press Enter.">

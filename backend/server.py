@@ -78,6 +78,8 @@ _stats_cache = ResponseCache(ttl_seconds=3600)  # Stats cached for 1h; admin act
 _categories_cache = ResponseCache(ttl_seconds=3600)  # Categories cached for 1h; admin actions call invalidate() on change
 _bootstrap_cache = ResponseCache(ttl_seconds=86400)  # Bootstrap cached for 24h; admin actions invalidate on change
 _maintenance_cache = ResponseCache(ttl_seconds=120)
+# Public-feature toggles read on hot paths (e.g. every file/thumbnail request); update_setting invalidates.
+_settings_cache = ResponseCache(ttl_seconds=60)
 # Heavy admin-dashboard aggregations cached briefly so the auto-refreshing admin console
 # can't re-fire ~10 expensive queries every few seconds and starve the thread pool.
 _admin_cache = ResponseCache(ttl_seconds=30)
@@ -187,6 +189,38 @@ llm: Optional[LLMAssistant] = None
 index_task: Optional[asyncio.Task] = None
 last_index_time: Optional[datetime] = None
 is_indexing: bool = False
+
+# Admin toggle for every public "Altered by DOJ" feature: the homepage bar, the full list,
+# the document-viewer badge, the before/after compare and the archived pre-change versions
+# behind it. Default OFF while the alteration findings are being vetted.
+ALTERED_DOCS_SETTING = "altered_documents_enabled"
+
+
+def _altered_docs_public() -> bool:
+    """Whether the public altered-documents features are switched on (blocking; call off the event loop)."""
+    enabled = _settings_cache.get(ALTERED_DOCS_SETTING)
+    if enabled is None:
+        enabled = db is not None and db.get_setting(ALTERED_DOCS_SETTING, "false") == "true"
+        _settings_cache.set(ALTERED_DOCS_SETTING, enabled)
+    return enabled
+
+
+def _is_public_servable(doc_id: str) -> bool:
+    """db.is_public_servable, with archived versions withheld entirely while the toggle is off."""
+    return db.is_public_servable(doc_id, allow_exposed=_altered_docs_public())
+
+
+def _public_settings(settings: Dict[str, str]) -> Dict[str, bool]:
+    """The subset of admin settings the public site sees (bootstrap and /api/settings)."""
+    return {
+        "ask_ai_enabled": settings.get("ask_ai_enabled", "true") == "true",
+        "pinned_documents_enabled": settings.get("pinned_documents_enabled", "true") == "true",
+        # Default OFF for ads: only flips on after an ad network is wired up in app.js AD_CONFIG.
+        "ads_enabled": settings.get("ads_enabled", "false") == "true",
+        # Default ON: the Amazon Associates strip stays hidden anyway until a tag is configured in app.js.
+        "affiliate_enabled": settings.get("affiliate_enabled", "true") == "true",
+        ALTERED_DOCS_SETTING: settings.get(ALTERED_DOCS_SETTING, "false") == "true",
+    }
 
 # Initialize security logger
 security_logger = get_security_logger()
@@ -1153,15 +1187,7 @@ def _build_and_cache_bootstrap() -> dict:
             "search_term": kw["search_term"],
             "document_count": kw["document_count"],
         })
-    settings = db.get_all_settings()
-    public_settings = {
-        "ask_ai_enabled": settings.get("ask_ai_enabled", "true") == "true",
-        "pinned_documents_enabled": settings.get("pinned_documents_enabled", "true") == "true",
-        # Default OFF for ads: only flips on after an ad network is wired up in app.js AD_CONFIG.
-        "ads_enabled": settings.get("ads_enabled", "false") == "true",
-        # Default ON: the Amazon Associates strip stays hidden anyway until a tag is configured in app.js.
-        "affiliate_enabled": settings.get("affiliate_enabled", "true") == "true",
-    }
+    public_settings = _public_settings(db.get_all_settings())
 
     browse_limit = 24
     browse_docs, browse_total = db.get_all_documents_with_total(
@@ -1919,7 +1945,7 @@ async def get_document(
     # Check if document is visible (not hidden and category not hidden)
     doc = await asyncio.to_thread(db.get_document, doc_id, include_hidden=False, include_full_text=include_text)
     # Gate archived (older) EFTA versions: never serve unless admin-exposed.
-    if doc and not await asyncio.to_thread(db.is_public_servable, doc_id):
+    if doc and not await asyncio.to_thread(_is_public_servable, doc_id):
         doc = None
     if not doc:
         security_logger.log_security_event(
@@ -1953,7 +1979,7 @@ async def get_document_text(doc_id: str, request: Request):
     if not db:
         raise HTTPException(status_code=503, detail="Database not initialized")
     
-    if not await asyncio.to_thread(db.is_public_servable, doc_id):
+    if not await asyncio.to_thread(_is_public_servable, doc_id):
         raise HTTPException(status_code=404, detail="Document not found")
     full_text = await asyncio.to_thread(db.get_document_full_text, doc_id, include_hidden=False)
     if full_text is None:
@@ -2054,7 +2080,7 @@ async def get_document_file(doc_id: str, request: Request):
 
     doc = await asyncio.to_thread(db.get_document, doc_id, include_hidden=False)
     # Gate archived (older) EFTA versions: never serve unless admin-exposed.
-    if doc and not await asyncio.to_thread(db.is_public_servable, doc_id):
+    if doc and not await asyncio.to_thread(_is_public_servable, doc_id):
         doc = None
     if not doc:
         security_logger.log_security_event(
@@ -2082,7 +2108,7 @@ async def _resolve_findable_pdf(doc_id: str, request: Request) -> tuple:
     if not db:
         raise HTTPException(status_code=503, detail="Database not initialized")
     doc = await asyncio.to_thread(db.get_document, doc_id, include_hidden=False, include_full_text=False)
-    if doc and not await asyncio.to_thread(db.is_public_servable, doc_id):
+    if doc and not await asyncio.to_thread(_is_public_servable, doc_id):
         doc = None
     if not doc or doc.get("file_type") != "pdf":
         raise HTTPException(status_code=404, detail="Document not found")
@@ -2387,7 +2413,7 @@ async def get_document_thumbnail(doc_id: str, request: Request):
     # Gate archived (older) EFTA versions BEFORE the fast path: their thumbnails
     # are generated at ingest, so the on-disk fast path would otherwise leak a
     # pre-redaction preview image. One indexed PK lookup; cheap for normal docs.
-    if not await asyncio.to_thread(db.is_public_servable, doc_id):
+    if not await asyncio.to_thread(_is_public_servable, doc_id):
         raise HTTPException(status_code=404, detail="Document not found")
 
     # Ensure thumbnails directory exists
@@ -2584,6 +2610,9 @@ async def get_document_summary(doc_id: str, request: Request, regenerate: bool =
         raise HTTPException(status_code=503, detail="Database not initialized")
     
     doc = await asyncio.to_thread(db.get_document, doc_id, include_hidden=False)
+    # Gate archived (older) EFTA versions: never summarize pre-redaction text unless admin-exposed.
+    if doc and not await asyncio.to_thread(_is_public_servable, doc_id):
+        doc = None
     if not doc:
         security_logger.log_security_event(
             event_type="summary_not_found",
@@ -3996,16 +4025,7 @@ async def get_public_settings():
         raise HTTPException(status_code=503, detail="Database not initialized")
     
     settings = await asyncio.to_thread(db.get_all_settings)
-
-    # Only expose certain settings to the public
-    public_settings = {
-        "ask_ai_enabled": settings.get("ask_ai_enabled", "true") == "true",
-        "pinned_documents_enabled": settings.get("pinned_documents_enabled", "true") == "true",
-        "ads_enabled": settings.get("ads_enabled", "false") == "true",
-        "affiliate_enabled": settings.get("affiliate_enabled", "true") == "true",
-    }
-    
-    return public_settings
+    return _public_settings(settings)
 
 
 @app.get("/api/admin/settings")
@@ -4051,6 +4071,9 @@ async def update_setting(setting: SettingUpdate, request: Request, x_api_key: st
         db.set_setting(setting.key, setting.value)
 
     await asyncio.to_thread(_work)
+    # Visibility toggles must apply now, not when the (24h) bootstrap cache expires.
+    _settings_cache.invalidate()
+    _bootstrap_cache.invalidate()
 
     return {"success": True, "key": setting.key, "value": setting.value}
 
@@ -4176,11 +4199,14 @@ async def disable_status_page(request: Request, x_api_key: str = Header(None)):
 @app.get("/api/altered-documents")
 async def public_altered_documents(limit: int = 60, offset: int = 0):
     """Public list of documents confirmed as improperly altered by DOJ (exposed
-    by an admin). Feeds the Altered Documents page and the homepage Censored bar."""
+    by an admin). Feeds the Altered Documents page and the homepage Censored bar.
+    Empty while the admin toggle (altered_documents_enabled) is off."""
     if not db:
         raise HTTPException(status_code=503, detail="Database not initialized")
 
     def _work():
+        if not _altered_docs_public():
+            return [], 0
         return (db.get_exposed_alterations(limit=min(limit, 200), offset=offset),
                 db.count_exposed_alterations())
 
@@ -4192,10 +4218,15 @@ async def public_altered_documents(limit: int = 60, offset: int = 0):
 async def public_document_alteration(doc_id: str):
     """Public alteration-badge data for a canonical document, or {altered: false}.
     Pending/exposed return metadata; exposed also returns the old version id so the
-    public compare can load the before/after. trivial/cleared return altered:false."""
+    public compare can load the before/after. trivial/cleared return altered:false,
+    as does everything while the admin toggle (altered_documents_enabled) is off."""
     if not db:
         raise HTTPException(status_code=503, detail="Database not initialized")
-    alt = await asyncio.to_thread(db.get_alteration_for_doc, doc_id)
+
+    def _work():
+        return db.get_alteration_for_doc(doc_id) if _altered_docs_public() else None
+
+    alt = await asyncio.to_thread(_work)
     if not alt:
         return {"altered": False}
     return {"altered": True, **alt}
@@ -4204,14 +4235,15 @@ async def public_document_alteration(doc_id: str):
 @app.get("/api/version-diff")
 async def public_version_diff(old: str = None, new: str = None):
     """Public before/after text diff — allowed ONLY when the older version's group
-    is admin-exposed (gated via is_public_servable so pre-redaction PII can't leak)."""
+    is admin-exposed and the altered-documents toggle is on (gated via
+    _is_public_servable so pre-redaction PII can't leak)."""
     if not db:
         raise HTTPException(status_code=503, detail="Database not initialized")
     if not old or not new:
         raise HTTPException(status_code=400, detail="old and new doc ids are required")
 
     def _gate():
-        if not db.is_public_servable(old):          # old must be an exposed archived version
+        if not _is_public_servable(old):          # old must be an exposed archived version
             return False
         return db.get_document(new, include_hidden=False, include_full_text=False) is not None
 

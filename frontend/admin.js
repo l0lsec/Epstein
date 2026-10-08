@@ -3139,6 +3139,7 @@ async function loadContentData() {
         loadStatusPageSettings(),
         loadAskAIStatus(),
         loadPinnedDocsStatus(),
+        loadAlteredDocsStatus(),
         loadAdsStatus(),
         loadAffiliateStatus(),
         loadPinnedDocuments(),
@@ -3441,6 +3442,60 @@ async function togglePinnedDocs(enabled) {
         alert('Error updating setting: ' + error.message);
         // Revert toggle
         const toggle = document.getElementById('pinned-docs-toggle');
+        if (toggle) toggle.checked = !enabled;
+    }
+}
+
+// Public "Altered by DOJ" features. Default OFF (unvetted) — the server hides them too, not just the UI.
+function renderAlteredDocsStatus(isEnabled, verb) {
+    const statusEl = document.getElementById('altered-docs-status');
+    if (statusEl) {
+        statusEl.innerHTML = isEnabled
+            ? `<span style="color: var(--success);">✓ "Altered by DOJ" features are ${verb} <strong>visible</strong> on the public site</span>`
+            : `<span style="color: var(--warning);">⚠️ "Altered by DOJ" features are ${verb} <strong>hidden</strong> from the public site</span>`;
+    }
+    const noteEl = document.getElementById('altered-docs-queue-note');
+    if (noteEl) {
+        const change = '<button type="button" class="btn btn-sm" onclick="document.getElementById(\'altered-docs-toggle-card\').scrollIntoView({ behavior: \'smooth\', block: \'center\' })">Change</button>';
+        noteEl.innerHTML = isEnabled
+            ? `<span style="color: var(--success);">Public display is <strong>ON</strong>: badges show on pending/exposed documents and Exposed documents are published.</span>${change}`
+            : `<span style="color: var(--warning);">Public display is <strong>OFF</strong>: nothing here is shown publicly, even documents marked Exposed.</span>${change}`;
+    }
+}
+
+async function loadAlteredDocsStatus() {
+    try {
+        const response = await authFetch(`${window.location.origin}/api/admin/settings`);
+        if (!response.ok) throw new Error('Failed to load settings');
+        const settings = await response.json();
+
+        const isEnabled = settings.altered_documents_enabled === 'true';
+        const toggle = document.getElementById('altered-docs-toggle');
+        if (toggle) toggle.checked = isEnabled;
+        renderAlteredDocsStatus(isEnabled, 'currently');
+    } catch (error) {
+        console.error('Error loading Altered Documents status:', error);
+        const statusEl = document.getElementById('altered-docs-status');
+        if (statusEl) statusEl.innerHTML = '<span style="color: var(--danger);">Error loading status</span>';
+    }
+}
+
+async function toggleAlteredDocs(enabled) {
+    try {
+        const response = await authFetch(`${window.location.origin}/api/admin/settings`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ key: 'altered_documents_enabled', value: enabled ? 'true' : 'false' })
+        });
+
+        if (!response.ok) throw new Error('Failed to update setting');
+
+        renderAlteredDocsStatus(enabled, 'now');
+    } catch (error) {
+        console.error('Error toggling Altered Documents:', error);
+        alert('Error updating setting: ' + error.message);
+        // Revert toggle
+        const toggle = document.getElementById('altered-docs-toggle');
         if (toggle) toggle.checked = !enabled;
     }
 }
