@@ -381,6 +381,23 @@ async def lifespan(app: FastAPI):
     else:
         security_logger.log_system_event("auto_index_disabled", "Auto-indexing is disabled")
     
+    # Drop rows indexed from app/extractor files (e.g. frontend/og-image.png showing up as a
+    # "frontend" category). Idempotent; runs before the warmup so caches are built clean.
+    if db:
+        try:
+            purged = await asyncio.to_thread(db.purge_non_documents)
+            if purged:
+                security_logger.log_system_event(
+                    "non_documents_purged",
+                    f"Purged {len(purged)} non-document row(s): "
+                    + ", ".join(r["path"] or r["id"] for r in purged),
+                    purged_ids=[r["id"] for r in purged],
+                )
+        except Exception as e:
+            security_logger.log_system_event(
+                "non_documents_purge_failed", f"Non-document purge failed: {e}", severity="warning"
+            )
+
     # Pre-warm the bootstrap cache so the first user request is instant.
     if db:
         import random
