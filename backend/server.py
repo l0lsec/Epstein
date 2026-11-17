@@ -30,6 +30,7 @@ from database import Database, VectorStore, build_index, is_archived_filename
 from llm import LLMAssistant, fetch_provider_balance
 from extractor import extract_email_date
 from alterations import analyze_versions
+import storage
 from security_logger import (
     SecurityLogger, 
     RequestLoggingMiddleware, 
@@ -172,10 +173,12 @@ VECTOR_PATH = BASE_PATH / "vector_store"
 STATIC_PATH = BASE_PATH / "frontend"
 THUMBNAILS_PATH = BASE_PATH / "thumbnails"
 MAINTENANCE_LOCK = BASE_PATH / ".maintenance"
+storage.configure(BASE_PATH)
 
 # Thumbnail settings
 THUMBNAIL_WIDTH = 200
 THUMBNAIL_HEIGHT = 280  # Approximate A4 aspect ratio
+THUMBNAIL_SOURCE_MAX_BYTES = 300 * 1024 * 1024  # skip fetching huge videos from R2 just for a preview
 
 # Auto-indexing configuration (in seconds)
 # NOTE: Auto-indexing is disabled by default. Use admin dashboard to trigger reindex manually.
@@ -2058,12 +2061,65 @@ async def get_document_text(doc_id: str, request: Request, response: Response):
     return {"full_text": full_text}
 
 
-def _serve_document_file(doc: dict, doc_id: str, client_ip: str, request_id: str,
-                         admin: bool = False):
-    """Resolve a document's on-disk file and return a FileResponse for inline
-    viewing. Shared by the public file route and the admin (hidden-bypass) route.
-    `doc` must already be fetched with the appropriate visibility check.
+_FILE_MEDIA_TYPES = {
+    '.pdf': 'application/pdf',
+    '.wav': 'audio/wav',
+    '.mp3': 'audio/mpeg',
+    '.mp4': 'video/mp4',
+    '.mov': 'video/quicktime',
+    '.m4a': 'audio/mp4',
+    '.jpg': 'image/jpeg',
+    '.jpeg': 'image/jpeg',
+    '.png': 'image/png',
+    '.gif': 'image/gif',
+    '.tif': 'image/tiff',
+    '.tiff': 'image/tiff',
+    '.bmp': 'image/bmp',
+    '.webp': 'image/webp',
+}
+
+
+async def _serve_document_file(doc: dict, doc_id: str, client_ip: str, request_id: str,
+                               admin: bool = False):
+    """Return the document's file for inline viewing: a redirect to a presigned R2 URL
+    when R2 serving is on and the object is there, else the local file. Shared by the
+    public file route and the admin (hidden-bypass) route. `doc` must already be fetched
+    with the appropriate visibility check.
     """
+    file_path = (BASE_PATH / doc["path"]).resolve()
+    inside = str(file_path).startswith(str(BASE_PATH.resolve()))
+    # Archived (pre-change) versions never get a presigned URL: it could not be revoked
+    # if an admin un-exposes the version, so they are always streamed with no-store.
+    archived = is_archived_filename(doc.get("filename", ""))
+    if storage.serving_enabled() and inside and not archived:
+        key = storage.key_for(file_path)
+        size = await asyncio.to_thread(storage.remote_size, key) if key else None
+        if size is not None:
+            ext = file_path.suffix.lower()
+            security_logger.log_document_access(
+                client_ip=client_ip,
+                document_id=doc_id,
+                document_path=doc["path"],
+                action="admin_download" if admin else "download",
+                request_id=request_id,
+                filename=doc.get("filename", ""),
+                file_type=ext,
+                file_size_bytes=size,
+            )
+            url = storage.presigned_get(key, _FILE_MEDIA_TYPES.get(ext, 'application/octet-stream'),
+                                        doc.get("filename", ""))
+            # The URL stays valid for 2h+; let browsers and the CDN reuse the redirect briefly.
+            cache = "private, no-store" if admin else "public, max-age=600"
+            return RedirectResponse(url, status_code=302, headers={"Cache-Control": cache})
+    local_path = None
+    if inside and storage.enabled():
+        local_path = await asyncio.to_thread(storage.ensure_local, file_path)
+    return _serve_local_document_file(doc, doc_id, client_ip, request_id, admin, local_path)
+
+
+def _serve_local_document_file(doc: dict, doc_id: str, client_ip: str, request_id: str,
+                               admin: bool = False, local_path: Optional[Path] = None):
+    """FileResponse for a document on the local disk (or its cached copy from R2)."""
     from starlette.responses import FileResponse
 
     file_path = (BASE_PATH / doc["path"]).resolve()
@@ -2080,6 +2136,8 @@ def _serve_document_file(doc: dict, doc_id: str, client_ip: str, request_id: str
         )
         raise HTTPException(status_code=403, detail="Access denied")
 
+    if local_path is not None:
+        file_path = local_path
     if not file_path.exists():
         security_logger.log_security_event(
             event_type="file_missing",
@@ -2094,24 +2152,7 @@ def _serve_document_file(doc: dict, doc_id: str, client_ip: str, request_id: str
 
     # Determine media type based on file extension
     ext = file_path.suffix.lower()
-    media_types = {
-        '.pdf': 'application/pdf',
-        '.wav': 'audio/wav',
-        '.mp3': 'audio/mpeg',
-        '.mp4': 'video/mp4',
-        '.mov': 'video/quicktime',
-        '.m4a': 'audio/mp4',
-        # Image types
-        '.jpg': 'image/jpeg',
-        '.jpeg': 'image/jpeg',
-        '.png': 'image/png',
-        '.gif': 'image/gif',
-        '.tif': 'image/tiff',
-        '.tiff': 'image/tiff',
-        '.bmp': 'image/bmp',
-        '.webp': 'image/webp',
-    }
-    media_type = media_types.get(ext, 'application/octet-stream')
+    media_type = _FILE_MEDIA_TYPES.get(ext, 'application/octet-stream')
 
     # Log file access (important for audit trail)
     file_size = file_path.stat().st_size
@@ -2167,7 +2208,7 @@ async def get_document_file(doc_id: str, request: Request):
         )
         raise HTTPException(status_code=404, detail="Document not found")
 
-    return _serve_document_file(doc, doc_id, client_ip, request_id)
+    return await _serve_document_file(doc, doc_id, client_ip, request_id)
 
 
 # In-PDF search: which pages contain the terms, and a copy of the PDF with them highlighted.
@@ -2177,7 +2218,10 @@ PDF_FIND_MAX_BYTES = 40 * 1024 * 1024
 
 
 async def _resolve_findable_pdf(doc_id: str, request: Request) -> tuple:
-    """Visibility-checked path of a public PDF for in-PDF search. Returns (doc, path, ip, request_id)."""
+    """Visibility-checked local copy of a public PDF for in-PDF search.
+
+    Returns (doc, path, ip, request_id). `path` is None when the file lives only in R2 and
+    is larger than PDF_FIND_MAX_BYTES (callers then treat it as too big to search)."""
     client_ip, request_id = get_client_info(request)
     if not db:
         raise HTTPException(status_code=503, detail="Database not initialized")
@@ -2189,9 +2233,13 @@ async def _resolve_findable_pdf(doc_id: str, request: Request) -> tuple:
     file_path = (BASE_PATH / doc["path"]).resolve()
     if not str(file_path).startswith(str(BASE_PATH.resolve())):
         raise HTTPException(status_code=403, detail="Access denied")
-    if not file_path.exists():
-        raise HTTPException(status_code=404, detail="File not found")
-    return doc, file_path, client_ip, request_id
+    local = await asyncio.to_thread(storage.ensure_local, file_path, PDF_FIND_MAX_BYTES)
+    if local is None:
+        key = storage.key_for(file_path)
+        in_r2 = bool(key) and await asyncio.to_thread(storage.remote_size, key) is not None
+        if not in_r2:
+            raise HTTPException(status_code=404, detail="File not found")
+    return doc, local, client_ip, request_id
 
 
 @app.get("/api/documents/{doc_id}/pdf-find")
@@ -2208,7 +2256,7 @@ async def pdf_find_pages(doc_id: str, request: Request, response: Response, t: L
     doc, file_path, client_ip, request_id = await _resolve_findable_pdf(doc_id, request)
     if is_archived_filename(doc.get("filename", "")):
         response.headers["Cache-Control"] = NO_STORE
-    if file_path.stat().st_size > PDF_FIND_MAX_BYTES:
+    if file_path is None or file_path.stat().st_size > PDF_FIND_MAX_BYTES:
         return {"searchable": False, "page_count": doc.get("page_count", 0), "pages": []}
 
     async with _pdf_find_semaphore:
@@ -2236,7 +2284,7 @@ async def get_highlighted_pdf(doc_id: str, request: Request, t: List[str] = Quer
     doc, file_path, client_ip, request_id = await _resolve_findable_pdf(doc_id, request)
 
     data = None
-    if terms and file_path.stat().st_size <= PDF_FIND_MAX_BYTES:
+    if terms and file_path is not None and file_path.stat().st_size <= PDF_FIND_MAX_BYTES:
         async with _pdf_find_semaphore:
             try:
                 data = await asyncio.to_thread(pdf_find.highlight_pdf, str(file_path), terms)
@@ -2247,7 +2295,7 @@ async def get_highlighted_pdf(doc_id: str, request: Request, t: List[str] = Quer
                 )
 
     if data is None:
-        return _serve_document_file(doc, doc_id, client_ip, request_id)
+        return await _serve_document_file(doc, doc_id, client_ip, request_id)
 
     security_logger.log_document_access(
         client_ip=client_ip, document_id=doc_id, document_path=doc["path"],
@@ -2278,7 +2326,7 @@ async def admin_get_document_file(doc_id: str, request: Request, x_api_key: str 
     doc = await asyncio.to_thread(db.get_document, doc_id, include_hidden=True)
     if not doc:
         raise HTTPException(status_code=404, detail="Document not found")
-    return _serve_document_file(doc, doc_id, client_ip, request_id, admin=True)
+    return await _serve_document_file(doc, doc_id, client_ip, request_id, admin=True)
 
 
 @app.get("/api/admin/documents/{doc_id}/text")
@@ -2459,9 +2507,20 @@ def _generate_thumbnail_sync(
     base_path: Path,
 ) -> None:
     """Synchronous thumbnail generation (run in thread pool to avoid blocking)."""
-    if not file_path.exists():
-        create_placeholder_thumbnail("document", thumbnail_path)
+    if file_type == "audio":
+        create_placeholder_thumbnail("audio", thumbnail_path)
         return
+    local = storage.ensure_local(file_path, max_bytes=THUMBNAIL_SOURCE_MAX_BYTES)
+    if local is None:
+        if storage.enabled():
+            key = storage.key_for(file_path)
+            if not key or storage.remote_size(key) is None:
+                # Missing from R2 or R2 unreachable: write nothing so a later request retries,
+                # rather than pinning a permanent placeholder.
+                return
+        create_placeholder_thumbnail("video" if file_type == "video" else "document", thumbnail_path)
+        return
+    file_path = local
     if file_type == "pdf":
         if not generate_pdf_thumbnail(file_path, thumbnail_path):
             create_placeholder_thumbnail("document", thumbnail_path)
@@ -4679,6 +4738,7 @@ async def redownload_document(doc_id: str, request: Request, x_api_key: str = He
         if not str(file_path).startswith(str(BASE_PATH.resolve())):
             raise HTTPException(status_code=403, detail="Path traversal denied")
 
+        await asyncio.to_thread(storage.restore_local, file_path)  # so the backup and old_size see the current file
         old_size = file_path.stat().st_size if file_path.exists() else 0
 
         # Back up the original before overwriting
@@ -4699,6 +4759,9 @@ async def redownload_document(doc_id: str, request: Request, x_api_key: str = He
 
         file_path.parent.mkdir(parents=True, exist_ok=True)
         file_path.write_bytes(resp.content)
+        if storage.enabled() and not await asyncio.to_thread(
+                storage.upload, file_path, _FILE_MEDIA_TYPES.get(file_path.suffix.lower(), 'application/octet-stream')):
+            print(f"⚠️ R2 upload failed for {doc['path']}; the local copy is newer than R2")
         new_size = len(resp.content)
 
         # Remove stale extracted text so re-extract picks up the new content
@@ -4756,6 +4819,7 @@ async def re_extract_document(doc_id: str, request: Request, x_api_key: str = He
         file_path = (BASE_PATH / doc["path"]).resolve()
         if not str(file_path).startswith(str(BASE_PATH.resolve())):
             raise HTTPException(status_code=403, detail="Path traversal denied")
+        await asyncio.to_thread(storage.restore_local, file_path)  # bring it back from R2 if needed
         if not file_path.exists():
             raise HTTPException(status_code=404, detail=f"File not found on disk: {doc['path']}")
 
@@ -4926,6 +4990,7 @@ async def _bg_redownload(task_id: str, doc_id: str):
             _bg_tasks[task_id].update(status="failed", result={"error": "Path traversal denied"})
             return
 
+        await asyncio.to_thread(storage.restore_local, file_path)  # so the backup and old_size see the current file
         old_size = file_path.stat().st_size if file_path.exists() else 0
 
         import shutil
@@ -4954,6 +5019,9 @@ async def _bg_redownload(task_id: str, doc_id: str):
 
         file_path.parent.mkdir(parents=True, exist_ok=True)
         file_path.write_bytes(resp.content)
+        if storage.enabled() and not await asyncio.to_thread(
+                storage.upload, file_path, _FILE_MEDIA_TYPES.get(file_path.suffix.lower(), 'application/octet-stream')):
+            print(f"⚠️ R2 upload failed for {doc['path']}; the local copy is newer than R2")
         new_size = len(resp.content)
 
         extracted_json = BASE_PATH / "extracted_text" / f"{doc_id}.json"
@@ -5001,6 +5069,7 @@ async def _bg_re_extract(task_id: str, doc_id: str):
         if not str(file_path).startswith(str(BASE_PATH.resolve())):
             _bg_tasks[task_id].update(status="failed", result={"error": "Path traversal denied"})
             return
+        await asyncio.to_thread(storage.restore_local, file_path)  # bring it back from R2 if needed
         if not file_path.exists():
             _bg_tasks[task_id].update(status="failed", result={"error": f"File not found on disk: {doc['path']}"})
             return
@@ -5198,6 +5267,7 @@ async def bulk_redownload_documents(body: BulkFilenamesRequest, request: Request
                 failed += 1
                 continue
 
+            await asyncio.to_thread(storage.restore_local, file_path)  # so the backup and old_size see the current file
             old_size = file_path.stat().st_size if file_path.exists() else 0
 
             import shutil
@@ -5229,6 +5299,9 @@ async def bulk_redownload_documents(body: BulkFilenamesRequest, request: Request
 
             file_path.parent.mkdir(parents=True, exist_ok=True)
             file_path.write_bytes(resp.content)
+            if storage.enabled() and not await asyncio.to_thread(
+                    storage.upload, file_path, _FILE_MEDIA_TYPES.get(file_path.suffix.lower(), 'application/octet-stream')):
+                print(f"⚠️ R2 upload failed for {doc['path']}; the local copy is newer than R2")
             new_size = len(resp.content)
 
             extracted_json = BASE_PATH / "extracted_text" / f"{doc_id}.json"
@@ -5319,6 +5392,7 @@ async def bulk_re_extract_documents(body: BulkFilenamesRequest, request: Request
                 results.append({"filename": filename, "success": False, "error": "Path traversal denied"})
                 failed += 1
                 continue
+            await asyncio.to_thread(storage.restore_local, file_path)  # bring it back from R2 if needed
             if not file_path.exists():
                 results.append({"filename": filename, "success": False, "error": "File not found on disk"})
                 failed += 1
