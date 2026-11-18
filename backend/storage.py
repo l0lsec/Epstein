@@ -49,7 +49,9 @@ _SERVICE = "s3"
 # Presigned GET URLs are signed against a time bucket so that every viewer in the same
 # window gets the identical URL: browsers and Cloudflare can then reuse cached bytes.
 _SIGN_WINDOW_S = 3600
-_URL_LIFETIME_S = 3 * 3600  # always valid for at least 2h after it is handed out
+# Cloudflare raises the redirect's browser cache to 4h (Browser Cache TTL), so a link
+# must stay valid well past that: at least 11h after it is handed out.
+_URL_LIFETIME_S = 12 * 3600
 
 _base_path: Optional[Path] = None
 _cache_dir: Optional[Path] = None
