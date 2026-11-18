@@ -3630,7 +3630,8 @@ class VectorStore:
         self._embedding_count = 0
         # The matrix and the model load lazily on the first search. Without these locks,
         # every search that arrives during that first load starts its own load: on a cold
-        # start that meant several 1.6 GB matrix copies at once (12+ GB) and model errors.
+        # start that meant several 1.6 GB matrix copies at once and failed searches
+        # (concurrent model loads raise meta-tensor errors).
         self._matrix_lock = threading.Lock()
         self._model_lock = threading.Lock()
 
