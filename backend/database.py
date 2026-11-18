@@ -3628,7 +3628,12 @@ class VectorStore:
         self._embeddings_matrix = None
         self._embeddings_norms = None
         self._embedding_count = 0
-        
+        # The matrix and the model load lazily on the first search. Without these locks,
+        # every search that arrives during that first load starts its own load: on a cold
+        # start that meant several 1.6 GB matrix copies at once (12+ GB) and model errors.
+        self._matrix_lock = threading.Lock()
+        self._model_lock = threading.Lock()
+
         self._load()
     
     def _load(self):
@@ -3648,6 +3653,12 @@ class VectorStore:
         """Lazy-load the embeddings matrix on first use."""
         if self._embeddings_matrix is not None:
             return True
+        with self._matrix_lock:
+            return self._load_matrix_locked()
+
+    def _load_matrix_locked(self):
+        if self._embeddings_matrix is not None:
+            return True  # another request loaded it while this one waited
         if not self.embeddings_file.exists():
             return False
         try:
@@ -3681,6 +3692,12 @@ class VectorStore:
     
     def _get_model(self):
         """Lazy load the embedding model with GPU support"""
+        if self.model is not None:
+            return self.model
+        with self._model_lock:
+            return self._load_model_locked()
+
+    def _load_model_locked(self):
         if self.model is None:
             try:
                 from sentence_transformers import SentenceTransformer
